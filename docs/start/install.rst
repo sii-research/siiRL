@@ -31,7 +31,8 @@ We provide prebuilt python wheels for Linux. Install siiRL with the following co
 
 .. code:: bash
 
-    pip install siirl
+    # Install siiRL with vLLM
+    pip install siirl[vllm]
 
     pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
     pip install flashinfer-python -i https://flashinfer.ai/whl/cu124/torch2.6/
@@ -46,17 +47,6 @@ We recommend to use docker images for convenience. However, if your environment 
 Install dependencies
 ::::::::::::::::::::
 
-.. note::
-
-    We recommend to use a fresh new conda environment to install siirl and its dependencies.
-
-    **Notice that the inference frameworks often strictly limit your pytorch version and will directly override your installed pytorch if not paying enough attention.**
-
-    As a countermeasure, it is recommended to install inference frameworks first with the pytorch they needed. For vLLM, if you hope to use your existing pytorch,
-    please follow their official instructions
-    `Use an existing PyTorch installation <https://docs.vllm.ai/en/latest/getting_started/installation/gpu.html#build-wheel-from-source>`_ .
-
-
 1. First of all, to manage environment, we recommend using conda:
 
 .. code:: bash
@@ -66,6 +56,10 @@ Install dependencies
 
 2. Install python packages
 
+.. note::
+    The following commands are an example for an environment with CUDA 12.4.
+    If you are using a different CUDA version, you must adjust the package versions and index URLs accordingly, especially for torch, flashinfer, and flash-attn.
+    
 .. code:: bash
 
     pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
@@ -81,8 +75,6 @@ Install dependencies
 .. code:: bash
 
     pip install vllm==0.8.5.post1
-    pip install 'sglang[all]==0.4.6.post5'
-
 
 Install siirl
 ::::::::::::::
@@ -97,19 +89,3 @@ own post-training jobs.
    cd siirl
    pip install -e .
 
-
-Post-installation
-:::::::::::::::::
-
-Please make sure that the installed packages are not overridden during the installation of other packages.
-
-The packages worth checking are:
-
-- **torch** and torch series
-- **vLLM**
-- **SGLang**
-- **pyarrow**
-- **tensordict**
-- **nvidia-cudnn-cu12**
-
-If you encounter issues about package versions during running siirl, please update the outdated ones.
