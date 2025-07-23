@@ -150,7 +150,7 @@ We are continuously working to improve the performance, efficiency, and scalabil
 
 * **[ ]** Expanding Hardware Support.
 
-<!-- We welcome community contributions! Please see our [Contributing Guide](CONTRIBUTING.md) to get started. -->
+We welcome community contributions! Please see our [Contributing Guide](CONTRIBUTING.md) to get started.
 
 ---
 
