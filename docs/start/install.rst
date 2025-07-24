@@ -34,7 +34,7 @@ We provide prebuilt python wheels for Linux. Install siiRL with the following co
     # Install siiRL with vLLM
     pip install siirl[vllm]
 
-    pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+    # Then, install required high-performance dependencies for siiRL
     pip install flashinfer-python -i https://flashinfer.ai/whl/cu124/torch2.6/
     pip install flash-attn==2.7.3 --no-build-isolation   
 
