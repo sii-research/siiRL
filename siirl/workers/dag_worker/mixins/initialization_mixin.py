@@ -1,4 +1,5 @@
 # Copyright (c) 2025, Shanghai Innovation Institute. All rights reserved.
+# Copyright (c) 2025, Infrawaves. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -239,10 +240,17 @@ class InitializationMixin:
 
             actor_cls = AsyncActorRolloutRefWorker if self.config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
             return {NodeRole.ACTOR: actor_cls, NodeRole.ROLLOUT: actor_cls, NodeRole.REFERENCE: actor_cls, NodeRole.CRITIC: CriticWorker, NodeRole.REWARD: RewardModelWorker}
-        elif strategy == DAGConstants.MEGATRON_STRATEGY:
-            from siirl.workers.megatron_workers import ActorRolloutRefWorker, CriticWorker, RewardModelWorker
+        elif strategy in DAGConstants.MEGATRON_STRATEGYS:
+            from siirl.workers.megatron_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker, RewardModelWorker
 
-            return {NodeRole.ACTOR: ActorRolloutRefWorker, NodeRole.ROLLOUT: ActorRolloutRefWorker, NodeRole.REFERENCE: ActorRolloutRefWorker, NodeRole.CRITIC: CriticWorker, NodeRole.REWARD: RewardModelWorker}
+            # TODO(Ping Zhang): support async mode for Megatron backend, currently we only support sync mode.
+            actor_rollout_ref_cls = (
+                AsyncActorRolloutRefWorker
+                if self.config.actor_rollout_ref.rollout.mode == "async"
+                else ActorRolloutRefWorker
+            )
+
+            return {NodeRole.ACTOR: actor_rollout_ref_cls, NodeRole.ROLLOUT: actor_rollout_ref_cls, NodeRole.REFERENCE: actor_rollout_ref_cls, NodeRole.CRITIC: CriticWorker, NodeRole.REWARD: RewardModelWorker}
         raise NotImplementedError(f"Strategy '{strategy}' is not supported.")
 
     def _setup_role_worker_mapping(self):

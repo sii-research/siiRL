@@ -153,6 +153,19 @@ class RayTrainer:
         # For FSDP with sequence parallelism, padding must be removed to avoid hangs.
         if strategy == "fsdp" and sp_size > 1:
             assert use_remove_padding, f"Node {node.node_id} (Actor): When using SP (>1) with FSDP, enable `use_remove_padding` in the relevant model config."
+        
+        # Megatron strategy has its own sequence parallelism implementation
+        if strategy == "megatron":
+            logger.debug(f"Node {node.node_id} (Actor): Using Megatron strategy - sequence parallelism handled internally")
+            # Basic validation for Megatron parameters
+            if hasattr(actor_conf, 'megatron'):
+                megatron_conf = actor_conf.megatron
+                tp_size = megatron_conf.tensor_model_parallel_size
+                pp_size = megatron_conf.pipeline_model_parallel_size
+                assert tp_size >= 1, f"Node {node.node_id} (Actor): tensor_model_parallel_size must be >= 1, got {tp_size}"
+                assert pp_size >= 1, f"Node {node.node_id} (Actor): pipeline_model_parallel_size must be >= 1, got {pp_size}"
+                logger.debug(f"Node {node.node_id} (Actor): Megatron config - TP: {tp_size}, PP: {pp_size}")
+
 
     def validate_reference_config(self, node: Node, reference_conf: RefArguments, use_remove_padding: bool = False) -> None:
         """Validates configuration parameters specific to a Reference Policy inference node."""
@@ -218,6 +231,18 @@ class RayTrainer:
         # For FSDP with sequence parallelism, padding must be removed.
         if strategy == "fsdp" and sp_size > 1:
             assert use_remove_padding, f"Node {node.node_id} (Critic): When using SP (>1) with FSDP, enable `use_remove_padding` in critic.model."
+        
+        # Megatron strategy has its own sequence parallelism implementation
+        if strategy == "megatron":
+            logger.debug(f"Node {node.node_id} (Critic): Using Megatron strategy - sequence parallelism handled internally")
+            # Basic validation for Megatron parameters
+            if hasattr(critic_conf, 'megatron'):
+                megatron_conf = critic_conf.megatron
+                tp_size = megatron_conf.tensor_model_parallel_size
+                pp_size = megatron_conf.pipeline_model_parallel_size
+                assert tp_size >= 1, f"Node {node.node_id} (Critic): tensor_model_parallel_size must be >= 1, got {tp_size}"
+                assert pp_size >= 1, f"Node {node.node_id} (Critic): pipeline_model_parallel_size must be >= 1, got {pp_size}"
+                logger.debug(f"Node {node.node_id} (Critic): Megatron config - TP: {tp_size}, PP: {pp_size}")
 
     def validate_reward_model_config(self, node: Node, reward_model_conf: RewardModelArguments, use_remove_padding: bool = False):
         """Validates configuration parameters specific to a Reward Model training node."""

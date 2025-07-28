@@ -1,4 +1,5 @@
 # Copyright 2024 Bytedance Ltd. and/or its affiliates
+# Copyright (c) 2025, Infrawaves. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -72,9 +73,10 @@ class ActorRolloutRefWorker(MegatronWorker):
     or a hybrid engine based on the config.rollout
     """
 
-    def __init__(self, config: DictConfig, role: str):
+    def __init__(self, config: DictConfig, role: str, process_group=None):
         super().__init__()
         self.config = config
+        # self.process_group = process_group
 
         # NOTE(sgm): We utilize colocate WorkerGroup by default.
         # As a result, Workers for different model share the same process.
@@ -83,9 +85,20 @@ class ActorRolloutRefWorker(MegatronWorker):
         # 1, users should disable WorkerDict; 2.assign different ResourcePool to different models,
         # 3. and apply the following patch in ray==2.10, https://github.com/ray-project/ray/pull/44385
         if not torch.distributed.is_initialized():
+            # Use LOCAL_RANK for device setting, but respect process group for distributed ops
             rank = int(os.environ["LOCAL_RANK"])
             torch.distributed.init_process_group(backend=get_nccl_backend())
             get_torch_device().set_device(rank)
+
+            # # Store process group info for Megatron
+            # if self.process_group is not None:
+            #     self.group_world_size = torch.distributed.get_world_size(group=self.process_group)
+            #     self.group_rank = torch.distributed.get_rank(group=self.process_group)
+            #     logger.debug(f"Megatron ActorRolloutRefWorker: Using process group with world_size={self.group_world_size}, rank={self.group_rank}")
+            # else:
+            #     self.group_world_size = torch.distributed.get_world_size()
+            #     self.group_rank = torch.distributed.get_rank()
+            #     logger.debug(f"Megatron ActorRolloutRefWorker: Using global process group with world_size={self.group_world_size}, rank={self.group_rank}")
 
             if self.config.actor.megatron.sequence_parallel:
                 os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
@@ -578,9 +591,10 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
 
 
 class CriticWorker(MegatronWorker):
-    def __init__(self, config):
+    def __init__(self, config, process_group=None):
         super().__init__()
         self.config = config
+        # self.process_group = process_group
 
         # NOTE(sgm): We utilize colocate WorkerGroup by default.
         # As a result, Workers for different model share the same process.
@@ -589,9 +603,20 @@ class CriticWorker(MegatronWorker):
         # 1, users should disable WorkerDict; 2.assign different ResourcePool to different models,
         # 3. and apply the following patch in ray==2.10, https://github.com/ray-project/ray/pull/44385
         if not torch.distributed.is_initialized():
+            # Use LOCAL_RANK for device setting, but respect process group for distributed ops
             rank = int(os.environ["LOCAL_RANK"])
             torch.distributed.init_process_group(backend=get_nccl_backend())
             get_torch_device().set_device(rank)
+
+            # # Store process group info for Megatron integration
+            # if self.process_group is not None:
+            #     self.group_world_size = torch.distributed.get_world_size(group=self.process_group)
+            #     self.group_rank = torch.distributed.get_rank(group=self.process_group)
+            #     logger.debug(f"Megatron CriticWorker: Using process group with world_size={self.group_world_size}, rank={self.group_rank}")
+            # else:
+            #     self.group_world_size = torch.distributed.get_world_size()
+            #     self.group_rank = torch.distributed.get_rank()
+            #     logger.debug(f"Megatron CriticWorker: Using global process group with world_size={self.group_world_size}, rank={self.group_rank}")
 
             if self.config.megatron.sequence_parallel:
                 os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
@@ -779,9 +804,10 @@ class RewardModelWorker(MegatronWorker):
     Note that we only implement the reward model that is subclass of AutoModelForSequenceClassification.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, process_group=None):
         super().__init__()
         self.config = config
+        # self.process_group = process_group
 
         # NOTE(sgm): We utilize colocate WorkerGroup by default.
         # As a result, Workers for different model share the same process.
@@ -790,9 +816,20 @@ class RewardModelWorker(MegatronWorker):
         # 1, users should disable WorkerDict; 2.assign different ResourcePool to different models,
         # 3. and apply the following patch in ray==2.10, https://github.com/ray-project/ray/pull/44385
         if not torch.distributed.is_initialized():
+            # Use LOCAL_RANK for device setting, but respect process group for distributed ops
             rank = int(os.environ["LOCAL_RANK"])
             torch.distributed.init_process_group(backend=get_nccl_backend())
             get_torch_device().set_device(rank)
+
+            # # Store process group info for Megatron integration
+            # if self.process_group is not None:
+            #     self.group_world_size = torch.distributed.get_world_size(group=self.process_group)
+            #     self.group_rank = torch.distributed.get_rank(group=self.process_group)
+            #     logger.debug(f"Megatron RewardModelWorker: Using process group with world_size={self.group_world_size}, rank={self.group_rank}")
+            # else:
+            #     self.group_world_size = torch.distributed.get_world_size()
+            #     self.group_rank = torch.distributed.get_rank()
+            #     logger.debug(f"Megatron RewardModelWorker: Using global process group with world_size={self.group_world_size}, rank={self.group_rank}")
 
             if self.config.megatron.sequence_parallel:
                 os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"

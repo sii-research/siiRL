@@ -1,0 +1,271 @@
+# Megatron Backend Configuration for siiRL PPO Training
+# This template demonstrates how to configure siiRL to use Megatron as training backend
+# for scalable training of large language models with 3D parallelism
+
+# the data config is the same as ppo_dag_trainer.yaml
+data:
+  tokenizer: null
+  use_shm: False
+  train_files: ~/data/rlhf/gsm8k/train.parquet
+  val_files: ~/data/rlhf/gsm8k/test.parquet
+  prompt_key: prompt
+  reward_fn_key: data_source
+  max_prompt_length: 512
+  max_response_length: 512
+  train_batch_size: 1024
+  val_batch_size: null
+  return_raw_input_ids: False
+  return_raw_chat: False
+  return_full_prompt: False
+  shuffle: True
+  filter_overlong_prompts: False
+  filter_overlong_prompts_workers: 1
+  truncation: error
+  image_key: images
+  video_key: videos
+  auto_repeat: False
+  trust_remote_code: False
+  num_loader_workers: 8
+  force_on_the_fly: False
+  processor:
+    image_max_pixels: 589824 # 768 * 768
+    image_min_pixels: 1024 # 32 * 32
+    video_max_pixels: 65536 # 256 * 256
+    video_min_pixels: 256 # 16 * 16
+    video_fps: 2.0
+    video_maxlen: 128
+  custom_cls:
+      path: null
+      name: null
+
+actor_rollout_ref:
+  hybrid_engine: True
+  model:
+    path: ~/models/deepseek-llm-7b-chat
+    use_shm: False
+    external_lib: null
+    override_config: { }
+    enable_gradient_checkpointing: True
+    enable_activation_offload: False
+    use_remove_padding: False
+    lora_rank: 0  # TODO(Ping Zhang): LoRA not currently supported with Megatron backend, we will revisit this later
+    lora_alpha: 16
+    target_modules: all-linear
+    use_liger: False
+    use_fused_kernels: False
+    trust_remote_code: False
+  actor:
+    strategy: megatron  # Use Megatron as training backend
+    ppo_mini_batch_size: 256
+    ppo_micro_batch_size: null # will be deprecated, use ppo_micro_batch_size_per_gpu
+    ppo_micro_batch_size_per_gpu: null
+    use_dynamic_bsz: False
+    ppo_max_token_len_per_gpu: 16384
+    grad_clip: 1.0
+    clip_ratio: 0.2
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.2
+    clip_ratio_c: 3.0
+    loss_agg_mode: "token-mean"
+    entropy_coeff: 0
+    use_kl_loss: False
+    use_torch_compile: True
+    kl_loss_coef: 0.001
+    kl_loss_type: low_var_kl
+    use_cpgd_loss: False
+    policy_drift_coeff: 0.0
+    ppo_epochs: 1
+    shuffle: False
+    ulysses_sequence_parallel_size: 1  # Not used with Megatron - use megatron.sequence_parallel instead
+    checkpoint:
+      contents: ['model', 'optimizer', 'extra']
+    optim:
+      lr: 1e-6
+      lr_warmup_steps: -1
+      lr_warmup_steps_ratio: 0.
+      min_lr_ratio: 0.0
+      num_cycles: 0.5
+      warmup_style: constant
+      total_training_steps: -1
+      weight_decay: 0.01
+    # Megatron-specific configuration
+    megatron:
+      tensor_model_parallel_size: 2  # Tensor parallelism across 2 GPUs
+      pipeline_model_parallel_size: 2  # Pipeline parallelism across 2 stages  
+      virtual_pipeline_model_parallel_size: null  # Optional: virtual pipeline stages
+      sequence_parallel: True  # Enable Megatron's sequence parallelism
+      use_distributed_optimizer: True  # Use Megatron's distributed optimizer (ZeRO-1 style)
+      param_dtype: "bfloat16"  # Parameter data type
+      seed: 1  # Random seed for reproducibility
+      # Optional advanced settings:
+      context_parallel_size: 1  # Context parallelism (for very long sequences)
+      expert_model_parallel_size: 1  # Expert parallelism for MoE models, i.e., EP
+      expert_tensor_parallel_size: 1  # Expert tensor parallelism for MoE models, i.e., ETP
+      # Memory management (optional)
+      # TODO(Ping Zhang): we will revisit and optimize this later
+      param_offload: False  # Offload parameters to CPU
+      grad_offload: False   # Offload gradients to CPU 
+      optimizer_offload: False  # Offload optimizer states to CPU
+  ref:
+    strategy: megatron  # Reference policy also uses Megatron during forward pass
+    log_prob_micro_batch_size_per_gpu: null
+    megatron:
+      tensor_model_parallel_size: 2
+      pipeline_model_parallel_size: 2
+      virtual_pipeline_model_parallel_size: null
+      sequence_parallel: True
+      use_distributed_optimizer: False  # Reference doesn't need optimizer
+      param_dtype: "bfloat16"
+      seed: 1
+      context_parallel_size: 1
+      expert_model_parallel_size: 1
+      expert_tensor_parallel_size: 1
+      param_offload: False  # TODO(Ping Zhang): we will revisit and optimize this later
+  rollout:
+    # Rollout configuration - uses vLLM with tensor parallelism
+    name: vllm  # Currently only vLLM is supported with Megatron backend
+    mode: sync  # sync or async
+    n: 4  # Number of responses per prompt, i.e., rollout.n. Mainly for algorithms like GRPO.
+    tensor_model_parallel_size: 2  # Should match actor's TP size for weight sharing
+    temperature: 0.7
+    max_new_tokens: 512
+    log_prob_micro_batch_size: null
+    log_prob_micro_batch_size_per_gpu: null
+    log_prob_use_dynamic_bsz: False
+    log_prob_max_token_len_per_gpu: 16384
+    gpu_memory_utilization: 0.7
+    enable_chunked_prefill: False
+    enforce_eager: False
+    free_cache_engine: False
+
+# Critic configuration
+critic:
+  strategy: megatron  # Critic also uses Megatron backend
+  ppo_mini_batch_size: 256
+  ppo_micro_batch_size: null
+  ppo_micro_batch_size_per_gpu: null
+  use_dynamic_bsz: False
+  ppo_max_token_len_per_gpu: 16384
+  forward_max_token_len_per_gpu: 16384
+  forward_micro_batch_size: null
+  forward_micro_batch_size_per_gpu: null
+  ppo_epochs: 1
+  shuffle: False
+  ulysses_sequence_parallel_size: 1  # Not used with Megatron
+  cliprange_value: 0.2
+  loss_agg_mode: "token-mean"
+  rollout_n: 4  # Should match rollout.n
+  optim:
+    lr: 1e-5  # Typically higher than actor LR
+    lr_warmup_steps: -1
+    lr_warmup_steps_ratio: 0.
+    min_lr_ratio: 0.0
+    num_cycles: 0.5
+    warmup_style: constant
+    total_training_steps: -1
+    weight_decay: 0.01
+  checkpoint:
+    contents: ['model', 'optimizer', 'extra']
+  model:
+    path: ~/models/deepseek-llm-7b-chat  # Can be same as actor or different
+    use_shm: False
+    external_lib: null
+    override_config: { }
+    enable_gradient_checkpointing: True
+    enable_activation_offload: False
+    lora_rank: 0  # LoRA not currently supported with Megatron
+    trust_remote_code: False
+  # Megatron-specific configuration for critic
+  megatron:
+    tensor_model_parallel_size: 2  # Should match available GPUs
+    pipeline_model_parallel_size: 2
+    virtual_pipeline_model_parallel_size: null
+    sequence_parallel: True
+    use_distributed_optimizer: True
+    param_dtype: "bfloat16"
+    seed: 1
+    context_parallel_size: 1
+    expert_model_parallel_size: 1
+    expert_tensor_parallel_size: 1
+    param_offload: False
+    grad_offload: False
+    optimizer_offload: False
+
+# Reward model configuration (optional)
+reward_model:
+  enable: False  # Set to True to enable reward model
+  strategy: megatron
+  model:
+    path: ~/models/reward-model-7b
+    use_shm: False
+    trust_remote_code: False
+  micro_batch_size_per_gpu: null
+  use_dynamic_bsz: False
+  forward_max_token_len_per_gpu: 16384
+  megatron:
+    tensor_model_parallel_size: 2
+    pipeline_model_parallel_size: 1  # Reward models typically don't need PP
+    sequence_parallel: False
+    use_distributed_optimizer: False
+    param_dtype: "bfloat16"
+    seed: 1
+
+# Training configuration
+trainer:
+  project_name: megatron_ppo_experiment
+  experiment_name: deepseek_7b_megatron
+  # Important: Ensure total parallelism fits available GPUs
+  # For this config: TP=2, PP=2, so each model needs 4 GPUs
+  # With 4 total GPUs and hybrid_engine=True (actor+rollout), this fits perfectly
+  balance_batch: True
+  total_epochs: 30
+  total_training_steps: null
+  logger: [ 'console', 'wandb' ]
+  log_val_generations: 0
+  rollout_data_dir: null # directory for logging the rollout data, no dump if null
+  validation_data_dir: null # directory for logging the validation data, no dump if null
+  nnodes: 1
+  n_gpus_per_node: 8
+  save_freq: -1
+  # auto: find the last ckpt to resume. If can't find, start from scratch
+  resume_mode: auto # or disable or resume_path if resume_from_path is set
+  resume_from_path: null
+  val_before_train: True
+  test_freq: -1
+  critic_warmup: 0
+  default_hdfs_dir: null
+  del_local_ckpt_after_load: False
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  max_actor_ckpt_to_keep: null
+  max_critic_ckpt_to_keep: null
+  # The timeout for ray worker group to wait for the register center to be ready
+  ray_wait_register_center_timeout: 300
+  device: cuda
+
+# Algorithm configuration  
+algorithm:
+  adv_estimator: gae  # GAE for PPO, GRPO for GRPO
+  gamma: 0.99
+  gae_lambda: 0.95
+  use_kl_in_reward: False
+  kl_ctrl:
+    kl_coef: 0.001
+    kl_target: 0.01
+    horizon: 10000
+    controller: pid
+    proportional: 0.1
+    integral: 0.001
+    derivative: 0.0001
+
+# DAG configuration
+dag:
+  workflow_path: null  # Will use default PPO workflow
+  env_enable: False
+  enable_perf: False
+  environment_path: null
+  backend_threshold: 512  # World size threshold for backend selection
+
+# Ray configuration
+ray_init:
+  num_cpus: null  # Let Ray auto-detect
+  timeline_json_file: null

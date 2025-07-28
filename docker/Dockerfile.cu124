@@ -46,6 +46,9 @@ RUN git clone https://github.com/NVIDIA/apex.git \
 RUN pip install 'sglang[all]==0.4.6.post5'    \
     && pip install xgrammar==0.1.18
 
+# Install Megatron-LM
+RUN pip3 install --no-deps --no-cache-dir git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.12.2
+
 # siirl
 RUN git clone --recursive https://github.com/sii-research/siiRL.git \
     && cd siiRL \
