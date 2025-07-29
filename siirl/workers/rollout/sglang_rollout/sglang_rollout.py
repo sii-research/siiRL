@@ -24,7 +24,12 @@ from copy import deepcopy
 from json import JSONDecodeError
 from typing import Any, List, Optional, Tuple, Union
 from uuid import uuid4
-
+import pickle
+import socket
+import threading
+import ray
+import zmq
+from filelock import FileLock
 import numpy as np
 import sglang.srt.entrypoints.engine
 import torch
@@ -54,22 +59,28 @@ from torch.nn.utils.rnn import pad_sequence
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin
 
 from siirl import DataProto
-# from siirl.interactions.base import BaseInteraction
-# from siirl.interactions.utils.interaction_registry import initialize_interactions_from_config
+
+from siirl.multiturn.interactions.base import BaseInteraction
+from siirl.multiturn.interactions.utils.interaction_registry import initialize_interactions_from_config
 from siirl.third_party.sglang import parallel_state as sglang_ps
-# from siirl.tools.base_tool import BaseTool
-# from siirl.tools.schemas import OpenAIFunctionCallSchema, OpenAIFunctionParsedSchema, OpenAIFunctionToolCall
-# from siirl.tools.utils.tool_registry import initialize_tools_from_config
+from siirl.multiturn.tools.base_tool import BaseTool
+from siirl.multiturn.tools.schemas import OpenAIFunctionCallSchema, OpenAIFunctionParsedSchema, OpenAIFunctionToolCall
+from siirl.multiturn.tools.utils.tool_registry import initialize_tools_from_config
+
+
 from siirl.utils.extras.net_utils import is_ipv6
 from siirl.utils.debug import GPUMemoryLogger
 from siirl.utils.model_utils.torch_functional import get_response_mask, pad_sequence_to_length
 from siirl.workers.rollout.base import BaseRollout
-# from siirl.workers.rollout.schemas import (
-#     AsyncRolloutRequest,
-#     AsyncRolloutRequestStateEnum,
-#     FinishReasonTypeEnum,
-#     Message,
-# )
+
+
+from siirl.workers.rollout.schemas import (
+    AsyncRolloutRequest,
+    AsyncRolloutRequestStateEnum,
+    FinishReasonTypeEnum,
+    Message,
+)
+
 from siirl.utils.params import RolloutArguments
 from siirl.workers.rollout.sglang_rollout.utils import broadcast_pyobj
 from loguru import logger
@@ -286,7 +297,7 @@ class SGLangRollout(BaseRollout):
             self._sgl_tools,
             self._function_call_parser,
         ) = self._initialize_tools(config, processing_class)
-        # self.interaction_map: dict[str, BaseInteraction] = self._initialize_interactions(config)
+        self.interaction_map: dict[str, BaseInteraction] = self._initialize_interactions(config)
         # If turn on `free_cache_engine`, SGLang engine's KV cache
         # will be freed after each `generate_sequences` call.
         logger.info(
@@ -305,6 +316,8 @@ class SGLangRollout(BaseRollout):
 
         self.processing_class = processing_class
 
+        if self.config.mode == 'async':
+            self.address = self._init_zeromq()
         try:
             # This is when processing_class is a tokenizer
             self.pad_token_id = self.processing_class.pad_token_id
@@ -399,10 +412,12 @@ class SGLangRollout(BaseRollout):
             )
 
         # currently max_assistant_turns stand for max number of tool calls
-        # if self.config.multi_turn.max_assistant_turns is None:
-        #     self.config.multi_turn.max_assistant_turns = self.config.max_model_len // 3
-        # if self.config.multi_turn.max_user_turns is None:
-        #     self.config.multi_turn.max_user_turns = self.config.max_model_len // 3
+
+        if self.config.multi_turn.max_assistant_turns is None:
+            self.config.multi_turn.max_assistant_turns = self.config.max_model_len // 3
+        if self.config.multi_turn.max_user_turns is None:
+            self.config.multi_turn.max_user_turns = self.config.max_model_len // 3
+
 
     def _init_inference_engine(self, trust_remote_code, actor_module, port):
         # initialize the inference engine
@@ -472,22 +487,20 @@ class SGLangRollout(BaseRollout):
             repetition_penalty=1.0,
         )
         # supporting adding any sampling params from the config file
-        print('config', self.config)
-        kwargs['temperature'] = self.config.temperature
-        kwargs['top_k'] = self.config.top_k
-        kwargs['top_p'] = self.config.top_p
+        dictConfig = self.config.to_dict()
+        for k in dictConfig.keys():
+            if hasattr(SamplingParams(), str(k)) or "stop" in str(k):
+                kwargs[k] = dictConfig.get(k)
         kwargs['n'] = 1
         self.sampling_params = kwargs
-
+        
     def _initialize_tools(self, config, processing_class):
         """Initialize tools from configuration.
-
         Args:
             config: Configuration object containing tool-related settings,
                     specifically `config.multi_turn.tool_config_path`.
             tokenizer: The tokenizer instance used for parsing tool calls from
                        the model's generated text.
-
         Returns:
             tuple: A tuple containing:
                 - tool_schemas (list[dict]): OpenAI-formatted JSON schemas
@@ -699,7 +712,6 @@ class SGLangRollout(BaseRollout):
 
         # Update with any additional kwargs
         request_sampling_params.update(kwargs)
-        print("request_sampling_params ", request_sampling_params)
         if self._tp_rank == 0:
             loop = asyncio.get_event_loop()
             output = loop.run_until_complete(
@@ -727,12 +739,13 @@ class SGLangRollout(BaseRollout):
 
         response = out[0].to(idx.device)
         rollout_log_probs = None
-        if False:# self.config.calculate_log_probs:
+
+        if self.config.calculate_log_probs:
             rollout_log_probs = out[1].to(idx.device)
 
         if response.shape[1] < self.config.response_length:
             response = pad_sequence_to_length(response, self.config.response_length, self.pad_token_id)
-            if False: #self.config.calculate_log_probs:
+            if self.config.calculate_log_probs:
                 rollout_log_probs = pad_sequence_to_length(
                     rollout_log_probs, self.config.response_length, self.pad_token_id
                 )
@@ -767,12 +780,12 @@ class SGLangRollout(BaseRollout):
             },
             batch_size=batch_size,
         )
-        if False: #self.config.calculate_log_probs:
+        if self.config.calculate_log_probs:
             # we will recompute old log prob with actor
             batch["rollout_log_probs"] = rollout_log_probs
 
         # free cache engine
-        if self.inference_engine is not None:
+        if self.inference_engine is not None and self._tp_rank == 0:
             loop = asyncio.get_event_loop()
             loop.run_until_complete(self.inference_engine.flush_cache())
 
@@ -793,7 +806,6 @@ class SGLangRollout(BaseRollout):
         current_turns = 0
         user_turns = 0
         user_turn_rewards = []
-
         # Create request-level sampling parameters
         request_sampling_params = self.sampling_params.copy()
         if not do_sample:
@@ -1362,11 +1374,15 @@ class SGLangRollout(BaseRollout):
         # this function is left for uniform train-inference resharding
 
     async def generate(
-        self, prompt_ids: torch.Tensor, sampling_params: dict[str, Any], request_id: str
+        self, *args, **kwargs
     ) -> torch.Tensor:
+        # prompt_ids: torch.Tensor, sampling_params: dict[str, Any], request_id: str
+        prompt_ids = kwargs['prompt_ids']
+        sampling_params = kwargs['sampling_params']
+        request_id = kwargs['request_id']
         request_sampling_params = self.sampling_params.copy()
         request_sampling_params.update(sampling_params)
-        output = await self._handle_engine_generate(prompt_ids, request_sampling_params)
+        output = await self._handle_engine_generate(prompt_ids, request_sampling_params)      
         return output["output_ids"]
 
     async def wake_up(self):
@@ -1381,3 +1397,66 @@ class SGLangRollout(BaseRollout):
             return
         await self.sharding_manager.sleep()
         self.is_sleep = True
+
+    # used for async mode
+    
+    def _init_zeromq(self) -> str:
+        tensor_parallel_size = self.config.tensor_model_parallel_size
+
+        # single node: ipc, multi nodes: tcp
+        local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
+        socket_type = "ipc" if tensor_parallel_size <= local_world_size else "tcp"
+
+        # File lock to prevent multiple workers listen to same port
+        with FileLock("/tmp/siirl_vllm_zmq.lock"):
+            if socket_type == "ipc":
+                pid = os.getpid()
+                address = f"ipc:///tmp/siirl_vllm_zmq_{pid}.ipc"
+            else:
+                ip, port = self._get_free_port()
+                address = f"tcp://{ip}:{port}"
+            context = zmq.Context()
+            self.socket = context.socket(zmq.REP)
+            self.socket.bind(address)
+
+        self.loop_thread = threading.Thread(target=self._loop_forever)
+        self.loop_thread.start()
+        return address
+
+    def _get_free_port(self):
+        ip = ray._private.services.get_node_ip_address()
+        with socket.socket() as sock:
+            sock.bind(("", 0))
+            port = sock.getsockname()[1]
+        return ip, port
+
+    def _loop_forever(self):
+        while True:
+            message = self.socket.recv()
+            method, args, kwargs = pickle.loads(message)
+            result = self.execute_method(method, *args, **kwargs)
+            self.socket.send(pickle.dumps(result))
+    def get_zeromq_address(self):
+        return self.address
+     
+    def execute_method(self, method: Union[str, bytes], *args, **kwargs):
+        if method == "generate":
+            loop = ensure_event_loop()
+            return loop.run_until_complete(self.generate(*args, **kwargs))
+        elif method == "sleep":
+            loop = ensure_event_loop()
+            return loop.run_until_complete(self.sleep())
+        elif method == "wake_up":
+            loop = ensure_event_loop()
+            return loop.run_until_complete(self.wake_up())
+        else:
+            assert False, f"{method} has not implement"
+            
+            
+def ensure_event_loop():
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop

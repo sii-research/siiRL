@@ -73,7 +73,6 @@ def create_device_mesh_from_group(
     process_group: ProcessGroup,
     fsdp_size: int = 1,
     sp_size: int = 1,
-    device_type: str = "cuda",
 ) -> DeviceMesh:
     """Creates a DeviceMesh from a process group for specific parallel strategies.
 
@@ -88,7 +87,6 @@ def create_device_mesh_from_group(
 
     Args:
         process_group (ProcessGroup): The base process group for the mesh.
-        device_type (str): The device type, e.g., "cuda". Defaults to "cuda".
         fsdp_size (int): The size of the FSDP dimension. Activates FSDP modes.
                          Defaults to 1.
         sp_size (int): The size of the Sequence Parallel dimension. Activates [dp, sp]
@@ -110,6 +108,7 @@ def create_device_mesh_from_group(
 
     import torch.distributed
 
+    device_type = get_device_name()
     group_size = torch.distributed.get_world_size(group=process_group)
     ranks_in_group = torch.distributed.get_process_group_ranks(process_group)
 
@@ -1492,3 +1491,11 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
         await self.rollout.sleep()
         # return something to block the caller
         return True
+    
+    def set_rollout_sharding_manager(self, sharding_manager):
+        super().set_rollout_sharding_manager(sharding_manager)
+        self.rollout.sharding_manager = sharding_manager
+                
+    def get_zeromq_address(self):
+        return self.rollout.get_zeromq_address()
+

@@ -26,6 +26,13 @@ When working with Megatron:
 - After inference, all the parameters that doesn't belong to this pp rank is freed.
 """
 
+
+
+import pickle
+import socket
+import threading
+import ray
+import zmq
 import csv
 import os
 import time
@@ -42,18 +49,25 @@ from packaging import version as vs
 from typing import Any, Dict, List, Union
 from zoneinfo import ZoneInfo
 
+
+from filelock import FileLock
+from omegaconf import DictConfig, OmegaConf
+from types import MethodType
+
 from loguru import logger
 from tensordict import TensorDict
 from vllm import LLM, SamplingParams
 from vllm.distributed import parallel_state as vllm_ps
 from vllm.lora.request import LoRARequest
 from vllm.worker.worker_base import WorkerWrapperBase
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 from siirl import DataProto
 from siirl.utils.debug import GPUMemoryLogger
 from siirl.utils.model_utils.torch_functional import get_response_mask, pad_2d_list_to_length
 from siirl.utils.params import RolloutArguments
 from siirl.workers.rollout.base import BaseRollout
+from siirl.utils.extras.device import is_cuda_available
 
 # TODO
 # 1. support pp in vllm
@@ -147,7 +161,7 @@ class vLLMRollout(BaseRollout):
             engine_kwargs["limit_mm_per_prompt"] = {"image": config.limit_images}
 
         vllm_version = version("vllm")
-        if vs.parse(vllm_version) >= vs.parse("0.9.0"):
+        if vs.parse(vllm_version) >= vs.parse("0.9.0") and is_cuda_available:
             logger.info(f"Add environment variable for vLLM version {vllm_version}")
             # This environment variable is mandatory due to an issue where PyTorch 2.7.0
             #   causes flashinfer to fail with the error `FlashInfer requires sm75+`.
@@ -159,12 +173,11 @@ class vLLMRollout(BaseRollout):
 
         self.inference_engine = LLM(
             model=model_path,
-            tokenizer=model_path,
             enable_sleep_mode=True,
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="external_launcher",
             dtype=config.dtype,
-            enforce_eager=False,
+            enforce_eager=config.enforce_eager,
             gpu_memory_utilization=config.gpu_memory_utilization,
             disable_custom_all_reduce=True,
             skip_tokenizer_init=False,
@@ -175,10 +188,11 @@ class vLLMRollout(BaseRollout):
             enable_chunked_prefill=config.enable_chunked_prefill,
             enable_prefix_caching=True,
             trust_remote_code=trust_remote_code,
-            seed=self.config.seed,
+            seed=config.seed,  # Use None for random seed to avoid identical outputs for repeated inputs
             **lora_kwargs,
             **engine_kwargs,
         )
+
 
         # Offload vllm model to reduce peak memory usage
         self.inference_engine.sleep(level=1)
@@ -195,11 +209,14 @@ class vLLMRollout(BaseRollout):
         # supporting adding any sampling params from the config file
         dictConfig = config.to_dict()
         for k in dictConfig.keys():
-            if hasattr(SamplingParams(), str(k)):
+            if hasattr(SamplingParams(), str(k)) and k != "seed":
                 kwargs[k] = dictConfig.get(k)
+
+        # kwargs["n"] = 1  # already repeat in ray_trainer
 
         logger.info(f"kwargs: {kwargs}")
         self.sampling_params = SamplingParams(**kwargs)
+
         if "internvl" in model_hf_config.model_type:
             stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|end|>"]
             stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
@@ -268,11 +285,12 @@ class vLLMRollout(BaseRollout):
 
         # ensure the type of `prompt_token_ids` passed to vllm is list[int]
         # https://github.com/volcengine/verl/pull/772
-        for input_data in vllm_inputs:
+        for i, input_data in enumerate(vllm_inputs):
             if isinstance(input_data["prompt_token_ids"], np.ndarray):
                 input_data["prompt_token_ids"] = input_data["prompt_token_ids"].tolist()
             elif not isinstance(input_data["prompt_token_ids"], list):
                 raise TypeError(f"prompt_token_ids must be a list or numpy array, got {type(input_data['prompt_token_ids'])}")
+
 
         prompt_lengths = []
         if self.enbale_perf:
@@ -283,6 +301,7 @@ class vLLMRollout(BaseRollout):
 
         do_sample = prompts.meta_info.get("do_sample", True)
         is_validate = prompts.meta_info.get("validate", False)
+
         if not do_sample:
             kwargs = {
                 "best_of": 1,
@@ -310,6 +329,7 @@ class vLLMRollout(BaseRollout):
 
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
+            logger.info(f"vllm generate sampling params: {self.sampling_params}")
             # if micro_batch_size is configured, split the batch into smaller chunks
             # and generate sequences for each chunk sequentially.
             if self.micro_batch_size > 0:
@@ -387,6 +407,14 @@ class vLLMRollout(BaseRollout):
                 # NOTE(linjunrong): for multi-turn https://github.com/volcengine/verl/pull/1037
                 if "tools_kwargs" in non_tensor_batch.keys():
                     non_tensor_batch["tools_kwargs"] = _repeat_interleave(non_tensor_batch["tools_kwargs"], self.sampling_params.n)
+                if "interaction_kwargs" in non_tensor_batch.keys():
+                    non_tensor_batch["interaction_kwargs"] = _repeat_interleave(
+                        non_tensor_batch["interaction_kwargs"], self.sampling_params.n
+                    )
+                if "raw_prompt" in non_tensor_batch.keys():
+                    non_tensor_batch["raw_prompt"] = _repeat_interleave(
+                        non_tensor_batch["raw_prompt"], self.sampling_params.n
+                    )
 
             seq = torch.cat([idx, response], dim=-1)
 
@@ -411,7 +439,7 @@ class vLLMRollout(BaseRollout):
                 "prompts": idx,
                 "responses": response,
                 "input_ids": seq,  # here input_ids become the whole sentences
-                "rollout_log_probs": rollout_log_probs,  # we will recompute old log prob with actor
+                'rollout_log_probs': rollout_log_probs,  # we will recompute old log prob with actor
                 "attention_mask": attention_mask,
                 "position_ids": position_ids,
             },
@@ -421,16 +449,75 @@ class vLLMRollout(BaseRollout):
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info=meta_info)
 
 
+
+# https://github.com/vllm-project/vllm/issues/13175
+def _monkey_patch_compute_logits(model, vocab_size: int):
+    original_compute_logits = model.compute_logits
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        logits = original_compute_logits(hidden_states, sampling_metadata)
+        logits[..., vocab_size:] = float("-inf")
+        return logits
+
+    model.compute_logits = MethodType(compute_logits, model)
+
 class vLLMAsyncRollout:
     """vLLMAsyncRollout is a thin wrapper of WorkerWrapperBase,
     which is engine in single worker process.
     """
+    def __init__(self, model_path: str, config: DictConfig, tokenizer, model_hf_config, **kwargs):
+        self.tokenizer = tokenizer
 
-    def __init__(self, *args, **kwargs):
         # Engine is deferred to be initialized in init_worker
+        self.config = config
         self.inference_engine: WorkerWrapperBase = None
         self.sharding_manager = None
         self.is_sleep = False
+        self.address = self._init_zeromq()
+
+    def _init_zeromq(self) -> str:
+        tensor_parallel_size = self.config.tensor_model_parallel_size
+
+        # single node: ipc, multi nodes: tcp
+        local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
+        socket_type = "ipc" if tensor_parallel_size <= local_world_size else "tcp"
+
+        # File lock to prevent multiple workers listen to same port
+        with FileLock("/tmp/siirl_vllm_zmq.lock"):
+            if socket_type == "ipc":
+                pid = os.getpid()
+                address = f"ipc:///tmp/siirl_vllm_zmq_{pid}.ipc"
+            else:
+                ip, port = self._get_free_port()
+                address = f"tcp://{ip}:{port}"
+            context = zmq.Context()
+            self.socket = context.socket(zmq.REP)
+            self.socket.bind(address)
+
+        self.loop_thread = threading.Thread(target=self._loop_forever)
+        self.loop_thread.start()
+        return address
+
+    def _get_free_port(self):
+        ip = ray._private.services.get_node_ip_address()
+        with socket.socket() as sock:
+            sock.bind(("", 0))
+            port = sock.getsockname()[1]
+        return ip, port
+
+    def _loop_forever(self):
+        while True:
+            message = self.socket.recv()
+            method, args, kwargs = pickle.loads(message)
+            result = self.execute_method(method, *args, **kwargs)
+            self.socket.send(pickle.dumps(result))
+
+    def get_zeromq_address(self):
+        return self.address
 
     def init_worker(self, all_kwargs: List[Dict[str, Any]]):
         """Initialize worker engine."""
@@ -441,6 +528,7 @@ class vLLMAsyncRollout:
         self.inference_engine = WorkerWrapperBase(vllm_config=self.vllm_config)
         self.inference_engine.init_worker(all_kwargs)
 
+
     def load_model(self, *args, **kwargs):
         self.inference_engine.load_model(*args, **kwargs)
 
@@ -448,6 +536,7 @@ class vLLMAsyncRollout:
         self.sharding_manager.inference_engine = self.inference_engine
         self.sharding_manager.model_runner = self.inference_engine.worker.model_runner
 
+        _monkey_patch_compute_logits(self.inference_engine.worker.model_runner.model, len(self.tokenizer))
     def sleep(self, *args, **kwargs):
         """Offload model weights and discard kv cache."""
         if self.is_sleep:

@@ -24,8 +24,12 @@ import torch
 import pandas as pd
 import ray
 from scipy.stats import mode
-
+import logging
+import os
+from pathlib import Path
+from datetime import datetime
 from siirl import DataProto
+import json
 
 
 def _compute_response_info(batch: DataProto) -> Dict[str, Any]:
@@ -46,7 +50,11 @@ def _compute_response_info(batch: DataProto) -> Dict[str, Any]:
     response_length = batch.batch["responses"].shape[-1]
 
     prompt_mask = batch.batch["attention_mask"][:, :-response_length]
-    response_mask = batch.batch["attention_mask"][:, -response_length:]
+
+    if "response_mask" not in batch.batch:
+        response_mask = batch.batch["attention_mask"][:, -response_length:]
+    else:
+        response_mask = batch.batch["response_mask"]
 
     prompt_length = prompt_mask.sum(-1).float()
     response_length = response_mask.sum(-1).float()  # (batch_size,)
@@ -232,11 +240,21 @@ def _process_prompt_group_task(group: pd.DataFrame, numeric_variables: List[str]
 
         # --- Calculate standard (non-bootstrapped) metrics ---
         results.append({**base_info, "metric_name": f"mean@{num_responses}", "value": group[var_name].mean()})
+        
         if num_responses > 1:
-            results.append({**base_info, "metric_name": f"std@{num_responses}", "value": group[var_name].std()})
+            # 1. Re-added the original std@N metric for the user's logging block.
+            #    NOTE: Averaging this metric across prompts is statistically incorrect.
+            results.append({**base_info, "metric_name": f"std@{num_responses}", "value": group[var_name].std(ddof=1)})
+
+            # 2. Kept the components for the correct pooled standard deviation calculation.
+            #    These will be used for the function's actual return value.
+            variance = group[var_name].var(ddof=1)
+            df = num_responses - 1
+            sum_sq_dev = variance * df
+            results.append({**base_info, "metric_name": "internal_sum_sq_dev_for_pooled_std", "value": sum_sq_dev})
+            results.append({**base_info, "metric_name": "internal_df_for_pooled_std", "value": df})
 
             # --- Calculate bootstrapped metrics for various sample sizes ---
-            # Determine the bootstrap sample sizes (e.g., 2, 4, 8, ..., N).
             bootstrap_sizes = sorted(list(set([2**i for i in range(1, 10) if 2**i < num_responses] + [num_responses])))
 
             for size in bootstrap_sizes:
@@ -297,31 +315,50 @@ def aggregate_validation_metrics(data_sources: List[str], sample_inputs: List[st
     # Split the DataFrame into a list of smaller DataFrames, one for each prompt group.
     prompt_groups = [group for _, group in df.groupby(["data_source", "prompt"])]
 
-    # Generate unique seeds for each parallel task to ensure reproducibility.
-    np.random.seed(seed)
-    task_seeds = np.random.randint(np.iinfo(np.int32).max, size=len(prompt_groups))
-
     # --- 3. Parallel Dispatch ---
     # Launch all processing tasks concurrently. `ray.remote` returns immediately
     # with a future (ObjectRef) for each task.
-    futures = [_process_prompt_group_task.remote(group, numeric_vars, int(task_seed)) for group, task_seed in zip(prompt_groups, task_seeds)]
+    futures = [_process_prompt_group_task.remote(group, numeric_vars, int(seed)) for group in prompt_groups]
 
     # --- 4. Result Collection ---
     # `ray.get` blocks until all tasks are complete and retrieves their results.
     processed_df_list = ray.get(futures)
+    
     if not processed_df_list:
         return {}
-    processed_df = pd.concat(processed_df_list)
+    processed_df = pd.concat(processed_df_list)    
 
-    # --- 5. Final Aggregation ---
+    # --- 6. Final Aggregation ---
     # Perform a single, efficient groupby to get the mean value of each metric
     # across all prompts within a data source.
-    final_agg = processed_df.groupby(["data_source", "var_name", "metric_name"])["value"].mean()
+    # Separate the standard metrics from the internal components for pooled std.
+    is_std_component = processed_df["metric_name"].str.startswith("internal_")
+    is_legacy_std = processed_df["metric_name"].str.startswith("std@")
+    
+    # Exclude internal components AND the legacy std@N metric from the regular aggregation.
+    regular_metrics_df = processed_df[~is_std_component & ~is_legacy_std]
+    std_components_df = processed_df[is_std_component]
 
-    # --- 6. Output Formatting ---
+    # Aggregate regular metrics by taking the mean across all prompts.
+    final_agg_df = regular_metrics_df.groupby(["data_source", "var_name", "metric_name"])["value"].mean().reset_index()
+
+    final_df = final_agg_df
+    # Calculate the pooled standard deviation correctly.
+    if not std_components_df.empty:
+        summed_components = std_components_df.groupby(["data_source", "var_name", "metric_name"])["value"].sum().unstack()
+        total_df = summed_components["internal_df_for_pooled_std"]
+        pooled_variance = summed_components["internal_sum_sq_dev_for_pooled_std"].divide(total_df).fillna(0)
+        pooled_std = np.sqrt(pooled_variance)
+        
+        pooled_std_df = pooled_std.reset_index(name="value")
+        pooled_std_df["metric_name"] = "pooled_std"
+        
+        final_df = pd.concat([final_agg_df, pooled_std_df], ignore_index=True)
+
+    # --- 7. Output Formatting ---
     # Convert the flattened Series from the groupby into the required nested dict.
     output_dict = defaultdict(lambda: defaultdict(dict))
-    for (data_src, var, metric), val in final_agg.items():
-        output_dict[data_src][var][metric] = val
+    for _, row in final_df.iterrows():
+        output_dict[row['data_source']][row['var_name']][row['metric_name']] = row['value']
 
     return output_dict

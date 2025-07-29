@@ -275,17 +275,47 @@ class LayerNameMapArguments:
 
 @dataclass
 class MultiTurnArguments:
-    enable: bool = field(default=False, metadata={"help": "should set rollout.name to sglang_async if True"})
-    max_turns: Optional[int] = field(default=None, metadata={"help": "null for no limit (default max_length // 3)"})
-    tool_config_path: Optional[str] = field(default=None, metadata={"help": "null for no tool"})
-    format: str = field(default="chatml", metadata={"help": "chatml, more formats will be supported in the future"})
+    enable : bool = field(default=False, metadata={"help": "should set rollout.name to sglang_async if True"})
+    max_assistant_turns : Optional[int] = field(default=None, metadata={"help": "null for no limit (default max_length // 3)"})
+    tool_config_path : Optional[str] = field(default=None, metadata={"help": "null for no tool"})
+    format : str = field(default="hermes", metadata={"help": "Format of the multi-turn interaction. Options: hermes, llama3_json, ..."})
+    tool_config_path: Optional[str] = field(default=None, metadata={"help": " null for no tool"})
+    max_user_turns: Optional[int] = field(default=None, metadata={"help": "null for no limit (default max_length // 3)"})
+    max_parallel_calls: int = field(default=1, metadata={"help": "max parallel call for tools in single turn"})
+    max_tool_response_length: int = field(default=256, metadata={"help": "max length of tool response"})
+    tool_response_truncate_side: str = field(default="middle", metadata={"help": "truncate side of tool response: left, middle, right"})
+    interaction_config_path: Optional[str] = field(default=None, metadata={"help": "null for no interaction"})
+    completion_callback: Optional[str] = field(default=None, metadata={"help": "null for default callback"})
+    use_inference_chat_template: bool = field(default=False, metadata={"help": "- When set to True, the model's default chat template is used for multi-turn rollout, which typically matches production behavior. \n \
+    - When set to False, the token ids recorded for training are used instead; unlike the default chat template, these always include the model's full output, \n \
+      which may contain additional content such as reasoning content. This maintains the consistency between training and rollout, but it will lead to longer prompts." \
+    })
+    tokenization_sanity_check_mode: str = field(default='strict', metadata={"help": "- disable: disable tokenization sanity check \n \
+    - strict: enable strict tokenization sanity check (default) \n \
+    - ignore_strippable: ignore strippable tokens when checking tokenization sanity" \
+    })
+    
+    
+    
+@dataclass
+class CustomAsyncServer:
+    path: None
+    # Path to the custom async server implementation
+    name: None
+    # Class name of the custom async server class (e.g. AsyncvLLMServer)
+@dataclass
+class AgentArguments:
+    agent_name: str = field(default='single_turn_agent', metadata={"help": "choose which agent tool"})
+    num_workers: int =  field(default=1, metadata={"help": "custom async server configs"})
+    # custom async server configs
+    custom_async_server:CustomAsyncServer = field(default=None, metadata={"help": "custom async server configs"})
+    # Path to the custom async server implementation
 
 
 @dataclass
 class EngineArguments:
     vllm: Dict[str, Any] = field(default_factory=lambda: {})
     sglang: Dict[str, Any] = field(default_factory=lambda: {})
-
 
 @dataclass
 class RolloutArguments:
@@ -320,9 +350,12 @@ class RolloutArguments:
     layer_name_map: LayerNameMapArguments = field(default_factory=LayerNameMapArguments)
     seed: int = field(default=0, metadata={"help": "The random seed"})
     mode: str = field(default="sync", metadata={"help": "sync: LLM, async: AsyncLLM"})
-    multi_turn: MultiTurnArguments = field(default_factory=MultiTurnArguments)
-    micro_batch_size: Optional[int] = field(default=None, metadata={"help": "Inference micro-batch size"})
+    multi_turn : MultiTurnArguments = field(default_factory=MultiTurnArguments)
+    micro_batch_size : Optional[int] = field(default=None, metadata={"help": "Inference micro-batch size"})
     engine_kwargs: EngineArguments = field(default_factory=EngineArguments)
+    calculate_log_probs: bool = field(default=False, metadata={"help": "support logging rollout prob for debugging purpose"})
+    agent: AgentArguments = field(default_factory=AgentArguments)
+    multi_stage_wake_up: bool = field(default=False, metadata={"help": "# Whether to wake up inference engine in multi-stage. (Wake up model weights first, then resume kv cache)"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

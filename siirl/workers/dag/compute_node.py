@@ -98,10 +98,6 @@ class ComputeNode(Node):
         elif self.adv_estimator == AdvantageEstimator.GRPO:
             # TODO: test on more adv estimator type
             grpo_calculation_mask = data.batch["response_mask"]
-            if self.multi_turn:
-                # If multi-turn, replace the mask with the relevant part of loss_mask
-                response_length = grpo_calculation_mask.size(1)  # Get length from the initial response mask
-                grpo_calculation_mask = data.batch["loss_mask"][:, -response_length:]  # This mask is the one intended for GRPO
             # Call compute_grpo_outcome_advantage with parameters matching its definition
             advantages, returns = core_algos.compute_grpo_outcome_advantage(
                 token_level_rewards=data.batch["token_level_rewards"],
@@ -147,10 +143,6 @@ class ComputeNode(Node):
         elif self.adv_estimator == AdvantageEstimator.CPGD:
             # TODO: test on more adv estimator type
             cpgd_calculation_mask = data.batch["response_mask"]
-            if self.multi_turn:
-                # If multi-turn, replace the mask with the relevant part of loss_mask
-                response_length = cpgd_calculation_mask.size(1)  # Get length from the initial response mask
-                cpgd_calculation_mask = data.batch["loss_mask"][:, -response_length:]  # This mask is the one intended for CPGD
             # Call compute_cpgd_outcome_advantage with parameters matching its definition
             advantages, returns = core_algos.compute_cpgd_outcome_advantage(
                 token_level_rewards=data.batch["token_level_rewards"],

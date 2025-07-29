@@ -327,7 +327,7 @@ class MegatronPPOActor(BasePPOActor):
             responses = data["responses"]
             response_length = responses.size(1)
             attention_mask = data["attention_mask"]
-            response_mask = attention_mask[:, -response_length:]
+            response_mask = data["response_mask"]
             loss_agg_mode = self.config.loss_agg_mode
 
             # compute policy loss

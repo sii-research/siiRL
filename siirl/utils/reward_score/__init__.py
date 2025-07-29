@@ -36,7 +36,7 @@ def default_compute_score(data_source, solution_str, ground_truth, extra_info=No
         from . import gsm8k
 
         res = gsm8k.compute_score(solution_str, ground_truth)
-    elif data_source in ["lighteval/MATH", "DigitalLearningGmbH/MATH-lighteval", "agentica-org/DeepScaleR-Preview-Dataset"]:
+    elif data_source in ["lighteval/MATH", "DigitalLearningGmbH/MATH-lighteval", "agentica-org/DeepScaleR-Preview-Dataset", "AIME2024", "AIME2025", "AIME24", "AIME25"]:
         from . import math
 
         res = math.compute_score(solution_str, ground_truth)

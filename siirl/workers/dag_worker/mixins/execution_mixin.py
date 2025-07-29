@@ -77,16 +77,9 @@ class ExecutionMixin:
     compute_reward: Any
     compute_advantage: Any
 
-    
     def execute_task_graph(self):
         """Main entry point to start the DAG execution pipeline."""
         logger.info(f"Rank {self._rank}: Starting DAG execution pipeline...")
-        self._set_node_executables()
-        self.init_model()
-        self._load_checkpoint()
-
-        # Ensure all models are initialized and checkpoints are loaded before starting.
-        dist.barrier(self._gather_group)
         logger.success(f"Rank {self._rank}: All components initialized. Starting training loop from step {self.global_steps + 1}.")
 
         if self.val_reward_fn and self.config.trainer.val_before_train:
@@ -270,9 +263,11 @@ class ExecutionMixin:
                         node_name_timer = "actor_log_prob"
                     with self._timer(node_name_timer, timing_raw):
                         if cur_node.node_role == NodeRole.REWARD:
-                            node_output = self.compute_reward(batch, cur_tp_size)
+                            if self.rollout_mode == 'sync' or cur_tp_rank == 0:
+                                node_output = self.compute_reward(batch, cur_tp_size)
                         elif cur_node.node_role == NodeRole.ADVANTAGE:
-                            node_output = self.compute_advantage(batch, cur_node = cur_node)
+                            if self.rollout_mode == 'sync' or cur_tp_rank == 0:
+                                node_output = self.compute_advantage(batch, cur_node = cur_node)
                         elif cur_node.executable:
                             if(cur_node.user_options.get("train_cycle", None)):
                                 cycle_round = (epoch - 1) // cur_node.user_options.get("train_cycle", 1)

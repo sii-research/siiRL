@@ -115,7 +115,8 @@ class MegatronPPOCritic(BasePPOCritic):
 
             # each tp ranks should contain the same value
             values = values[:, -response_length - 1 : -1]  # Values are predicted at the ends of prefixes, e.g., the last prompt token
-            response_mask = attention_mask[:, -response_length:]
+            response_mask = data.batch["response_mask"]
+
             values = values * response_mask  # Only action tokens have values
             values = values.contiguous()
 
@@ -181,8 +182,7 @@ class MegatronPPOCritic(BasePPOCritic):
             values = data["values"]
             returns = data["returns"]
             response_length = responses.size(1)
-
-            response_mask = attention_mask[:, -response_length:]
+            response_mask = data["response_mask"]
 
             cliprange_value = self.config.cliprange_value
 

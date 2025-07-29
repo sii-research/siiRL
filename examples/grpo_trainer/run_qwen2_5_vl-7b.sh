@@ -38,6 +38,7 @@ export MAX_CKPT_KEEP=5
 # Uncomment the following line and set the correct network interface if needed for distributed backend
 # export GLOO_SOCKET_IFNAME=bond0  # Modify as needed
 
+
 # --- Distributed Training & Infrastructure ---
 export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-8}
 export NNODES=${PET_NNODES:-1}
@@ -54,6 +55,7 @@ export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${ALG}_${DATASET}_hybrid_${NNODES}_$
 # --- Calculated Global Hyperparameters ---
 export TRAIN_BATCH_SIZE=$(($TRAIN_BATCH_SIZE_PER_NODE * $NNODES))
 export PPO_MINI_BATCH_SIZE=$(($PPO_MINI_BATCH_SIZE_PER_NODE * $NNODES))
+
 
 # --- Define the Training Command and its Arguments ---
 TRAINING_CMD=(
@@ -166,8 +168,6 @@ start_ray_cluster() {
 main() {
     local timestamp=$(date +"%Y%m%d_%H%M%S")
     ray stop --force
-
-    
 
     export VLLM_USE_V1=1
     export GLOO_SOCKET_TIMEOUT=600

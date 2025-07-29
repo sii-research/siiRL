@@ -43,16 +43,9 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
             - A dictionary of metrics related to the KL penalty
     """
     responses = data.batch["responses"]
-    response_length = responses.size(1)
     token_level_scores = data.batch["token_level_scores"]
     batch_size = data.batch.batch_size[0]
-
-    if multi_turn:
-        loss_mask = data.batch["loss_mask"]
-        response_mask = loss_mask[:, -response_length:]
-    else:
-        attention_mask = data.batch["attention_mask"]
-        response_mask = attention_mask[:, -response_length:]
+    response_mask = data.batch["response_mask"]
 
     # compute kl between ref_policy and current policy
     # When apply_kl_penalty, algorithm.use_kl_in_reward=True, so the reference model has been enabled.
@@ -135,10 +128,6 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
     elif adv_estimator == AdvantageEstimator.GRPO:
         # TODO: test on more adv estimator type
         grpo_calculation_mask = data.batch["response_mask"]
-        if multi_turn:
-            # If multi-turn, replace the mask with the relevant part of loss_mask
-            response_length = grpo_calculation_mask.size(1)  # Get length from the initial response mask
-            grpo_calculation_mask = data.batch["loss_mask"][:, -response_length:]  # This mask is the one intended for GRPO
         # Call compute_grpo_outcome_advantage with parameters matching its definition
         advantages, returns = core_algos.compute_grpo_outcome_advantage(
             token_level_rewards=data.batch["token_level_rewards"],
@@ -201,10 +190,6 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
     elif adv_estimator == AdvantageEstimator.CPGD:
         # TODO: test on more adv estimator type
         cpgd_calculation_mask = data.batch["response_mask"]
-        if multi_turn:
-            # If multi-turn, replace the mask with the relevant part of loss_mask
-            response_length = cpgd_calculation_mask.size(1)  # Get length from the initial response mask
-            cpgd_calculation_mask = data.batch["loss_mask"][:, -response_length:]  # This mask is the one intended for CPGD
         # Call compute_cpgd_outcome_advantage with parameters matching its definition
         advantages, returns = core_algos.compute_cpgd_outcome_advantage(
             token_level_rewards=data.batch["token_level_rewards"],

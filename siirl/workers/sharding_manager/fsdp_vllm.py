@@ -73,7 +73,7 @@ class MultiAgentFSDPVLLMShardingManager(BaseShardingManager):
         # Note that torch_random_states may be different on each dp rank
         self.torch_random_states = get_torch_device().get_rng_state()
         # get a random rng states
-        gen_dp_rank = self.world_size // self.tp_size
+        gen_dp_rank = self.rank // self.tp_size
         get_torch_device().manual_seed(gen_dp_rank + 1000)  # make sure all tp ranks have the same random states
         self.gen_random_states = get_torch_device().get_rng_state()
         get_torch_device().set_rng_state(self.torch_random_states)

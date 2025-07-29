@@ -75,6 +75,11 @@ class DAGWorker(InitializationMixin, ExecutionMixin, NodeExecutorsMixin, Validat
         # Finish flag
         self.taskgraph_execute_finished = False
 
+        # async rollout
+        self.rollout_mode = 'sync'
+        self._async_rollout_manager = None
+        self.zmq_address = None # used for async_vllmrollout
+
         try:
             self._initialize_worker()
         except (ValueError, TypeError, KeyError, AttributeError, NotImplementedError) as e:

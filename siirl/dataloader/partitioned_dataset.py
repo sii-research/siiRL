@@ -122,6 +122,7 @@ class PartitionedRLHFDataset(Dataset):
         self.video_min_pixels = self.data_args.processor.video_min_pixels
         self.video_fps = self.data_args.processor.video_fps
         self.video_maxlen = self.data_args.processor.video_maxlen
+        self.multi_turn = config.actor_rollout_ref.rollout.multi_turn.enable
 
         self.is_trailing_rank = False  # Indicates trailing ranks that received one less data item in round-robin partitioning.
 
@@ -399,15 +400,16 @@ class PartitionedRLHFDataset(Dataset):
             processed_row["full_prompts"] = raw_prompt  # array of strings
 
         # add index for each prompt
-        # index = processed_row.get("extra_info", {}).get("index", 0)
-        # extra_info = processed_row.get("extra_info", {})
-        # tools_kwargs = extra_info.get("tools_kwargs", {})
-        # need_tools_kwargs = extra_info.get("need_tools_kwargs", None)
-        # if need_tools_kwargs and not tools_kwargs:
-        #     logger.warning("tools_kwargs is empty for index {}, data source: {}", index, processed_row["data_source"])
-        # processed_row["index"] = index
-        # processed_row["tools_kwargs"] = tools_kwargs
-
+        if self.multi_turn:
+            index = processed_row.get("extra_info", {}).get("index", 0)
+            tools_kwargs = processed_row.get("extra_info", {}).get("tools_kwargs", {})
+            interaction_kwargs = processed_row.get("extra_info", {}).get("interaction_kwargs", {})
+            # need_tools_kwargs = row_dict.get("extra_info", {}).get("need_tools_kwargs", self.need_tools_kwargs)
+            # if need_tools_kwargs and not tools_kwargs:
+            #     logger.warning("tools_kwargs is empty for index {}, data source: {}", index, row_dict["data_source"])
+            processed_row["index"] = index
+            processed_row["tools_kwargs"] = tools_kwargs
+            processed_row["interaction_kwargs"] = interaction_kwargs
         return processed_row
 
     def __getitem__(self, item: int) -> Dict:

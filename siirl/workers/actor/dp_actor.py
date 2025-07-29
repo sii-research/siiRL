@@ -316,10 +316,15 @@ class DataParallelPPOActor(BasePPOActor):
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
         multi_turn = data.meta_info.get("multi_turn", False)
-
-        select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "old_log_probs", "advantages"]
-        if multi_turn:
-            select_keys.append("loss_mask")
+        select_keys = [
+            "responses",
+            "response_mask",
+            "input_ids",
+            "attention_mask",
+            "position_ids",
+            "old_log_probs",
+            "advantages",
+        ]
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
         batch = data.select(batch_keys=select_keys).batch
@@ -355,18 +360,13 @@ class DataParallelPPOActor(BasePPOActor):
 
                 for data in micro_batches:
                     # Support all hardwares
+
+                    micro_batch_metrics = {}
                     if isinstance(data, DataProto):
                         data = {**data.batch.to(get_device_id()), **data.non_tensor_batch}
                     else:
                         data = data.to(get_device_id())  # actor device is cpu when using offload
-                    responses = data["responses"]
-                    response_length = responses.size(1)
-                    attention_mask = data["attention_mask"]
-                    if multi_turn:
-                        response_mask = data["loss_mask"][:, -response_length:]
-                    else:
-                        response_mask = attention_mask[:, -response_length:]
-
+                    response_mask = data["response_mask"]
                     old_log_prob = data["old_log_probs"]
                     advantages = data["advantages"]
 
@@ -409,12 +409,14 @@ class DataParallelPPOActor(BasePPOActor):
                     if self.config.use_kl_loss:
                         ref_log_prob = data["ref_log_prob"]
                         # compute kl loss
-                        kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type)
+                        kld = kl_penalty(
+                            logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type
+                        )
                         kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
-                        metrics["actor/kl_loss"] = kl_loss.detach().item()
-                        metrics["actor/kl_coef"] = self.config.kl_loss_coef
+                        micro_batch_metrics["actor/kl_loss"] = kl_loss.detach().item()
+                        micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
                     if use_cpgd_loss and policy_drift_coeff != 0:
                         # compute policy drift loss from CPGD
@@ -428,20 +430,21 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         loss = policy_loss / self.gradient_accumulation
                     loss.backward()
-
-                    data = {
-                        "actor/pg_clip_mean": (log_prob - old_log_prob).exp().mean().detach().item(),
-                        "actor/pg_clip_min": (log_prob - old_log_prob).exp().min().detach().item(),
-                        "actor/pg_clip_max": (log_prob - old_log_prob).exp().max().detach().item(),
-                        "actor/pg_loss": pg_loss.detach().item(),
-                        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-                        "actor/ppo_kl": ppo_kl.detach().item(),
-                        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
-                    }
-                    append_to_dict(metrics, data)
+                    micro_batch_metrics.update(
+                        {
+                            "actor/pg_clip_mean": (log_prob - old_log_prob).exp().mean().detach().item(),
+                            "actor/pg_clip_min": (log_prob - old_log_prob).exp().min().detach().item(),
+                            "actor/pg_clip_max": (log_prob - old_log_prob).exp().max().detach().item(),
+                            "actor/pg_loss": pg_loss.detach().item(),
+                            "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+                            "actor/ppo_kl": ppo_kl.detach().item(),
+                            "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+                        }
+                    )
+                    append_to_dict(metrics, micro_batch_metrics)
 
                 grad_norm = self._optimizer_step()
-                data = {"actor/grad_norm": grad_norm.detach().item()}
-                append_to_dict(metrics, data)
+                mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
+                append_to_dict(metrics, mini_batch_metrics)
         self.actor_optimizer.zero_grad()
         return metrics

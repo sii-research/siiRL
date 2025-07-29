@@ -18,6 +18,8 @@ import os
 from typing import Dict, Type
 import torch
 import ray
+import torch
+
 import torch.distributed as dist
 from loguru import logger
 
@@ -122,7 +124,7 @@ class InitializationMixin:
         import torch.distributed as dist
 
         if not dist.is_initialized():
-            backend = f"{get_nccl_backend()}" if self.world_size > self.config.dag.backend_threshold else f"cpu:gloo,{get_device_name()}:{get_nccl_backend()}"
+            backend = f"{get_nccl_backend()}" if self.world_size >= self.config.dag.backend_threshold else f"cpu:gloo,{get_device_name()}:{get_nccl_backend()}"
             logger.info(f"Rank {self._rank}: Initializing world size {self.world_size} default process group with '{backend}' backend.")
             dist.init_process_group(backend=backend)
 
@@ -431,6 +433,9 @@ class InitializationMixin:
                     continue
                 node_worker.init_model()
                 have_init_workers.add(self._generate_node_worker_key(node))
+                if node.node_role == NodeRole.ROLLOUT and node.config['intern_config'].rollout.mode == 'async':
+                    self.rollout_mode = 'async'
+                    self.zmq_address = node_worker.get_zeromq_address()
         logger.success("All worker models initialized.")
 
         logger.info(f"Setting up sharding managers {self.config.actor_rollout_ref.rollout.name} ...")
@@ -487,6 +492,7 @@ class InitializationMixin:
                     "rollout_config": rollout_worker.config.rollout,
                     "full_params": "hf" in rollout_worker.config.rollout.load_format,
                     "offload_param": getattr(actor_worker, "_is_offload_param", False),
+                    "multi_stage_wake_up": rollout_worker.config.rollout.multi_stage_wake_up,
                 },
             ),
             ("megatron", "vllm"): (
@@ -510,6 +516,7 @@ class InitializationMixin:
                     "rollout_config": rollout_worker.config.rollout,
                     "layer_name_mapping": layer_name_mapping,
                     "weight_converter": get_mcore_weight_converter(actor_worker.actor_model_config, actor_worker.dtype),
+                    "multi_stage_wake_up": rollout_worker.config.rollout.multi_stage_wake_up,
                 },
             ),
         }
@@ -524,3 +531,19 @@ class InitializationMixin:
         sharding_manager = sharding_manager_cls(**kwargs_builder())
         rollout_worker.set_rollout_sharding_manager(sharding_manager)
         logger.debug(f"Set up {sharding_manager_cls.__name__}  for agent group {agent_group}.")
+
+    def init_graph(self):
+        # this is needed by async rollout manager
+        self._set_node_executables()
+        self.init_model()
+        self._load_checkpoint()
+        # Ensure all models are initialized and checkpoints are loaded before starting.
+        dist.barrier(self._gather_group)    
+        
+        
+    def set_async_rollout_manager(self, async_rollout_manager):
+        self._async_rollout_manager = async_rollout_manager
+        
+    def get_zeromq_address(self):
+        return self.zmq_address
+

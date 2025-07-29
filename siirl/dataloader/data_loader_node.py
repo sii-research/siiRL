@@ -82,7 +82,8 @@ class DataLoaderNode(Node):
         """
         super().__init__(node_id, NodeType.DATA_LOAD, NodeRole.DEFAULT, config=config, retry_limit=retry_limit)
         self.global_config = global_config
-        self.num_loader_workers = config.get("num_loader_workers", 8)
+        self.num_loader_workers = 0 if global_config.actor_rollout_ref.rollout.name == "sglang" else config.get("num_loader_workers", 8)
+
 
         if "tokenizer" in self.config:
             self.tokenizer = self.config["tokenizer"]

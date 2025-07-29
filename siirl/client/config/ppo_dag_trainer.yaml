@@ -141,6 +141,8 @@ actor_rollout_ref:
     do_sample: True
     # number of responses (i.e. num sample times)
     n: 1 # > 1 for grpo
+    calculate_log_probs: False # support logging rollout prob for debugging purpose
+    multi_stage_wake_up: False #
     engine_kwargs: # inference engine parameters
       vllm:
         swap_space: null # null means "use the engine default value" (usually 4 GB), setting it to, e.g., 32 means 32 GB
@@ -155,10 +157,50 @@ actor_rollout_ref:
       n: 1
       do_sample: False # default eager for validation
     multi_turn:
-      enable: False  # set to True for multi-turn tool interaction tasks; should set rollout.name to sglang as well
-      max_turns: null  # null for no limit (default max_length // 3)
-      tool_config_path: null  # null for no tool
-      format: chatml  # chatml, more formats will be supported in the future
+      # set to True for multi-turn tool interaction tasks; should set rollout.name to sglang as well
+      enable: False
+      # null for no limit (default max_length // 3)
+      max_assistant_turns: null
+      # null for no tool
+      tool_config_path: null
+      # null for no limit (default max_length // 3)
+      max_user_turns: null
+      # max parallel call for tools in single turn
+      max_parallel_calls: 1
+      # max length of tool response
+      max_tool_response_length: 256
+      # truncate side of tool response: left, middle, right
+      tool_response_truncate_side: middle
+      # null for no interaction
+      interaction_config_path: null
+      # null for default callback
+      completion_callback: null
+      # - When set to True, the model's default chat template is used for multi-turn rollout, which typically matches production behavior.
+      # - When set to False, the token ids recorded for training are used instead; unlike the default chat template, these always include the model's full output,
+      #   which may contain additional content such as reasoning content. This maintains the consistency between training and rollout, but it will lead to longer prompts.
+      use_inference_chat_template: False
+      # Tokenization is performed turn by turn and the resulting token ids are concatenated to form the full conversation.
+      # To ensure this matches the result of tokenizing the entire conversation at once, a sanity check is run at the end of each multi-turn rollout to compare the two sets of token ids.
+      # Some models are known to produce different tokenization results when tokenizing turn by turn vs. all at once. aThis behavior has already been validated for them.
+      # To reduce excessive warnings, you can turn off the sanity check for these models if you are using their default chat template:
+      # Qwen/QwQ-32B, Qwen/Qwen3-xxB
+      # - disable: disable tokenization sanity check
+      # - strict: enable strict tokenization sanity check (default)
+      # - ignore_strippable: ignore strippable tokens when checking tokenization sanity
+      tokenization_sanity_check_mode: strict
+      # Format of the multi-turn interaction. Options: hermes, llama3_json, ...
+      format: hermes
+
+    agent:
+      # Number of agent loop workers
+      agent_name: single_turn_agent
+      num_workers: 8
+      # custom async server configs
+      custom_async_server:
+        # Path to the custom async server implementation
+        path: null
+        # Class name of the custom async server class (e.g. AsyncvLLMServer)
+        name: null
 
 critic:
   rollout_n: ${actor_rollout_ref.rollout.n}
@@ -296,7 +338,7 @@ dag:
   env_enable: False
   environment_path: null
   enable_perf: False
-  backend_threshold: 512  # World size threshold for backend selection
+  backend_threshold: 256  # World size threshold for backend selection
 
 hydra:
   run:

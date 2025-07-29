@@ -103,6 +103,9 @@ class Node:
         self.retry_limit: int = retry_limit
         self.retries_done: int = 0
 
+
+        self.async_rollout = None
+        self.mode = 'sync'
         self._executable: Optional[Callable] = None
         self.output: Any = None  # Store the result of the node execution
         self.error_info: Optional[str] = None  # Store error information when the node fails

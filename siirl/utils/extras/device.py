@@ -64,7 +64,6 @@ def get_device_id() -> int:
     """
     return get_torch_device().current_device()
 
-
 def get_nccl_backend() -> str:
     """Return nccl backend type based on the device type.
     Returns:

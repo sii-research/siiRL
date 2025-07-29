@@ -22,4 +22,4 @@ class DagArguments:
     env_enable: bool = field(default=False, metadata={"help": "Enable environment"})
     environment_path: Optional[str] = field(default=None, metadata={"help": "Environment config file"})
     enable_perf: bool = field(default=False, metadata={"help": "Enable all ranks performance profiling table"})
-    backend_threshold: int = field(default=512, metadata={"help": "World size threshold for backend selection"})
+    backend_threshold: int = field(default=256, metadata={"help": "World size threshold for backend selection"})
