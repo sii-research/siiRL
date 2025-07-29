@@ -1,4 +1,5 @@
 # Copyright 2024 Bytedance Ltd. and/or its affiliates
+# Copyright 2025, Infrawaves. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -83,13 +84,13 @@ class MegatronWorker(Worker):
 
         def add_optimization_config_to_tf_config(tf_config):
             # add optimization config to tf_config, e.g. checkpointing
-            if self.config.model.get("enable_gradient_checkpointing", False):
-                gradient_checkpointing_cfg = dict(self.config.model.get("gradient_checkpointing_kwargs", dict()))
+            if self.config.model.enable_gradient_checkpointing:
+                gradient_checkpointing_cfg = dict(self.config.model.gradient_checkpointing_kwargs)
                 tf_config.recompute_method = gradient_checkpointing_cfg.get("activations_checkpoint_method", "full")
                 tf_config.recompute_granularity = gradient_checkpointing_cfg.get("activations_checkpoint_granularity", "full")
                 tf_config.recompute_num_layers = gradient_checkpointing_cfg.get("activations_checkpoint_num_layers", -1)
-            if megatron_config := self.config.get("megatron", {}):
-                if extra := megatron_config.get("extra", {}):
+            if megatron_config := self.config.actor.megatron:
+                if extra := megatron_config.extra:
                     for k, v in extra.items():
                         setattr(tf_config, k, v)
 

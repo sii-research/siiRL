@@ -1,4 +1,5 @@
 # Copyright 2025, Shanghai Innovation Institute. All rights reserved.
+# Copyright 2025, Infrawaves. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -75,6 +76,7 @@ class MegatronArguments:
     param_offload: bool = field(default=False, metadata={"help": "Offload parameters to CPU"})
     grad_offload: bool = field(default=False, metadata={"help": "Offload gradients to CPU"})
     optimizer_offload: bool = field(default=False, metadata={"help": "Offload optimizer states to CPU"})
+    extra: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Extra settings"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -141,6 +143,7 @@ class ModelArguments(ProcessorArguments):
     external_lib: Optional[str] = field(default=None, metadata={"help": "External model library"})
     override_config: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Model config overrides"})
     enable_gradient_checkpointing: bool = field(default=True, metadata={"help": "Gradient checkpointing"})
+    gradient_checkpointing_kwargs: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Gradient checkpointing kwargs"})
     use_remove_padding: bool = field(default=False, metadata={"help": "Padding removal optimization"})
     use_fused_kernels: bool = field(default=False, metadata={"help": "Kernels fuse optimization"})
     cache_dir: Optional[str] = field(

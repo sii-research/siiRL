@@ -26,7 +26,8 @@ import torch.distributed
 from codetiming import Timer
 from loguru import logger
 from megatron.core import parallel_state as mpu
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
+
 
 from siirl import DataProto
 from siirl.workers.base_worker.megatron.worker import MegatronWorker
@@ -41,8 +42,10 @@ from siirl.utils.megatron.megatron_utils import (
     offload_megatron_model_to_cpu,
     offload_megatron_optimizer,
 )
+from siirl.utils.extras.import_utils import import_external_libs
 from siirl.utils.extras.device import get_device_id, get_device_name, get_nccl_backend, get_torch_device
 from siirl.utils.model_utils.model import load_mcore_dist_weights, load_megatron_gptmodel_weights
+from siirl.utils.model_utils.torch_dtypes import PrecisionType
 from siirl.workers.actor.megatron_actor import MegatronPPOActor
 from siirl.workers.critic.megatron_critic import MegatronPPOCritic
 from siirl.workers.reward_model.megatron.reward_model import MegatronRewardModel
@@ -123,22 +126,22 @@ class ActorRolloutRefWorker(MegatronWorker):
         if self._is_actor and self._is_rollout:
             self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
             self.config.actor.ppo_mini_batch_size //= mpu.get_data_parallel_world_size()
-            if self.config.actor.get("ppo_micro_batch_size", None):
+            if self.config.actor.ppo_micro_batch_size:
                 self.config.actor.ppo_micro_batch_size //= mpu.get_data_parallel_world_size()
                 self.config.rollout.log_prob_micro_batch_size //= mpu.get_data_parallel_world_size()
                 self.config.actor.ppo_micro_batch_size_per_gpu = self.config.actor.ppo_micro_batch_size
                 self.config.rollout.log_prob_micro_batch_size_per_gpu = self.config.rollout.log_prob_micro_batch_size
 
-            self._is_offload_param = self.config.actor.megatron.get("param_offload", False)
-            self._is_offload_grad = self.config.actor.megatron.get("grad_offload", False)
-            self._is_offload_optimizer = self.config.actor.megatron.get("optimizer_offload", False)
+            self._is_offload_param = self.config.actor.megatron.param_offload
+            self._is_offload_grad = self.config.actor.megatron.grad_offload
+            self._is_offload_optimizer = self.config.actor.megatron.optimizer_offload
         elif self._is_ref:
-            if self.config.ref.get("log_prob_micro_batch_size", None):
+            if self.config.ref.log_prob_micro_batch_size:
                 self.config.ref.log_prob_micro_batch_size //= mpu.get_data_parallel_world_size()
                 self.config.ref.log_prob_micro_batch_size_per_gpu = self.config.ref.log_prob_micro_batch_size
             else:
-                assert self.config.ref.get("log_prob_micro_batch_size_per_gpu", None) is not None, "Please note that in the ref policy configuration, `log_prob_micro_batch_size_per_gpu` and `log_prob_micro_batch_size` should not be None at the same time."
-            self._ref_is_offload_param = self.config.ref.megatron.get("param_offload", False)
+                assert self.config.ref.log_prob_micro_batch_size_per_gpu is not None, "Please note that in the ref policy configuration, `log_prob_micro_batch_size_per_gpu` and `log_prob_micro_batch_size` should not be None at the same time."
+            self._ref_is_offload_param = self.config.ref.megatron.param_offload
 
     def _build_model_optimizer(self, model_path, optim_config, override_model_config, override_transformer_config):
         from megatron.core.models.gpt.gpt_model import ModelType
@@ -147,16 +150,17 @@ class ActorRolloutRefWorker(MegatronWorker):
         from siirl.utils.megatron.megatron_utils import get_model, init_megatron_optim_config
         from siirl.utils.model_utils.model import get_generation_config, print_model_size
 
-        self._init_hf_config_and_tf_config(model_path, model_path, self.dtype, override_model_config, override_transformer_config, self.config.model.get("trust_remote_code", False))
+        self._init_hf_config_and_tf_config(model_path, model_path, self.dtype, override_model_config, override_transformer_config, self.config.model.trust_remote_code)
         self.generation_config = get_generation_config(self.local_path)
 
         def megatron_actor_model_provider(pre_process, post_process):
             from siirl.models.mcore import init_mcore_model
 
-            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=self.share_embeddings_and_output_weights, value=False, freeze_moe_router=override_model_config.get("moe_config", {}).get("freeze_moe_router", False))
+            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=self.share_embeddings_and_output_weights, value=False, freeze_moe_router=override_model_config.moe_config.freeze_moe_router)
             parallel_model.to(get_device_name())
             return parallel_model
 
+        actor_module = None
         # Step 3: initialize the megatron model
         if self._is_actor and self._is_rollout:
             actor_module = get_model(
@@ -209,16 +213,10 @@ class ActorRolloutRefWorker(MegatronWorker):
     def _build_rollout(self, trust_remote_code=False):
         from torch.distributed.device_mesh import init_device_mesh
 
-        layer_name_mapping = {
-            "qkv_layer_name": "self_attention.linear_qkv.",
-            "gate_proj_layer_name": "linear_fc1.weight",
-        }
         if self.config.rollout.name == "vllm":
             from torch.distributed.device_mesh import init_device_mesh
 
             from siirl.workers.rollout.vllm_rollout import vllm_mode, vLLMRollout
-            from siirl.workers.sharding_manager.megatron_vllm import MegatronVLLMShardingManager
-
             # NOTE(sgm): If the QKV and gate_up projection layer are concate together in actor,
             # we will reorganize their weight format when resharding from actor to rollout.
 
@@ -228,7 +226,7 @@ class ActorRolloutRefWorker(MegatronWorker):
             rollout_device_mesh = init_device_mesh(get_device_name(), mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
             log_gpu_memory_usage("Before building vllm rollout", logger=None)
 
-            local_path = copy_to_local(self.config.model.path, use_shm=self.config.model.get("use_shm", False))
+            local_path = copy_to_local(self.config.model.path, use_shm=self.config.model.use_shm)
             if vllm_mode == "customized":
                 rollout = vLLMRollout(
                     actor_module=self.actor_module,
@@ -246,20 +244,6 @@ class ActorRolloutRefWorker(MegatronWorker):
                     trust_remote_code=trust_remote_code,
                 )
             log_gpu_memory_usage("After building vllm rollout", logger=logger)
-
-            # perform weight resharding between actor and rollout
-            from siirl.models.mcore import get_mcore_weight_converter
-
-            weight_converter = get_mcore_weight_converter(self.actor_model_config, self.dtype)
-            sharding_manager = MegatronVLLMShardingManager(
-                inference_engine=rollout.inference_engine,
-                model_config=self.actor_model_config,
-                transformer_config=self.tf_config,
-                layer_name_mapping=layer_name_mapping,
-                actor_module=self.actor.actor_module,
-                weight_converter=weight_converter,
-            )
-            log_gpu_memory_usage("After building sharding manager", logger=logger)
 
         elif self.config.rollout.name in ["sglang", "sglang_async"]:
             if self.config.rollout.name == "sglang_async":
@@ -293,46 +277,31 @@ class ActorRolloutRefWorker(MegatronWorker):
                 device_mesh=rollout_device_mesh,
             )
             log_gpu_memory_usage(f"After building {self.config.rollout.name} rollout", logger=None)
-
-            from siirl.models.mcore import get_mcore_weight_converter
-
-            weight_converter = get_mcore_weight_converter(self.actor_model_config, self.dtype)
-            sharding_manager = MegatronSGLangShardingManager(
-                actor_module=self.actor.actor_module,
-                inference_engine=rollout._engine,
-                model_config=self.actor_model_config,
-                transformer_config=self.tf_config,
-                layer_name_mapping=layer_name_mapping,
-                weight_converter=weight_converter,
-                device_mesh=rollout_device_mesh,
-            )
-            log_gpu_memory_usage("After building sharding manager", logger=logger)
         else:
-            raise NotImplementedError("Only vllmRollout is supported with Megatron now")
-        print(f"rollout and sharding manager init done sharding_manager: {sharding_manager}")
-        return rollout, sharding_manager
+            raise NotImplementedError("Only vllmRollout and SGLangRollout are supported with Megatron now")
+        
+        print("rollout init done")
+        return rollout, None
 
     def init_model(self):
-        if self.config.model.get("external_lib", None) is not None:
-            # This is used to import external_lib into the huggingface systems
-            import importlib
+        import_external_libs(self.config.model.external_lib)
 
-            importlib.import_module(self.config.model.external_lib)
-
-        from omegaconf import OmegaConf
-
-        from siirl.utils.model_utils.torch_dtypes import PrecisionType
-
-        override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
+        override_model_config = self.config.model.override_config
         if self._is_actor:
-            override_transformer_config = OmegaConf.to_container(self.config.actor.megatron.get("override_transformer_config", OmegaConf.create()), resolve=True)
+            override_transformer_config = self.config.actor.megatron.override_transformer_config
         elif self._is_ref:
-            override_transformer_config = OmegaConf.to_container(self.config.ref.megatron.get("override_transformer_config", OmegaConf.create()), resolve=True)
+            override_transformer_config = self.config.ref.megatron.override_transformer_config
         else:
             override_transformer_config = None
+        
+        if not override_transformer_config:
+            override_transformer_config = OmegaConf.create()
+        
         self.param_dtype = torch.bfloat16
         log_gpu_memory_usage("Before init actor model and optimizer", logger=logger)
+
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
+
         if self._is_actor or self._is_rollout:
             # we need the model for actor and rollout
             optim_config = self.config.actor.optim if self._is_actor else None
@@ -361,7 +330,7 @@ class ActorRolloutRefWorker(MegatronWorker):
             log_gpu_memory_usage("After MegatronPPOActor init", logger=logger)
 
         if self._is_rollout:
-            self.rollout, self.sharding_manager = self._build_rollout(trust_remote_code=self.config.model.get("trust_remote_code", False))
+            self.rollout, self.sharding_manager = self._build_rollout(trust_remote_code=self.config.model.trust_remote_code)
             # used for sleep/wake_up
             self.rollout.sharding_manager = self.sharding_manager
             log_gpu_memory_usage("After rollout init", logger=logger)
@@ -621,7 +590,7 @@ class CriticWorker(MegatronWorker):
         # normalize config
         self.config.ppo_mini_batch_size *= self.config.rollout_n
         self.config.ppo_mini_batch_size //= mpu.get_data_parallel_world_size()
-        if self.config.get("ppo_micro_batch_size", None):
+        if self.config.ppo_micro_batch_size:
             self.config.ppo_micro_batch_size //= mpu.get_data_parallel_world_size()
             self.config.ppo_micro_batch_size_per_gpu = self.config.ppo_micro_batch_size
 
@@ -634,12 +603,12 @@ class CriticWorker(MegatronWorker):
         from siirl.utils.megatron.megatron_utils import get_model, init_megatron_optim_config
         from siirl.utils.model_utils.model import print_model_size
 
-        self._init_hf_config_and_tf_config(model_path, self.config.model.tokenizer_path, self.dtype, override_model_config, override_transformer_config, self.config.model.get("trust_remote_code", False))
+        self._init_hf_config_and_tf_config(model_path, self.config.model.tokenizer_path, self.dtype, override_model_config, override_transformer_config, self.config.model.trust_remote_code)
 
         def megatron_critic_model_provider(pre_process, post_process):
             from siirl.models.mcore import init_mcore_model
 
-            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=False, value=True, freeze_moe_router=override_model_config.get("moe_config", {}).get("freeze_moe_router", False))
+            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=False, value=True, freeze_moe_router=override_model_config.moe_config.freeze_moe_router)
             parallel_model.to(get_device_name())
             return parallel_model
 
@@ -674,17 +643,13 @@ class CriticWorker(MegatronWorker):
 
     def init_model(self):
         # create critic
-        from omegaconf import OmegaConf
+        import_external_libs(self.config.model.external_lib)
+        override_model_config = self.config.model.override_config
+        override_transformer_config = self.config.model.override_transformer_config
 
-        from siirl.utils.model_utils.torch_dtypes import PrecisionType
-
-        if self.config.model.get("external_lib", None) is not None:
-            # This is used to import external_lib into the huggingface systems
-            import importlib
-
-            importlib.import_module(self.config.model.external_lib)
-        override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
-        override_transformer_config = OmegaConf.to_container(self.config.megatron.get("override_transformer_config", OmegaConf.create()), resolve=True)
+        if not override_transformer_config:
+            override_transformer_config = OmegaConf.create()
+        
         self.param_dtype = torch.bfloat16
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
         self.critic_module, self.critic_optimizer, self.critic_model_config, critic_optimizer_config = self._build_critic_model_optimizer(
@@ -826,7 +791,7 @@ class RewardModelWorker(MegatronWorker):
 
         from siirl.utils.megatron.megatron_utils import get_model
 
-        self._init_hf_config_and_tf_config(model_path, tokenizer, self.dtype, override_model_config, override_transformer_config, self.config.model.get("trust_remote_code", False))
+        self._init_hf_config_and_tf_config(model_path, tokenizer, self.dtype, override_model_config, override_transformer_config, self.config.model.trust_remote_code)
 
         def megatron_rm_model_provider(pre_process, post_process):
             from siirl.models.mcore import init_mcore_model
@@ -865,26 +830,21 @@ class RewardModelWorker(MegatronWorker):
 
     def init_model(self):
         # create critic
-        from omegaconf import OmegaConf
+        import_external_libs(self.config.model.external_lib)
+        override_model_config = self.config.model.override_config
+        override_transformer_config = self.config.model.override_transformer_config
 
-        from siirl.utils.model_utils.torch_dtypes import PrecisionType
+        if not override_transformer_config:
+            override_transformer_config = OmegaConf.create()
 
-        if self.config.model.get("external_lib", None) is not None:
-            # This is used to import external_lib into the huggingface systems
-            import importlib
-
-            importlib.import_module(self.config.model.external_lib)
-        override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
-        override_transformer_config = OmegaConf.to_container(self.config.megatron.get("override_transformer_config", OmegaConf.create()), resolve=True)
-
-        use_shm = self.config.model.get("use_shm", False)
+        use_shm = self.config.model.use_shm
         sft_tokenizer_local_path = copy_to_local(self.config.model.input_tokenizer, use_shm=use_shm)
         sft_tokenizer = hf_tokenizer(sft_tokenizer_local_path)
-        rm_tokenizer_path = self.config.model.get("rm_tokenizer", None)
+        rm_tokenizer_path = self.config.model.rm_tokenizer
         rm_tokenizer = None
         if rm_tokenizer_path is not None:
             rm_tokenizer_local_path = copy_to_local(rm_tokenizer_path, use_shm=use_shm)
-            rm_tokenizer = hf_tokenizer(rm_tokenizer_local_path, trust_remote_code=self.config.model.get("trust_remote_code", False))
+            rm_tokenizer = hf_tokenizer(rm_tokenizer_local_path, trust_remote_code=self.config.model.trust_remote_code)
 
         self.param_dtype = torch.bfloat16
         self.dtype = PrecisionType.to_dtype(self.param_dtype)

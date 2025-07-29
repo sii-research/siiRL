@@ -23,11 +23,14 @@ from loguru import logger
 
 from siirl.dataloader import DataLoaderNode
 from siirl.models.loader import load_tokenizer
+from siirl.models.mcore import get_mcore_weight_converter
 from siirl.workers.base_worker import Worker
 from siirl.scheduler.reward import create_reward_manager
 from siirl.workers.dag.node import NodeRole, NodeType
 from siirl.workers.dag_worker.constants import DAGConstants
 from siirl.utils.extras.device import get_device_name, get_nccl_backend
+from siirl.utils.import_string import import_string
+
 device_name = get_device_name()
 
 class InitializationMixin:
@@ -441,45 +444,83 @@ class InitializationMixin:
         logger.info("All models and sharding managers initialized successfully.")
 
     def _setup_sharding_manager(self, agent_group: int, worker_dict: Dict[NodeRole, Worker]):
-        """Configures the sharding manager to sync weights between FSDP and vLLM."""
+        """Configures the sharding manager to sync weights between training backend and inference backend."""
         actor_worker = worker_dict[NodeRole.ACTOR]
         rollout_worker = worker_dict[NodeRole.ROLLOUT]
         rollout_pg = self.agent_group_process_group[agent_group][NodeRole.ROLLOUT]
 
         parallel_config = {"rollout_parallel_size": rollout_worker.config.rollout.tensor_model_parallel_size, "rollout_world_size": dist.get_world_size(rollout_pg), "rollout_rank": dist.get_rank(rollout_pg)}
 
-        if self.config.actor_rollout_ref.rollout.name == "vllm":
-            from siirl.workers.sharding_manager.fsdp_vllm import MultiAgentFSDPVLLMShardingManager
+        device_name = get_device_name()
+        layer_name_mapping = {
+            "qkv_layer_name": "self_attention.linear_qkv.",
+            "gate_proj_layer_name": "linear_fc1.weight",
+        }
 
-            sharding_manager_cls = MultiAgentFSDPVLLMShardingManager
-            sharding_manager = sharding_manager_cls(
-                module=actor_worker.actor_module_fsdp,
-                inference_engine=rollout_worker.rollout.inference_engine,
-                model_config=actor_worker.actor_model_config,
-                parallel_config=parallel_config,
-                full_params="hf" in rollout_worker.config.rollout.load_format,
-                offload_param=getattr(actor_worker, "_is_offload_param", False)
-            )
-        elif self.config.actor_rollout_ref.rollout.name == "sglang":
-            from siirl.workers.sharding_manager.fsdp_sglang import MultiAgentFSDPSGLangShardingManager
+        # Use lazy import and defer execution.
+        sharding_manager_map = {
+            ("fsdp", "vllm"): (
+                "siirl.workers.sharding_manager.fsdp_vllm.MultiAgentFSDPVLLMShardingManager",
+                lambda: {
+                    "module": actor_worker.actor_module_fsdp,
+                    "inference_engine": rollout_worker.rollout.inference_engine,
+                    "model_config": actor_worker.actor_model_config,
+                    "parallel_config": parallel_config,
+                    "full_params": "hf" in rollout_worker.config.rollout.load_format,
+                    "offload_param": getattr(actor_worker, "_is_offload_param", False),
+                },
+            ),
+            ("fsdp", "sglang"): (
+                "siirl.workers.sharding_manager.fsdp_sglang.MultiAgentFSDPSGLangShardingManager",
+                lambda: {
+                    "module": actor_worker.actor_module_fsdp,
+                    "inference_engine": rollout_worker.rollout.inference_engine,
+                    "model_config": actor_worker.actor_model_config,
+                    "device_mesh": torch.distributed.init_device_mesh(
+                        device_name,
+                        mesh_shape=(
+                            parallel_config.get("rollout_world_size") // parallel_config.get("rollout_parallel_size"),
+                            parallel_config.get("rollout_parallel_size"),
+                        ),
+                        mesh_dim_names=["dp", "infer_tp"],
+                    ),
+                    "rollout_config": rollout_worker.config.rollout,
+                    "full_params": "hf" in rollout_worker.config.rollout.load_format,
+                    "offload_param": getattr(actor_worker, "_is_offload_param", False),
+                },
+            ),
+            ("megatron", "vllm"): (
+                "siirl.workers.sharding_manager.megatron_vllm.MultiAgentMegatronVLLMShardingManager",
+                lambda: {
+                    "actor_module": actor_worker.actor_module,
+                    "inference_engine": rollout_worker.rollout.inference_engine,
+                    "model_config": actor_worker.actor_model_config,
+                    "transformer_config": actor_worker.tf_config,
+                    "layer_name_mapping": layer_name_mapping,
+                    "weight_converter": get_mcore_weight_converter(actor_worker.actor_model_config, actor_worker.dtype),
+                },
+            ),
+            # TODO(Ping Zhang): update for SGLang later
+            ("megatron", "sglang"): (
+                "siirl.workers.sharding_manager.megatron_sglang.MultiAgentMegatronSGLangShardingManager",
+                lambda: {
+                    "actor_module": actor_worker.actor_module,
+                    "inference_engine": rollout_worker.rollout.inference_engine,
+                    "model_config": actor_worker.actor_model_config,
+                    "rollout_config": rollout_worker.config.rollout,
+                    "layer_name_mapping": layer_name_mapping,
+                    "weight_converter": get_mcore_weight_converter(actor_worker.actor_model_config, actor_worker.dtype),
+                },
+            ),
+        }
 
-            sharding_manager_cls = MultiAgentFSDPSGLangShardingManager
-            tp_size = parallel_config.get("rollout_parallel_size")
-            world_size = parallel_config.get("rollout_world_size")
-            rollout_device_mesh = torch.distributed.init_device_mesh(
-                device_name, mesh_shape=(world_size // tp_size, tp_size), mesh_dim_names=["dp", "infer_tp"]
-            )
-            sharding_manager = sharding_manager_cls(
-                module=actor_worker.actor_module_fsdp,
-                inference_engine=rollout_worker.rollout.inference_engine,
-                model_config=actor_worker.actor_model_config,
-                device_mesh=rollout_device_mesh,
-                rollout_config=rollout_worker.config.rollout,
-                full_params="hf" in rollout_worker.config.rollout.load_format,
-                offload_param=getattr(actor_worker, "_is_offload_param", False)
-            )
-        else:
-            raise NotImplementedError(f"{self.config.actor_rollout_ref.rollout.name} not supported")
-        
+        strategy = actor_worker.config.training.strategy.lower()
+        rollout_name = self.config.actor_rollout_ref.rollout.name.lower()
+        if (strategy, rollout_name) not in sharding_manager_map:
+            raise NotImplementedError(f"Unsupported sharding manager configuration: {strategy=}, {rollout_name=}")
+
+        sharding_manager_cls_str, kwargs_builder = sharding_manager_map[(strategy, rollout_name)]
+        sharding_manager_cls = import_string(sharding_manager_cls_str)
+        sharding_manager = sharding_manager_cls(**kwargs_builder())
         rollout_worker.set_rollout_sharding_manager(sharding_manager)
         logger.debug(f"Set up {sharding_manager_cls.__name__}  for agent group {agent_group}.")

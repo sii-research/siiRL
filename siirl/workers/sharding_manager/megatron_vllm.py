@@ -28,7 +28,7 @@ from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
 
 from siirl import DataProto
 from siirl.models.mcore.weight_converter import McoreToHFWeightConverterBase
-from siirl.workers.databuffer import all_gather_data_proto
+from siirl.workers.databuffer.protocol import all_gather_data_proto
 from vllm import LLM
 from vllm.distributed import parallel_state as vllm_ps
 from siirl.utils.debug import GPUMemoryLogger
@@ -261,7 +261,7 @@ Megatron Hybrid Engine:
 _MICRO_DATA_PARALLEL_GROUP = None
 
 
-class MegatronVLLMShardingManager(BaseShardingManager):
+class MultiAgentMegatronVLLMShardingManager(BaseShardingManager):
     @check_device_is_available()
     def __init__(
         self,

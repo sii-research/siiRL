@@ -50,7 +50,7 @@ python3 -m siirl.client.main_dag \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=2 \
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=2 \
-    trainer.logger=['console','wandb'] \
+    trainer.logger=['console'] \
     trainer.project_name=siirl_qwen2.5_7b_grpo \
     trainer.experiment_name=siirl_qwen2.5_7b_grpo_toy \
     trainer.n_gpus_per_node=4 \
