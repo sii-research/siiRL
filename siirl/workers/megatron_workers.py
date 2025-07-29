@@ -89,30 +89,20 @@ class ActorRolloutRefWorker(MegatronWorker):
             rank = int(os.environ["LOCAL_RANK"])
             torch.distributed.init_process_group(backend=get_nccl_backend())
             get_torch_device().set_device(rank)
-
-            # # Store process group info for Megatron
-            # if self.process_group is not None:
-            #     self.group_world_size = torch.distributed.get_world_size(group=self.process_group)
-            #     self.group_rank = torch.distributed.get_rank(group=self.process_group)
-            #     logger.debug(f"Megatron ActorRolloutRefWorker: Using process group with world_size={self.group_world_size}, rank={self.group_rank}")
-            # else:
-            #     self.group_world_size = torch.distributed.get_world_size()
-            #     self.group_rank = torch.distributed.get_rank()
-            #     logger.debug(f"Megatron ActorRolloutRefWorker: Using global process group with world_size={self.group_world_size}, rank={self.group_rank}")
-
-            if self.config.actor.megatron.sequence_parallel:
-                os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-            mpu.initialize_model_parallel(
-                tensor_model_parallel_size=self.config.actor.megatron.tensor_model_parallel_size,
-                pipeline_model_parallel_size=self.config.actor.megatron.pipeline_model_parallel_size,
-                virtual_pipeline_model_parallel_size=self.config.actor.megatron.virtual_pipeline_model_parallel_size,
-                pipeline_model_parallel_split_rank=None,
-                use_sharp=False,
-                context_parallel_size=self.config.actor.megatron.context_parallel_size,
-                expert_model_parallel_size=self.config.actor.megatron.expert_model_parallel_size,
-                expert_tensor_parallel_size=self.config.actor.megatron.expert_tensor_parallel_size,
-                nccl_communicator_config_path=None,
-            )
+        if self.config.actor.megatron.sequence_parallel:
+            os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+    
+        mpu.initialize_model_parallel(
+            tensor_model_parallel_size=self.config.actor.megatron.tensor_model_parallel_size,
+            pipeline_model_parallel_size=self.config.actor.megatron.pipeline_model_parallel_size,
+            virtual_pipeline_model_parallel_size=self.config.actor.megatron.virtual_pipeline_model_parallel_size,
+            pipeline_model_parallel_split_rank=None,
+            use_sharp=False,
+            context_parallel_size=self.config.actor.megatron.context_parallel_size,
+            expert_model_parallel_size=self.config.actor.megatron.expert_model_parallel_size,
+            expert_tensor_parallel_size=self.config.actor.megatron.expert_tensor_parallel_size,
+            nccl_communicator_config_path=None,
+        )
 
         set_random_seed(seed=self.config.actor.megatron.seed)
 
@@ -608,29 +598,19 @@ class CriticWorker(MegatronWorker):
             torch.distributed.init_process_group(backend=get_nccl_backend())
             get_torch_device().set_device(rank)
 
-            # # Store process group info for Megatron integration
-            # if self.process_group is not None:
-            #     self.group_world_size = torch.distributed.get_world_size(group=self.process_group)
-            #     self.group_rank = torch.distributed.get_rank(group=self.process_group)
-            #     logger.debug(f"Megatron CriticWorker: Using process group with world_size={self.group_world_size}, rank={self.group_rank}")
-            # else:
-            #     self.group_world_size = torch.distributed.get_world_size()
-            #     self.group_rank = torch.distributed.get_rank()
-            #     logger.debug(f"Megatron CriticWorker: Using global process group with world_size={self.group_world_size}, rank={self.group_rank}")
-
-            if self.config.megatron.sequence_parallel:
-                os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-            mpu.initialize_model_parallel(
-                tensor_model_parallel_size=self.config.megatron.tensor_model_parallel_size,
-                pipeline_model_parallel_size=self.config.megatron.pipeline_model_parallel_size,
-                virtual_pipeline_model_parallel_size=self.config.megatron.virtual_pipeline_model_parallel_size,
-                pipeline_model_parallel_split_rank=None,
-                use_sharp=False,
-                context_parallel_size=self.config.megatron.context_parallel_size,
-                expert_model_parallel_size=self.config.megatron.expert_model_parallel_size,
-                expert_tensor_parallel_size=self.config.megatron.expert_tensor_parallel_size,
-                nccl_communicator_config_path=None,
-            )
+        if self.config.megatron.sequence_parallel:
+            os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+        mpu.initialize_model_parallel(
+            tensor_model_parallel_size=self.config.megatron.tensor_model_parallel_size,
+            pipeline_model_parallel_size=self.config.megatron.pipeline_model_parallel_size,
+            virtual_pipeline_model_parallel_size=self.config.megatron.virtual_pipeline_model_parallel_size,
+            pipeline_model_parallel_split_rank=None,
+            use_sharp=False,
+            context_parallel_size=self.config.megatron.context_parallel_size,
+            expert_model_parallel_size=self.config.megatron.expert_model_parallel_size,
+            expert_tensor_parallel_size=self.config.megatron.expert_tensor_parallel_size,
+            nccl_communicator_config_path=None,
+        )
 
         set_random_seed(seed=self.config.megatron.seed)
 
@@ -820,30 +800,19 @@ class RewardModelWorker(MegatronWorker):
             rank = int(os.environ["LOCAL_RANK"])
             torch.distributed.init_process_group(backend=get_nccl_backend())
             get_torch_device().set_device(rank)
-
-            # # Store process group info for Megatron integration
-            # if self.process_group is not None:
-            #     self.group_world_size = torch.distributed.get_world_size(group=self.process_group)
-            #     self.group_rank = torch.distributed.get_rank(group=self.process_group)
-            #     logger.debug(f"Megatron RewardModelWorker: Using process group with world_size={self.group_world_size}, rank={self.group_rank}")
-            # else:
-            #     self.group_world_size = torch.distributed.get_world_size()
-            #     self.group_rank = torch.distributed.get_rank()
-            #     logger.debug(f"Megatron RewardModelWorker: Using global process group with world_size={self.group_world_size}, rank={self.group_rank}")
-
-            if self.config.megatron.sequence_parallel:
-                os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-            mpu.initialize_model_parallel(
-                tensor_model_parallel_size=self.config.megatron.tensor_model_parallel_size,
-                pipeline_model_parallel_size=self.config.megatron.pipeline_model_parallel_size,
-                virtual_pipeline_model_parallel_size=self.config.megatron.virtual_pipeline_model_parallel_size,
-                pipeline_model_parallel_split_rank=None,
-                use_sharp=False,
-                context_parallel_size=self.config.megatron.context_parallel_size,
-                expert_model_parallel_size=self.config.megatron.expert_model_parallel_size,
-                expert_tensor_parallel_size=self.config.megatron.expert_tensor_parallel_size,
-                nccl_communicator_config_path=None,
-            )
+        if self.config.megatron.sequence_parallel:
+            os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+        mpu.initialize_model_parallel(
+            tensor_model_parallel_size=self.config.megatron.tensor_model_parallel_size,
+            pipeline_model_parallel_size=self.config.megatron.pipeline_model_parallel_size,
+            virtual_pipeline_model_parallel_size=self.config.megatron.virtual_pipeline_model_parallel_size,
+            pipeline_model_parallel_split_rank=None,
+            use_sharp=False,
+            context_parallel_size=self.config.megatron.context_parallel_size,
+            expert_model_parallel_size=self.config.megatron.expert_model_parallel_size,
+            expert_tensor_parallel_size=self.config.megatron.expert_tensor_parallel_size,
+            nccl_communicator_config_path=None,
+        )
 
         set_random_seed(seed=self.config.megatron.seed)
 

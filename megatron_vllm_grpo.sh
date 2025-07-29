@@ -26,6 +26,7 @@ python3 -m siirl.client.main_dag \
     actor_rollout_ref.actor.strategy=megatron \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=2 \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=2 \
+    actor_rollout_ref.actor.megatron.context_parallel_size=1 \
     actor_rollout_ref.actor.megatron.sequence_parallel=False \
     actor_rollout_ref.actor.megatron.use_distributed_optimizer=True \
     actor_rollout_ref.actor.megatron.param_dtype=bfloat16 \

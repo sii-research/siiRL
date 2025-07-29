@@ -91,7 +91,7 @@ actor_rollout_ref:
     # Megatron-specific configuration
     megatron:
       tensor_model_parallel_size: 2  # Tensor parallelism across 2 GPUs
-      pipeline_model_parallel_size: 2  # Pipeline parallelism across 2 stages  
+      pipeline_model_parallel_size: 2  # Pipeline parallelism across 2 stages
       virtual_pipeline_model_parallel_size: null  # Optional: virtual pipeline stages
       sequence_parallel: True  # Enable Megatron's sequence parallelism
       use_distributed_optimizer: True  # Use Megatron's distributed optimizer (ZeRO-1 style)

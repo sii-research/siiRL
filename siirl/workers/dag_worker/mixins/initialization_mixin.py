@@ -305,11 +305,24 @@ class InitializationMixin:
                     config.actor.optim.total_training_steps = self.dataloader.total_training_steps
                 elif hasattr(config, "optim"):
                     config.optim.total_training_steps = self.dataloader.total_training_steps
-                worker_args = {"config": config, "process_group": node_process_group}
-                if node.node_role in DAGConstants.WORKER_ROLE_MAPPING:
-                    worker_args["role"] = DAGConstants.WORKER_ROLE_MAPPING[node.node_role]
+                
+                # Check if a worker of this class has already been instantiated.
+                # If so, reuse it to avoid re-initializing parallel groups.
+                shared_worker_instance = None
+                for worker in self.workers.values():
+                    if isinstance(worker, worker_cls):
+                        shared_worker_instance = worker
+                        logger.info(f"Reusing existing worker instance of type {worker_cls.__name__} for node {node.node_id}")
+                        break
 
-                worker_instance = worker_cls(**worker_args)
+                if shared_worker_instance:
+                    worker_instance = shared_worker_instance
+                else:
+                    worker_args = {"config": config, "process_group": node_process_group}
+                    if node.node_role in DAGConstants.WORKER_ROLE_MAPPING:
+                        worker_args["role"] = DAGConstants.WORKER_ROLE_MAPPING[node.node_role]
+                    worker_instance = worker_cls(**worker_args)
+
                 self.workers[node_worker_key] = worker_instance
                 self.agent_group_worker[node.agent_group][node.node_role] = worker_instance
                 self.agent_group_process_group[node.agent_group][node.node_role] = node_process_group

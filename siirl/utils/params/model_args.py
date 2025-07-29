@@ -61,6 +61,9 @@ class FSDPArguments:
 class MegatronArguments:
     tensor_model_parallel_size: int = field(default=1, metadata={"help": "Tensor parallelism size"})
     pipeline_model_parallel_size: int = field(default=1, metadata={"help": "Pipeline parallelism size"})
+    context_parallel_size: int = field(default=1, metadata={"help": "Context parallelism size"})
+    expert_model_parallel_size: int = field(default=1, metadata={"help": "Expert model parallelism size"})
+    expert_tensor_parallel_size: int = field(default=1, metadata={"help": "Expert tensor parallelism size"})
     virtual_pipeline_model_parallel_size: Optional[int] = field(default=None, metadata={"help": "Virtual pipeline model parallel size"})
     sequence_parallel: bool = field(default=False, metadata={"help": "Whether the sequence parallel is enabled."})
     use_distributed_optimizer: bool = field(
@@ -69,6 +72,9 @@ class MegatronArguments:
     )
     param_dtype: str = field(default="bfloat16", metadata={"help": "parameter data dtype"})
     seed: int = field(default=1, metadata={"help": "The random seed"})
+    param_offload: bool = field(default=False, metadata={"help": "Offload parameters to CPU"})
+    grad_offload: bool = field(default=False, metadata={"help": "Offload gradients to CPU"})
+    optimizer_offload: bool = field(default=False, metadata={"help": "Offload optimizer states to CPU"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
