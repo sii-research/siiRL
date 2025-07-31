@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import torch.distributed as dist
+import torch.multiprocessing as mp
+
 from collections import deque
 from pprint import pformat
 
-import torch.distributed as dist
 from loguru import logger
 from tqdm import tqdm
 
@@ -81,6 +83,8 @@ class ExecutionMixin:
         """Main entry point to start the DAG execution pipeline."""
         logger.info(f"Rank {self._rank}: Starting DAG execution pipeline...")
         logger.success(f"Rank {self._rank}: All components initialized. Starting training loop from step {self.global_steps + 1}.")
+
+        mp.set_start_method('spawn', force=True)
 
         if self.val_reward_fn and self.config.trainer.val_before_train:
             # _validate handles multi-rank logic internally
