@@ -246,16 +246,17 @@ class InitializationMixin:
             actor_cls = AsyncActorRolloutRefWorker if self.config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
             return {NodeRole.ACTOR: actor_cls, NodeRole.ROLLOUT: actor_cls, NodeRole.REFERENCE: actor_cls, NodeRole.CRITIC: CriticWorker, NodeRole.REWARD: RewardModelWorker}
         elif strategy in DAGConstants.MEGATRON_STRATEGYS:
-            from siirl.workers.megatron_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker, RewardModelWorker
+            from siirl.workers.megatron_workers import ActorWorker, RolloutWorker, AsyncRolloutWorker, ReferenceWorker, CriticWorker, RewardModelWorker
 
-            # TODO(Ping Zhang): support async mode for Megatron backend, currently we only support sync mode.
-            actor_rollout_ref_cls = (
-                AsyncActorRolloutRefWorker
-                if self.config.actor_rollout_ref.rollout.mode == "async"
-                else ActorRolloutRefWorker
-            )
-
-            return {NodeRole.ACTOR: actor_rollout_ref_cls, NodeRole.ROLLOUT: actor_rollout_ref_cls, NodeRole.REFERENCE: actor_rollout_ref_cls, NodeRole.CRITIC: CriticWorker, NodeRole.REWARD: RewardModelWorker}
+            is_async_mode = self.config.actor_rollout_ref.rollout.mode == "async"
+            
+            return {
+                NodeRole.ACTOR: ActorWorker,
+                NodeRole.ROLLOUT: AsyncRolloutWorker if is_async_mode else RolloutWorker,
+                NodeRole.REFERENCE: ReferenceWorker,
+                NodeRole.CRITIC: CriticWorker,
+                NodeRole.REWARD: RewardModelWorker
+            }
         raise NotImplementedError(f"Strategy '{strategy}' is not supported.")
 
     def _setup_role_worker_mapping(self):
@@ -310,24 +311,15 @@ class InitializationMixin:
                     config.actor.optim.total_training_steps = self.dataloader.total_training_steps
                 elif hasattr(config, "optim"):
                     config.optim.total_training_steps = self.dataloader.total_training_steps
+                worker_args = {"config": config, "process_group": node_process_group}
                 
-                # Check if a worker of this class has already been instantiated.
-                # If so, reuse it to avoid re-initializing parallel groups.
-                shared_worker_instance = None
-                for worker in self.workers.values():
-                    if isinstance(worker, worker_cls):
-                        shared_worker_instance = worker
-                        logger.info(f"Reusing existing worker instance of type {worker_cls.__name__} for node {node.node_id}")
-                        break
-
-                if shared_worker_instance:
-                    worker_instance = shared_worker_instance
-                else:
-                    worker_args = {"config": config, "process_group": node_process_group}
+                # For separated workers (Megatron backend), no role parameter is needed
+                # Only legacy ActorRolloutRefWorker needs the role parameter
+                if hasattr(worker_cls, '__name__') and 'ActorRolloutRefWorker' in worker_cls.__name__:
                     if node.node_role in DAGConstants.WORKER_ROLE_MAPPING:
                         worker_args["role"] = DAGConstants.WORKER_ROLE_MAPPING[node.node_role]
-                    worker_instance = worker_cls(**worker_args)
 
+                worker_instance = worker_cls(**worker_args)
                 self.workers[node_worker_key] = worker_instance
                 self.agent_group_worker[node.agent_group][node.node_role] = worker_instance
                 self.agent_group_process_group[node.agent_group][node.node_role] = node_process_group

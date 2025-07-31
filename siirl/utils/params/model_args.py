@@ -218,6 +218,7 @@ class CheckpointArguments:
 @dataclass
 class ActorArguments:
     strategy: str = field(default="fsdp", metadata={"help": "Parallel strategy"})
+    model: ModelArguments = field(default_factory=ModelArguments, metadata={"help": "Model settings"})
     ppo_mini_batch_size: int = field(default=256, metadata={"help": "PPO mini-batch size"})
     ppo_micro_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Micro-batch size"})
     ppo_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU micro-batch size"})
@@ -250,6 +251,7 @@ class ActorArguments:
     recompute_old_log_prob: bool = field(default=True, metadata={"help": "recompute old log prob"})
     use_cpgd_loss: bool = field(default=False, metadata={"help": "use cpgd loss"})
     policy_drift_coeff: float = field(default=0.0, metadata={"help": "policy drift coeff for CPGD"})
+    rollout_n: int = field(default=1, metadata={"help": "Number of rollout samples per prompt"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -320,6 +322,8 @@ class EngineArguments:
 @dataclass
 class RolloutArguments:
     name: str = field(default="vllm", metadata={"help": "Rollout engine"})
+    model: ModelArguments = field(default_factory=ModelArguments, metadata={"help": "Model settings"})
+    megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
     temperature: float = field(default=1.0, metadata={"help": "Sampling temperature"})
     top_k: int = field(default=-1, metadata={"help": "Top-k sampling"})
     top_p: float = field(default=1.0, metadata={"help": "Top-p sampling"})
@@ -364,6 +368,7 @@ class RolloutArguments:
 @dataclass
 class RefArguments:
     strategy: str = field(default="fsdp", metadata={"help": "Parallel strategy"})
+    model: ModelArguments = field(default_factory=ModelArguments, metadata={"help": "Model settings"})
     fsdp_config: FSDPArguments = field(default_factory=FSDPArguments, metadata={"help": "Reference FSDP settings"})
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
     log_prob_micro_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Log prob batch size"})
@@ -380,6 +385,7 @@ class RefArguments:
     grad_offload: bool = field(default=False, metadata={"help": "Enable grad offload or not"})
     optimizer_offload: bool = field(default=False, metadata={"help": "Enable optimizer offload or not"})
     load_weight: bool = field(default=True)
+    temperature: float = field(default=1.0, metadata={"help": "Sampling temperature"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
