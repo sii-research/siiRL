@@ -128,15 +128,19 @@ actor_rollout_ref:
     n: 4  # Number of responses per prompt, i.e., rollout.n. Mainly for algorithms like GRPO.
     tensor_model_parallel_size: 2  # Should match actor's TP size for weight sharing
     temperature: 0.7
-    max_new_tokens: 512
+    max_new_tokens: 512 
     log_prob_micro_batch_size: null
     log_prob_micro_batch_size_per_gpu: null
     log_prob_use_dynamic_bsz: False
     log_prob_max_token_len_per_gpu: 16384
-    gpu_memory_utilization: 0.7
+    gpu_memory_utilization: 0.3
+    max_num_seqs: 128
     enable_chunked_prefill: False
-    enforce_eager: False
+    enforce_eager: True
     free_cache_engine: False
+    load_format: dummy_dtensor  # Use dummy weights that will be replaced by weight sharing
+    max_model_len: 4096 # Limit sequence length to reduce KV cache memory
+    max_num_batched_tokens: 2048  # Reduce batched tokens for memory efficiency
 
 # Critic configuration
 critic:

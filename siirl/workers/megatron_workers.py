@@ -511,6 +511,8 @@ class ActorRolloutRefWorker(MegatronWorker):
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_module)
 
+    def set_rollout_sharding_manager(self, sharding_manager):
+        self.sharding_manager = sharding_manager
 
 class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
     def _build_rollout(self, trust_remote_code=False):
@@ -548,6 +550,9 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
         # return something to block the caller
         return True
 
+    def set_rollout_sharding_manager(self, sharding_manager):
+        super().set_rollout_sharding_manager(sharding_manager)
+        self.rollout.sharding_manager = sharding_manager
 
 class CriticWorker(MegatronWorker):
     def __init__(self, config, process_group=None):
