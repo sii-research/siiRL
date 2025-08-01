@@ -42,7 +42,7 @@ Megatron Hybrid Engine:
 """
 
 
-class MegatronSGLangShardingManager(BaseShardingManager):
+class MultiAgentMegatronSGLangShardingManager(BaseShardingManager):
     def __init__(
         self,
         actor_module: nn.ModuleList,

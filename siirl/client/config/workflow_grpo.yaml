@@ -24,7 +24,7 @@ actor1_config: &actor1_config
   rollout.n: 16
 
 nodes:
-  - node_id: "rollout_actor"
+  - node_id: "rollout"
     node_type: "MODEL_INFERENCE"
     node_role: "ROLLOUT"
     dependencies: []
@@ -33,7 +33,7 @@ nodes:
     node_type: "COMPUTE"
     node_role: "REWARD"
     dependencies:
-      - "rollout_actor"
+      - "rollout"
     
   - node_id: "calculate_advantages"
     node_type: "COMPUTE"

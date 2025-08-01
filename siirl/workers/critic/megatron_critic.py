@@ -18,6 +18,7 @@ Implement a multiprocess PPOCritic
 import itertools
 from functools import partial
 from typing import Iterable
+from loguru import logger
 
 import torch
 import torch.distributed

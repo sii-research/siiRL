@@ -2,7 +2,7 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 # Copyright 2023-2024 SGLang Team
 # Copyright 2025 ModelBest Inc. and/or its affiliates
-#
+# Copyright 2025, Infrawaves. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -202,9 +202,9 @@ def convert_config(hf_config: PretrainedConfig, megatron_config) -> TransformerC
 def init_megatron_optim_config(optim_config: Dict) -> OptimizerConfig:
     config = OptimizerConfig(
         optimizer="adam",
-        lr=optim_config.get("lr"),
-        clip_grad=optim_config.get("clip_grad"),
-        weight_decay=optim_config.get("weight_decay"),
+        lr=optim_config.lr,
+        clip_grad=optim_config.clip_grad,
+        weight_decay=optim_config.weight_decay,
         bf16=True,
         params_dtype=torch.bfloat16,
         use_distributed_optimizer=True,
@@ -427,6 +427,21 @@ def print_rank_0(message):
             print(message, flush=True)
     else:
         print(message, flush=True)
+
+
+def print_rank_0_tensor(message, tensor, full=False):
+    """If distributed is initialized, print only on rank 0."""
+    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+        if full:
+            # Save original print options
+            previous_profile = torch.get_printoptions()
+            # Set to print full tensor
+            torch.set_printoptions(profile="full", sci_mode=False)
+            print(message, tensor, flush=True)
+            # Restore original print options
+            torch.set_printoptions(**previous_profile)
+        else:
+            print(message, tensor, flush=True)
 
 
 def get_model_checkpoint_path(checkpoint_path):
@@ -667,7 +682,15 @@ def broadcast_str_from_megatron_pp(obj: Any):
     return obj_output[0]
 
 
-def default_tp_concat_fn(layer_name_mapping, name, train_params, infer_params, model_config, convert_qkv_gate_up_by_simple_split=False):
+def default_tp_concat_fn(
+    layer_name_mapping,
+    name,
+    train_params,
+    infer_params,
+    model_config,
+    hf_config=None,
+    convert_qkv_gate_up_by_simple_split=False,
+):
     """
     name: name of the parameter
     train_params: training parameters
@@ -679,21 +702,33 @@ def default_tp_concat_fn(layer_name_mapping, name, train_params, infer_params, m
     """
     from megatron.core import mpu
 
+    train_tp_size = mpu.get_tensor_model_parallel_world_size()
     if layer_name_mapping.get("qkv_layer_name") in name and "layer_norm" not in name:
         # if the tensor is qkv, for each param on tp, split into q, k, v
         # concat q, k, v separately.
         q_lst = []
         k_lst = []
         v_lst = []
-        assert model_config.num_attention_heads % model_config.num_key_value_heads == 0
-        num_q_per_kv = model_config.num_attention_heads // model_config.num_key_value_heads
-        assert infer_params[0].shape[0] % (num_q_per_kv + 2) == 0, f"param '{name}' shape '{infer_params[0].shape}' dim0 is not divisible by {num_q_per_kv + 2}"
+        num_attention_heads = model_config.num_attention_heads
+        num_key_value_heads = model_config.num_key_value_heads
+        if "vision_model" in name:
+            num_attention_heads = hf_config.vision_config.num_heads
+            num_key_value_heads = hf_config.vision_config.num_heads
+        assert num_attention_heads % num_key_value_heads == 0
+        num_q_per_kv = num_attention_heads // num_key_value_heads
+        assert infer_params[0].shape[0] % (num_q_per_kv + 2) == 0, (
+            f"param '{name}' shape '{infer_params[0].shape}' dim0 is not divisible by {num_q_per_kv + 2}"
+        )
         kv_size_per_tp = infer_params[0].shape[0] // (num_q_per_kv + 2)
         split_size = [kv_size_per_tp * num_q_per_kv, kv_size_per_tp, kv_size_per_tp]
         for infer_param in infer_params:
-            num_query_groups_per_partition = model_config.num_key_value_heads // mpu.get_tensor_model_parallel_world_size()
+            num_query_groups_per_partition = num_key_value_heads // train_tp_size
             for chunk in infer_param.chunk(num_query_groups_per_partition):
-                split_size = [kv_size_per_tp * num_q_per_kv // num_query_groups_per_partition, kv_size_per_tp // num_query_groups_per_partition, kv_size_per_tp // num_query_groups_per_partition]
+                split_size = [
+                    kv_size_per_tp * num_q_per_kv // num_query_groups_per_partition,
+                    kv_size_per_tp // num_query_groups_per_partition,
+                    kv_size_per_tp // num_query_groups_per_partition,
+                ]
                 q, k, v = chunk.split(split_size)
                 q_lst.append(q)
                 k_lst.append(k)
@@ -703,7 +738,11 @@ def default_tp_concat_fn(layer_name_mapping, name, train_params, infer_params, m
         v = torch.cat(v_lst, dim=0)
         infer_params = torch.cat((q, k, v), dim=0) if not convert_qkv_gate_up_by_simple_split else [q, k, v]
 
-    elif layer_name_mapping.get("gate_proj_layer_name") in name:
+    elif (
+        layer_name_mapping.get("gate_proj_layer_name") in name
+        and "layer_norm" not in name
+        and "vision_model.projection" not in name
+    ):
         # if the tensor is gate and proj
         gate_lst = []
         up_lst = []
@@ -790,6 +829,13 @@ def per_tensor_generator(actor_module, model_config, weight_converter, transform
         # pp broadcast model tensor and name
         cur_name = broadcast_str_from_megatron_pp(cur_name)
         broad_pp_tensor = broadcast_from_megatron_pp(cur_tensor)
+        print_rank_0_tensor(
+            f"xxxxxxxxxxxxxx broad_pp_tensor (shape: {broad_pp_tensor.shape}, "
+            f"device: {broad_pp_tensor.device}, dtype: {broad_pp_tensor.dtype}, "
+            f"size: {broad_pp_tensor.size()}, is_meta: {broad_pp_tensor.is_meta}):",
+            broad_pp_tensor,
+            full=True,
+        )
 
         # (xya): this is a hack to fix the name of the parameters
         while cur_name.startswith("module."):
