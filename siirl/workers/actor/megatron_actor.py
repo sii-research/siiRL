@@ -136,8 +136,8 @@ class MegatronPPOActor(BasePPOActor):
 
     def _validate_config(self, config) -> None:
         """Validate config options not implemented for Megatron backend"""
-        assert config.get("ulysses_sequence_parallel_size", 1) == 1
-        if config.get("shuffle", False):
+        assert config.ulysses_sequence_parallel_size == 1
+        if config.shuffle:
             assert config.data_loader_seed is not None, "If shuffle dataloader, seed must be manually set"
         if config.megatron.tensor_model_parallel_size == 1:
             print("[Warining] Because actor tp size == 1, set sp to False")

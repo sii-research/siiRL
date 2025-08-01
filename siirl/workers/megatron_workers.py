@@ -93,20 +93,20 @@ class ActorRolloutRefWorker(MegatronWorker):
             rank = int(os.environ["LOCAL_RANK"])
             torch.distributed.init_process_group(backend=get_nccl_backend())
             get_torch_device().set_device(rank)
-        if self.config.actor.megatron.sequence_parallel:
-            os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-    
-        mpu.initialize_model_parallel(
-            tensor_model_parallel_size=self.config.actor.megatron.tensor_model_parallel_size,
-            pipeline_model_parallel_size=self.config.actor.megatron.pipeline_model_parallel_size,
-            virtual_pipeline_model_parallel_size=self.config.actor.megatron.virtual_pipeline_model_parallel_size,
-            pipeline_model_parallel_split_rank=None,
-            use_sharp=False,
-            context_parallel_size=self.config.actor.megatron.context_parallel_size,
-            expert_model_parallel_size=self.config.actor.megatron.expert_model_parallel_size,
-            expert_tensor_parallel_size=self.config.actor.megatron.expert_tensor_parallel_size,
-            nccl_communicator_config_path=None,
-        )
+            if self.config.actor.megatron.sequence_parallel:
+                os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+        
+            mpu.initialize_model_parallel(
+                tensor_model_parallel_size=self.config.actor.megatron.tensor_model_parallel_size,
+                pipeline_model_parallel_size=self.config.actor.megatron.pipeline_model_parallel_size,
+                virtual_pipeline_model_parallel_size=self.config.actor.megatron.virtual_pipeline_model_parallel_size,
+                pipeline_model_parallel_split_rank=None,
+                use_sharp=False,
+                context_parallel_size=self.config.actor.megatron.context_parallel_size,
+                expert_model_parallel_size=self.config.actor.megatron.expert_model_parallel_size,
+                expert_tensor_parallel_size=self.config.actor.megatron.expert_tensor_parallel_size,
+                nccl_communicator_config_path=None,
+            )
 
         set_random_seed(seed=self.config.actor.megatron.seed)
 
@@ -157,7 +157,7 @@ class ActorRolloutRefWorker(MegatronWorker):
         def megatron_actor_model_provider(pre_process, post_process):
             from siirl.models.mcore import init_mcore_model
 
-            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=self.share_embeddings_and_output_weights, value=False, freeze_moe_router=override_model_config.moe_config.freeze_moe_router)
+            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=self.share_embeddings_and_output_weights, value=False, freeze_moe_router=override_model_config.get("moe_config", {}).get("freeze_moe_router", False))
             parallel_model.to(get_device_name())
             return parallel_model
 
@@ -568,19 +568,19 @@ class CriticWorker(MegatronWorker):
             torch.distributed.init_process_group(backend=get_nccl_backend())
             get_torch_device().set_device(rank)
 
-        if self.config.megatron.sequence_parallel:
-            os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-        mpu.initialize_model_parallel(
-            tensor_model_parallel_size=self.config.megatron.tensor_model_parallel_size,
-            pipeline_model_parallel_size=self.config.megatron.pipeline_model_parallel_size,
-            virtual_pipeline_model_parallel_size=self.config.megatron.virtual_pipeline_model_parallel_size,
-            pipeline_model_parallel_split_rank=None,
-            use_sharp=False,
-            context_parallel_size=self.config.megatron.context_parallel_size,
-            expert_model_parallel_size=self.config.megatron.expert_model_parallel_size,
-            expert_tensor_parallel_size=self.config.megatron.expert_tensor_parallel_size,
-            nccl_communicator_config_path=None,
-        )
+            if self.config.megatron.sequence_parallel:
+                os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+            mpu.initialize_model_parallel(
+                tensor_model_parallel_size=self.config.megatron.tensor_model_parallel_size,
+                pipeline_model_parallel_size=self.config.megatron.pipeline_model_parallel_size,
+                virtual_pipeline_model_parallel_size=self.config.megatron.virtual_pipeline_model_parallel_size,
+                pipeline_model_parallel_split_rank=None,
+                use_sharp=False,
+                context_parallel_size=self.config.megatron.context_parallel_size,
+                expert_model_parallel_size=self.config.megatron.expert_model_parallel_size,
+                expert_tensor_parallel_size=self.config.megatron.expert_tensor_parallel_size,
+                nccl_communicator_config_path=None,
+            )
 
         set_random_seed(seed=self.config.megatron.seed)
 
@@ -762,23 +762,22 @@ class RewardModelWorker(MegatronWorker):
         # 1, users should disable WorkerDict; 2.assign different ResourcePool to different models,
         # 3. and apply the following patch in ray==2.10, https://github.com/ray-project/ray/pull/44385
         if not torch.distributed.is_initialized():
-            # Use LOCAL_RANK for device setting, but respect process group for distributed ops
             rank = int(os.environ["LOCAL_RANK"])
             torch.distributed.init_process_group(backend=get_nccl_backend())
             get_torch_device().set_device(rank)
-        if self.config.megatron.sequence_parallel:
-            os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-        mpu.initialize_model_parallel(
-            tensor_model_parallel_size=self.config.megatron.tensor_model_parallel_size,
-            pipeline_model_parallel_size=self.config.megatron.pipeline_model_parallel_size,
-            virtual_pipeline_model_parallel_size=self.config.megatron.virtual_pipeline_model_parallel_size,
-            pipeline_model_parallel_split_rank=None,
-            use_sharp=False,
-            context_parallel_size=self.config.megatron.context_parallel_size,
-            expert_model_parallel_size=self.config.megatron.expert_model_parallel_size,
-            expert_tensor_parallel_size=self.config.megatron.expert_tensor_parallel_size,
-            nccl_communicator_config_path=None,
-        )
+            if self.config.megatron.sequence_parallel:
+                os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+            mpu.initialize_model_parallel(
+                tensor_model_parallel_size=self.config.megatron.tensor_model_parallel_size,
+                pipeline_model_parallel_size=self.config.megatron.pipeline_model_parallel_size,
+                virtual_pipeline_model_parallel_size=self.config.megatron.virtual_pipeline_model_parallel_size,
+                pipeline_model_parallel_split_rank=None,
+                use_sharp=False,
+                context_parallel_size=self.config.megatron.context_parallel_size,
+                expert_model_parallel_size=self.config.megatron.expert_model_parallel_size,
+                expert_tensor_parallel_size=self.config.megatron.expert_tensor_parallel_size,
+                nccl_communicator_config_path=None,
+            )
 
         set_random_seed(seed=self.config.megatron.seed)
 
@@ -882,6 +881,34 @@ class RewardModelWorker(MegatronWorker):
 
 # ================================= Separated Workers =================================
 
+IS_INITIALIZED = False
+
+def global_initialize_model_parallel(config):
+    global IS_INITIALIZED
+    if IS_INITIALIZED:
+        return
+
+    # initialize model parallel
+    rank = int(os.environ["LOCAL_RANK"])
+    get_torch_device().set_device(rank)
+    if config.megatron.sequence_parallel:
+        os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+    mpu.initialize_model_parallel(
+            tensor_model_parallel_size=config.megatron.tensor_model_parallel_size,
+            pipeline_model_parallel_size=config.megatron.pipeline_model_parallel_size,
+            virtual_pipeline_model_parallel_size=config.megatron.virtual_pipeline_model_parallel_size,
+            pipeline_model_parallel_split_rank=None,
+            use_sharp=False,
+            context_parallel_size=config.megatron.context_parallel_size,
+            expert_model_parallel_size=config.megatron.expert_model_parallel_size,
+            expert_tensor_parallel_size=config.megatron.expert_tensor_parallel_size,
+            nccl_communicator_config_path=None,
+        )    
+    set_random_seed(seed=config.megatron.seed)
+    
+    IS_INITIALIZED = True
+    
+
 class ActorWorker(MegatronWorker):
     """
     Dedicated worker for actor training
@@ -891,27 +918,7 @@ class ActorWorker(MegatronWorker):
         super().__init__()
         self.config = config
 
-        if not torch.distributed.is_initialized():
-            # Use LOCAL_RANK for device setting, but respect process group for distributed ops
-            rank = int(os.environ["LOCAL_RANK"])
-            torch.distributed.init_process_group(backend=get_nccl_backend())
-            get_torch_device().set_device(rank)
-        if self.config.megatron.sequence_parallel:
-            os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-    
-        mpu.initialize_model_parallel(
-            tensor_model_parallel_size=self.config.megatron.tensor_model_parallel_size,
-            pipeline_model_parallel_size=self.config.megatron.pipeline_model_parallel_size,
-            virtual_pipeline_model_parallel_size=self.config.megatron.virtual_pipeline_model_parallel_size,
-            pipeline_model_parallel_split_rank=None,
-            use_sharp=False,
-            context_parallel_size=self.config.megatron.context_parallel_size,
-            expert_model_parallel_size=self.config.megatron.expert_model_parallel_size,
-            expert_tensor_parallel_size=self.config.megatron.expert_tensor_parallel_size,
-            nccl_communicator_config_path=None,
-        )
-
-        set_random_seed(seed=self.config.megatron.seed)
+        global_initialize_model_parallel(self.config)
 
         # normalize config - use rollout_n from ActorArguments
         self.config.ppo_mini_batch_size *= self.config.rollout_n
@@ -930,12 +937,11 @@ class ActorWorker(MegatronWorker):
         from siirl.utils.model_utils.model import get_generation_config, print_model_size
 
         self._init_hf_config_and_tf_config(model_path, model_path, self.dtype, override_model_config, override_transformer_config, self.config.model.trust_remote_code)
-        self.generation_config = get_generation_config(self.local_path)
 
         def megatron_actor_model_provider(pre_process, post_process):
             from siirl.models.mcore import init_mcore_model
 
-            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=self.share_embeddings_and_output_weights, value=False, freeze_moe_router=override_model_config.moe_config.freeze_moe_router)
+            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=self.share_embeddings_and_output_weights, value=False, freeze_moe_router=override_model_config.get("moe_config", {}).get("freeze_moe_router", False))
             parallel_model.to(get_device_name())
             return parallel_model
 
@@ -1106,65 +1112,12 @@ class RolloutWorker(MegatronWorker):
         super().__init__()
         self.config = config
 
-        if not torch.distributed.is_initialized():
-            # Use LOCAL_RANK for device setting, but respect process group for distributed ops
-            rank = int(os.environ["LOCAL_RANK"])
-            torch.distributed.init_process_group(backend=get_nccl_backend())
-            get_torch_device().set_device(rank)
-        if self.config.megatron.sequence_parallel:
-            os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-    
-        mpu.initialize_model_parallel(
-            tensor_model_parallel_size=self.config.megatron.tensor_model_parallel_size,
-            pipeline_model_parallel_size=self.config.megatron.pipeline_model_parallel_size,
-            virtual_pipeline_model_parallel_size=self.config.megatron.virtual_pipeline_model_parallel_size,
-            pipeline_model_parallel_split_rank=None,
-            use_sharp=False,
-            context_parallel_size=self.config.megatron.context_parallel_size,
-            expert_model_parallel_size=self.config.megatron.expert_model_parallel_size,
-            expert_tensor_parallel_size=self.config.megatron.expert_tensor_parallel_size,
-            nccl_communicator_config_path=None,
-        )
-
-        set_random_seed(seed=self.config.megatron.seed)
-
         # normalize rollout config
+        global_initialize_model_parallel(self.config)
+
         if self.config.log_prob_micro_batch_size:
             self.config.log_prob_micro_batch_size //= mpu.get_data_parallel_world_size()
             self.config.log_prob_micro_batch_size_per_gpu = self.config.log_prob_micro_batch_size
-
-    def _build_rollout_model(self, model_path, override_model_config, override_transformer_config):
-        from siirl.utils.megatron.megatron_utils import get_model
-        from siirl.utils.model_utils.model import get_generation_config, print_model_size
-
-        self._init_hf_config_and_tf_config(model_path, model_path, self.dtype, override_model_config, override_transformer_config, self.config.model.trust_remote_code)
-        self.generation_config = get_generation_config(self.local_path)
-
-        def megatron_rollout_model_provider(pre_process, post_process):
-            from siirl.models.mcore import init_mcore_model
-
-            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=self.share_embeddings_and_output_weights, value=False, freeze_moe_router=override_model_config.moe_config.freeze_moe_router)
-            parallel_model.to(get_device_name())
-            return parallel_model
-
-        # Initialize the megatron model
-        rollout_module = get_model(
-            megatron_rollout_model_provider,
-            wrap_with_ddp=True,
-            use_distributed_optimizer=self.config.megatron.use_distributed_optimizer,
-        )
-        print(f"rollout_module: {len(rollout_module)}")
-        if self.config.load_weight:
-            if self.config.megatron.use_dist_checkpointing:
-                load_mcore_dist_weights(rollout_module, self.config.megatron.dist_checkpointing_path, is_value_model=False)
-            else:
-                load_megatron_gptmodel_weights(self.config, self.hf_config, rollout_module, params_dtype=self.dtype, is_value_model=False)
-
-        if self.rank == 0:
-            print_model_size(rollout_module[0])
-        log_gpu_memory_usage("After MegatronPPORollout init", logger=logger)
-
-        return rollout_module, self.hf_config
 
     def _build_rollout(self, trust_remote_code=False):
         from torch.distributed.device_mesh import init_device_mesh
@@ -1228,32 +1181,32 @@ class RolloutWorker(MegatronWorker):
 
     def init_model(self):
         import_external_libs(self.config.model.external_lib)
-
-        override_model_config = self.config.model.override_config
-        override_transformer_config = self.config.megatron.override_transformer_config
-        
-        if not override_transformer_config:
-            override_transformer_config = OmegaConf.create()
-        
         self.param_dtype = torch.bfloat16
-        log_gpu_memory_usage("Before init rollout model", logger=logger)
+        log_gpu_memory_usage("Before init rollout inference engine", logger=logger)
 
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
-        # we need the model for rollout
-        self.rollout_module, self.rollout_model_config = self._build_rollout_model(
-            model_path=self.config.model.path,
-            override_model_config=override_model_config,
-            override_transformer_config=override_transformer_config,
+        # Initialize HF config and tokenizer for inference engine setup
+        from siirl.utils.model_utils.model import get_generation_config
+        from siirl.models.loader import load_tokenizer
+        from transformers import AutoConfig
+        
+        self.local_path = copy_to_local(self.config.model.path, use_shm=self.config.model.use_shm)
+        self.tokenizer = load_tokenizer(model_args=self.config.model)['tokenizer']
+        self.generation_config = get_generation_config(self.local_path)
+        
+        # Load HF config for inference engines without building Megatron model
+        self.rollout_model_config = AutoConfig.from_pretrained(
+            self.local_path,
+            trust_remote_code=self.config.model.trust_remote_code
         )
 
+        # Only build the inference engine (vLLM/SGLang) - no need for Megatron model
         self.rollout, self.sharding_manager = self._build_rollout(trust_remote_code=self.config.model.trust_remote_code)
         # used for sleep/wake_up
         self.rollout.sharding_manager = self.sharding_manager
-        log_gpu_memory_usage("After rollout init", logger=logger)
-
         get_torch_device().empty_cache()
-        log_gpu_memory_usage("After init_model finish", logger=logger)
+        log_gpu_memory_usage("After rollout init", logger=logger)
 
     @GPUMemoryLogger(role="generate_sequences", logger=logger)
     def generate_sequences(self, prompts: DataProto):
@@ -1299,27 +1252,7 @@ class ReferenceWorker(MegatronWorker):
         super().__init__()
         self.config = config
 
-        if not torch.distributed.is_initialized():
-            # Use LOCAL_RANK for device setting, but respect process group for distributed ops
-            rank = int(os.environ["LOCAL_RANK"])
-            torch.distributed.init_process_group(backend=get_nccl_backend())
-            get_torch_device().set_device(rank)
-        if self.config.megatron.sequence_parallel:
-            os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-    
-        mpu.initialize_model_parallel(
-            tensor_model_parallel_size=self.config.megatron.tensor_model_parallel_size,
-            pipeline_model_parallel_size=self.config.megatron.pipeline_model_parallel_size,
-            virtual_pipeline_model_parallel_size=self.config.megatron.virtual_pipeline_model_parallel_size,
-            pipeline_model_parallel_split_rank=None,
-            use_sharp=False,
-            context_parallel_size=self.config.megatron.context_parallel_size,
-            expert_model_parallel_size=self.config.megatron.expert_model_parallel_size,
-            expert_tensor_parallel_size=self.config.megatron.expert_tensor_parallel_size,
-            nccl_communicator_config_path=None,
-        )
-
-        set_random_seed(seed=self.config.megatron.seed)
+        global_initialize_model_parallel(self.config)
 
         # normalize ref config
         if self.config.log_prob_micro_batch_size:
@@ -1341,7 +1274,7 @@ class ReferenceWorker(MegatronWorker):
         def megatron_ref_model_provider(pre_process, post_process):
             from siirl.models.mcore import init_mcore_model
 
-            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=self.share_embeddings_and_output_weights, value=False, freeze_moe_router=override_model_config.moe_config.freeze_moe_router)
+            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=self.share_embeddings_and_output_weights, value=False, freeze_moe_router=override_model_config.get("moe_config", {}).get("freeze_moe_router", False))
             parallel_model.to(get_device_name())
             return parallel_model
 

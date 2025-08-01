@@ -1,5 +1,5 @@
 # Copyright 2025, Shanghai Innovation Institute. All rights reserved.
-#
+# Copyright 2025, Infrawaves. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -277,17 +277,17 @@ class RayTrainer:
 
             # Based on the node's type and role, select the correct config object and validator function.
             if node.node_type == NodeType.MODEL_TRAIN and node.node_role == NodeRole.ACTOR:
-                assert isinstance(intern_config, ActorRolloutRefArguments), f"Node {node_id} intern config illegal"
+                assert isinstance(intern_config, ActorArguments), f"Node {node_id} intern config illegal"
                 # Calculate the effective batch size considering the number of rollouts per sample.
-                real_train_batch_size = self.base_config.data.train_batch_size * intern_config.rollout.n
+                real_train_batch_size = self.base_config.data.train_batch_size * intern_config.rollout_n
                 assert real_train_batch_size % self.total_gpu == 0, f"real_train_batch_size ({real_train_batch_size}) must be divisible by total n_gpus ({self.total_gpu})."
-                node_specific_config = intern_config.actor
+                node_specific_config = intern_config
                 validator_function = self.validate_actor_config
                 use_remove_padding = intern_config.model.use_remove_padding
                 component_name_for_logging = "Actor"
             elif node.node_type == NodeType.MODEL_INFERENCE and node.node_role == NodeRole.ROLLOUT:
-                assert isinstance(intern_config, ActorRolloutRefArguments), f"Node {node_id} intern config illegal"
-                node_specific_config = intern_config.rollout
+                assert isinstance(intern_config, RolloutArguments), f"Node {node_id} intern config illegal"
+                node_specific_config = intern_config
                 validator_function = self.validate_rollout_config
                 component_name_for_logging = "Rollout"
             elif node.node_type == NodeType.MODEL_TRAIN and node.node_role == NodeRole.CRITIC:
@@ -305,11 +305,11 @@ class RayTrainer:
                     component_name_for_logging = "RewardModel"
                     use_remove_padding = intern_config.model.use_remove_padding
             elif node.node_type == NodeType.MODEL_TRAIN and node.node_role == NodeRole.REFERENCE:
-                assert isinstance(intern_config, ActorRolloutRefArguments), f"Node {node_id} intern config illegal"
-                node_specific_config = intern_config.ref
+                assert isinstance(intern_config, RefArguments), f"Node {node_id} intern config illegal"
+                node_specific_config = intern_config
                 validator_function = self.validate_reference_config
                 component_name_for_logging = "ReferencePolicy"
-                use_remove_padding = intern_config.ref.use_remove_padding
+                use_remove_padding = intern_config.use_remove_padding
 
             # If a validator was found for the node, execute it.
             if validator_function and node_specific_config is not None:

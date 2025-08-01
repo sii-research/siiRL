@@ -41,7 +41,7 @@ data:
 actor_rollout_ref:
   hybrid_engine: True
   model:
-    path: ~/models/deepseek-llm-7b-chat
+    path: /workspace/infrawaves/Qwen2.5-7B-Instruct
     use_shm: False
     external_lib: null
     override_config: { }
@@ -106,6 +106,9 @@ actor_rollout_ref:
       param_offload: False  # Offload parameters to CPU
       grad_offload: False   # Offload gradients to CPU 
       optimizer_offload: False  # Offload optimizer states to CPU
+      override_transformer_config: {}
+      use_dist_checkpointing: False
+      dist_checkpointing_path: ""
   ref:
     strategy: megatron  # Reference policy also uses Megatron during forward pass
     log_prob_micro_batch_size_per_gpu: null
@@ -121,6 +124,7 @@ actor_rollout_ref:
       expert_model_parallel_size: 1
       expert_tensor_parallel_size: 1
       param_offload: False  # TODO(Ping Zhang): we will revisit and optimize this later
+      override_transformer_config: ${actor_rollout_ref.actor.megatron.override_transformer_config}
   rollout:
     # Rollout configuration - uses vLLM with tensor parallelism
     name: vllm  # Currently only vLLM is supported with Megatron backend
@@ -171,7 +175,7 @@ critic:
   checkpoint:
     contents: ['model', 'optimizer', 'extra']
   model:
-    path: ~/models/deepseek-llm-7b-chat  # Can be same as actor or different
+    path: /workspace/infrawaves/Qwen2.5-7B-Instruct  # Can be same as actor or different
     use_shm: False
     external_lib: null
     override_config: { }
@@ -194,13 +198,14 @@ critic:
     param_offload: False
     grad_offload: False
     optimizer_offload: False
+    override_transformer_config: ${actor_rollout_ref.actor.megatron.override_transformer_config}
 
 # Reward model configuration (optional)
 reward_model:
   enable: False  # Set to True to enable reward model
   strategy: megatron
   model:
-    path: ~/models/reward-model-7b
+    path: /workspace/infrawaves/Qwen2.5-7B-Instruct
     use_shm: False
     trust_remote_code: False
   micro_batch_size_per_gpu: null
@@ -213,6 +218,7 @@ reward_model:
     use_distributed_optimizer: False
     param_dtype: "bfloat16"
     seed: 1
+    override_transformer_config: {}
 
 # Training configuration
 trainer:

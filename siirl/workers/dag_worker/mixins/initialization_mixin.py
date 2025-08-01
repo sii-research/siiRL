@@ -210,7 +210,7 @@ class InitializationMixin:
         if self.dataloader_process_group is None:
             raise ValueError(f"Could not find process group '{process_group_name}' in the created groups.")
 
-        self.dataloader_tensor_model_parallel_size = self.first_rollout_node.config[DAGConstants.INTERN_CONFIG].rollout.tensor_model_parallel_size
+        self.dataloader_tensor_model_parallel_size = self.first_rollout_node.config[DAGConstants.INTERN_CONFIG].tensor_model_parallel_size
 
         self.dataloader = DataLoaderNode(
             node_id="dataloader",
@@ -425,7 +425,7 @@ class InitializationMixin:
                     continue
                 node_worker.init_model()
                 have_init_workers.add(self._generate_node_worker_key(node))
-                if node.node_role == NodeRole.ROLLOUT and node.config['intern_config'].rollout.mode == 'async':
+                if node.node_role == NodeRole.ROLLOUT and node.config['intern_config'].mode == 'async':
                     self.rollout_mode = 'async'
                     self.zmq_address = node_worker.get_zeromq_address()
         logger.success("All worker models initialized.")
@@ -446,7 +446,7 @@ class InitializationMixin:
         rollout_worker = worker_dict[NodeRole.ROLLOUT]
         rollout_pg = self.agent_group_process_group[agent_group][NodeRole.ROLLOUT]
 
-        parallel_config = {"rollout_parallel_size": rollout_worker.config.rollout.tensor_model_parallel_size, "rollout_world_size": dist.get_world_size(rollout_pg), "rollout_rank": dist.get_rank(rollout_pg)}
+        parallel_config = {"rollout_parallel_size": rollout_worker.config.tensor_model_parallel_size, "rollout_world_size": dist.get_world_size(rollout_pg), "rollout_rank": dist.get_rank(rollout_pg)}
 
         device_name = get_device_name()
         layer_name_mapping = {
@@ -463,7 +463,7 @@ class InitializationMixin:
                     "inference_engine": rollout_worker.rollout.inference_engine,
                     "model_config": actor_worker.actor_model_config,
                     "parallel_config": parallel_config,
-                    "full_params": "hf" in rollout_worker.config.rollout.load_format,
+                    "full_params": "hf" in rollout_worker.config.load_format,
                     "offload_param": getattr(actor_worker, "_is_offload_param", False),
                 },
             ),
@@ -482,9 +482,9 @@ class InitializationMixin:
                         mesh_dim_names=["dp", "infer_tp"],
                     ),
                     "rollout_config": rollout_worker.config.rollout,
-                    "full_params": "hf" in rollout_worker.config.rollout.load_format,
+                    "full_params": "hf" in rollout_worker.config.load_format,
                     "offload_param": getattr(actor_worker, "_is_offload_param", False),
-                    "multi_stage_wake_up": rollout_worker.config.rollout.multi_stage_wake_up,
+                    "multi_stage_wake_up": rollout_worker.config.multi_stage_wake_up,
                 },
             ),
             ("megatron", "vllm"): (
@@ -508,12 +508,12 @@ class InitializationMixin:
                     "rollout_config": rollout_worker.config.rollout,
                     "layer_name_mapping": layer_name_mapping,
                     "weight_converter": get_mcore_weight_converter(actor_worker.actor_model_config, actor_worker.dtype),
-                    "multi_stage_wake_up": rollout_worker.config.rollout.multi_stage_wake_up,
+                    "multi_stage_wake_up": rollout_worker.config.multi_stage_wake_up,
                 },
             ),
         }
 
-        strategy = actor_worker.config.training.strategy.lower()
+        strategy = actor_worker.config.strategy.lower()
         rollout_name = self.config.actor_rollout_ref.rollout.name.lower()
         if (strategy, rollout_name) not in sharding_manager_map:
             raise NotImplementedError(f"Unsupported sharding manager configuration: {strategy=}, {rollout_name=}")
@@ -521,7 +521,7 @@ class InitializationMixin:
         sharding_manager_cls_str, kwargs_builder = sharding_manager_map[(strategy, rollout_name)]
         sharding_manager_cls = import_string(sharding_manager_cls_str)
         sharding_manager = sharding_manager_cls(**kwargs_builder())
-        rollout_worker.set_rollout_sharding_manager(sharding_manager)
+        rollout_worker.set_sharding_manager(sharding_manager)
         logger.debug(f"Set up {sharding_manager_cls.__name__}  for agent group {agent_group}.")
 
     def init_graph(self):
