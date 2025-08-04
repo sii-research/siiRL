@@ -37,6 +37,8 @@ from siirl.utils.megatron.megatron_utils import (
     get_model,
     per_tensor_generator,
     unwrap_model,
+    load_megatron_model_to_gpu,
+    offload_megatron_model_to_cpu,
 )
 from siirl.utils.megatron.memory_buffer import (
     build_memory_buffer,
@@ -45,6 +47,7 @@ from siirl.utils.megatron.memory_buffer import (
 )
 from siirl.utils.model_utils.torch_functional import check_device_is_available
 from siirl.utils.model_utils.vllm_utils import patch_vllm_moe_model_weight_loader
+from siirl.utils.memory_utils import aggressive_empty_cache
 
 from siirl.workers.sharding_manager.base import BaseShardingManager
 
@@ -300,9 +303,13 @@ class MultiAgentMegatronVLLMShardingManager(BaseShardingManager):
         self.train_etp_group = mpu.get_expert_tensor_parallel_group()
         self.need_tp_reshard = self.train_tp_size != self.infer_tp_size
         self.train_tp_larger = self.train_tp_size > self.infer_tp_size
+        self.offload_param = True
 
     @GPUMemoryLogger(role="megatron vllm sharding_manager", logger=logger)
     def __enter__(self):
+        aggressive_empty_cache(force_sync=True)
+        if self.offload_param:
+            load_megatron_model_to_gpu(self.actor_module, load_grad=False)
         # vllm > 0.7.2
         if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
             self.inference_engine.wake_up(tags=["weights"])
@@ -321,9 +328,13 @@ class MultiAgentMegatronVLLMShardingManager(BaseShardingManager):
         info = f"vLLM load weights, loaded_params: {len(loaded_params)}"
         logger.info(info)
 
+        if self.offload_param:
+            offload_megatron_model_to_cpu(self.actor_module)
+            aggressive_empty_cache(force_sync=True)
+        
         # (vermouth1992) We move wake up kv cache after we release model weights. Need refactor to make API cleaner
-        # if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
-        #     self.inference_engine.wake_up(tags=["kv_cache"])
+        if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
+            self.inference_engine.wake_up(tags=["kv_cache"])
 
     @GPUMemoryLogger(role="megatron vllm sharding_manager", logger=logger)
     def __exit__(self, exc_type, exc_value, traceback):

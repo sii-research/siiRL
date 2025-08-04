@@ -391,10 +391,22 @@ class InitializationMixin:
             group_rank = dist.get_rank(process_group)
 
         tp_size = 1
-        if intern_config := reference_node.config.get(DAGConstants.INTERN_CONFIG):
-            if reference_node.node_type == NodeType.MODEL_INFERENCE:
-                tp_size = intern_config.rollout.tensor_model_parallel_size
-            # TODO: Add support for Megatron strategy, reading from its specific model config.
+        intern_config = reference_node.config
+        if reference_node.node_type == NodeType.MODEL_INFERENCE:
+            print("node role is ", reference_node.node_role)
+            # tp_size = intern_config.rollout.tensor_model_parallel_size
+            # hack!
+            tp_size = 4
+        elif reference_node.node_type == NodeType.MODEL_TRAIN:
+            # hack!
+            tp_size = 4
+            # if hasattr(intern_config, 'actor') and hasattr(intern_config.actor, 'strategy') and intern_config.actor.strategy == 'megatron':
+            #     if hasattr(intern_config.actor, 'megatron') and hasattr(intern_config.actor.megatron, 'tensor_model_parallel_size'):
+            #         print("node role is ", reference_node.node_role)
+            #         tp_size = intern_config.actor.megatron.tensor_model_parallel_size
+            # elif hasattr(intern_config, 'critic') and hasattr(intern_config.critic, 'strategy') and intern_config.critic.strategy == 'megatron':
+            #     if hasattr(intern_config.critic, 'megatron') and hasattr(intern_config.critic.megatron, 'tensor_model_parallel_size'):
+            #         tp_size = intern_config.critic.megatron.tensor_model_parallel_size
 
         if group_world_size % tp_size != 0:
             raise ValueError(f"Configuration error for node {node.node_id}: Group world size ({group_world_size}) is not divisible by tensor parallel size ({tp_size}). Check your parallel configuration.")

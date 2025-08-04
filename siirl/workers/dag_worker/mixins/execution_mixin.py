@@ -241,13 +241,13 @@ class ExecutionMixin:
                     if cur_node.node_id != entry_node_id:
                         with self._timer("get_data_from_buffer", timing_raw):
                             batch = self.get_data_from_buffers(key=cur_node.node_id, my_current_dp_rank=cur_dp_rank, my_current_dp_size=cur_dp_size, timing_raw=timing_raw)
+                            if batch is None:
+                                logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
+                                return None  # Abort the entire step
                             if cur_node.node_role == NodeRole.ROLLOUT and cur_node.user_options.get("pre_chat_template", None):
                                 agent_key = self._generate_agent_group_key(cur_node)
                                 self._batch_apply_pre_template(batch, self.tokenizer_mapping[agent_key], cur_node.user_options.get("pre_chat_template", ""), f"agent_group_{cur_node.agent_group}_")
                             batch = remove_prefix_from_dataproto(batch, cur_node)
-                            if batch is None:
-                                logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
-                                return None  # Abort the entire step
                             logger.debug(f"current node({cur_node.node_id}) get data from databuffer batch size: {batch.batch.size()}")
                     elif cur_node.node_role == NodeRole.ROLLOUT and cur_node.user_options.get("pre_chat_template", None):
                         agent_key = self._generate_agent_group_key(cur_node)
@@ -310,6 +310,7 @@ class ExecutionMixin:
                             
                             if self._whether_put_data(cur_tp_rank, next_dp_size, cur_dp_size, cur_node, next_node):
                                 with self._timer("put_data_to_buffer", timing_raw):
+                                    logger.debug(f"node {cur_node.node_id} puts data to DataBuffer for its next node {next_node.node_id}")
                                     self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch, source_dp_size=cur_dp_size, dest_dp_size=next_dp_size, timing_raw=timing_raw)
                         if self.enable_perf:
                             with self._timer(f"put_data_to_buffer_barrier", timing_raw):

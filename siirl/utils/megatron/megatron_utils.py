@@ -429,20 +429,6 @@ def print_rank_0(message):
         print(message, flush=True)
 
 
-def print_rank_0_tensor(message, tensor, full=False):
-    """If distributed is initialized, print only on rank 0."""
-    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-        if full:
-            # Save original print options
-            previous_profile = torch.get_printoptions()
-            # Set to print full tensor
-            torch.set_printoptions(profile="full", sci_mode=False)
-            print(message, tensor, flush=True)
-            # Restore original print options
-            torch.set_printoptions(**previous_profile)
-        else:
-            print(message, tensor, flush=True)
-
 
 def get_model_checkpoint_path(checkpoint_path):
     os.makedirs(checkpoint_path, exist_ok=True)
@@ -764,7 +750,14 @@ def default_tp_concat_fn(
     return infer_params
 
 
-def per_tensor_generator(actor_module, model_config, weight_converter, transformer_config, layer_name_mapping, convert_qkv_gate_up_by_simple_split=True):
+def per_tensor_generator(
+    actor_module,
+    model_config,
+    weight_converter,
+    transformer_config,
+    layer_name_mapping,
+    convert_qkv_gate_up_by_simple_split=True,
+):
     from megatron.core import parallel_state as mpu
 
     pp_rank = mpu.get_pipeline_model_parallel_rank()
@@ -785,8 +778,8 @@ def per_tensor_generator(actor_module, model_config, weight_converter, transform
                 yield name, param
             # note
             # there is a bug in megatron GPTModel
-            # decoder.layers[n].mlp.router.expert_bias" in GPTModel is not registered in named_parameter, but in state_dict().
-            # for now we patch it by adding those keys to extra_keys.
+            # decoder.layers[n].mlp.router.expert_bias" in GPTModel is not registered in named_parameter, but in
+            # state_dict(). for now we patch it by adding those keys to extra_keys.
             extra_keys = [x for x in model.state_dict().keys() if "_extra_state" not in x and x not in existing_keys]
             for name in extra_keys:
                 yield name, model.state_dict()[name].to(get_device_id())
@@ -804,7 +797,9 @@ def per_tensor_generator(actor_module, model_config, weight_converter, transform
             meta_info.append((pp_rank, scan_vpp_idx, idx, name))
 
     obj_spec_output = [None] * mpu.get_pipeline_model_parallel_world_size()
-    torch.distributed.all_gather_object(object_list=obj_spec_output, obj=meta_info, group=mpu.get_pipeline_model_parallel_group())
+    torch.distributed.all_gather_object(
+        object_list=obj_spec_output, obj=meta_info, group=mpu.get_pipeline_model_parallel_group()
+    )
     layer_list_meta = [item for sublist in obj_spec_output for item in sublist]
 
     gen_func = tensor_generator()
@@ -814,7 +809,9 @@ def per_tensor_generator(actor_module, model_config, weight_converter, transform
         if model_config.tie_word_embeddings and ("output_layers" in name):
             import warnings
 
-            warnings.warn("Current model sharing word and embedding weights, skip output layer conversion", stacklevel=2)
+            warnings.warn(
+                "Current model sharing word and embedding weights, skip output layer conversion", stacklevel=2
+            )
             continue
 
         if cur_pp_rank == pp_rank:
@@ -829,13 +826,6 @@ def per_tensor_generator(actor_module, model_config, weight_converter, transform
         # pp broadcast model tensor and name
         cur_name = broadcast_str_from_megatron_pp(cur_name)
         broad_pp_tensor = broadcast_from_megatron_pp(cur_tensor)
-        print_rank_0_tensor(
-            f"xxxxxxxxxxxxxx broad_pp_tensor (shape: {broad_pp_tensor.shape}, "
-            f"device: {broad_pp_tensor.device}, dtype: {broad_pp_tensor.dtype}, "
-            f"size: {broad_pp_tensor.size()}, is_meta: {broad_pp_tensor.is_meta}):",
-            broad_pp_tensor,
-            full=True,
-        )
 
         # (xya): this is a hack to fix the name of the parameters
         while cur_name.startswith("module."):
@@ -853,7 +843,7 @@ def per_tensor_generator(actor_module, model_config, weight_converter, transform
             global_expert_ids = [num_experts_per_rank * ep_rank + local_expert_id for ep_rank in range(ep_size)]
             global_expert_names = [f"{name_prefix}.weight{expert_id}" for expert_id in global_expert_ids]
 
-            for name, param in zip(global_expert_names, infer_params):
+            for name, param in zip(global_expert_names, infer_params, strict=True):
                 if etp_size > 1:
                     # gather etp
                     etp_params = [torch.empty_like(param) for _ in range(etp_size)]
@@ -862,12 +852,20 @@ def per_tensor_generator(actor_module, model_config, weight_converter, transform
                 else:
                     params = [param]
 
-                merge_params = default_tp_concat_fn(layer_name_mapping, name, broad_pp_tensor, params, model_config, convert_qkv_gate_up_by_simple_split)
+                merge_params = default_tp_concat_fn(
+                    layer_name_mapping,
+                    name,
+                    broad_pp_tensor,
+                    params,
+                    model_config,
+                    weight_converter.hf_config,
+                    convert_qkv_gate_up_by_simple_split,
+                )
                 if not isinstance(merge_params, list):
                     merge_params = [merge_params]
                 converted_names, converted_params = weight_converter.convert_param(name, merge_params)
 
-                yield from zip(converted_names, converted_params)
+                yield from zip(converted_names, [param.detach() for param in converted_params], strict=True)
             continue
 
         # tp all gather
@@ -878,7 +876,15 @@ def per_tensor_generator(actor_module, model_config, weight_converter, transform
             else:
                 infer_params = [torch.empty_like(broad_pp_tensor) for _ in range(all_gather_group_size)]
                 torch.distributed.all_gather(infer_params, broad_pp_tensor, group=mpu.get_tensor_model_parallel_group())
-            infer_params = default_tp_concat_fn(layer_name_mapping, cur_name, broad_pp_tensor, infer_params, model_config, convert_qkv_gate_up_by_simple_split)
+            infer_params = default_tp_concat_fn(
+                layer_name_mapping,
+                cur_name,
+                broad_pp_tensor,
+                infer_params,
+                model_config,
+                weight_converter.hf_config,
+                convert_qkv_gate_up_by_simple_split,
+            )
         else:
             infer_params = broad_pp_tensor
 
@@ -886,7 +892,7 @@ def per_tensor_generator(actor_module, model_config, weight_converter, transform
             infer_params = [infer_params]
         converted_names, converted_params = weight_converter.convert_param(cur_name, infer_params)
 
-        yield from zip(converted_names, converted_params)
+        yield from zip(converted_names, [param.detach() for param in converted_params], strict=True)
 
 
 def get_transformer_layer_offset(pipeline_rank, vp_rank, config: TransformerConfig):

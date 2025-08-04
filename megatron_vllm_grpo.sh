@@ -4,8 +4,10 @@
 export SIIRL_LOG_VERBOSITY=DEBUG
 export HYDRA_FULL_ERROR=1
 
+
 # export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export CUDA_VISIBLE_DEVICES=0,1,2,3
+# export CUDA_VISIBLE_DEVICES=4,5,6,7
 # export WANDB_API_KEY=local-81fd52c21bb60d5f6bbcfc790e821c71f1c16442
 
 python3 -m siirl.client.main_dag \
@@ -28,7 +30,7 @@ python3 -m siirl.client.main_dag \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=4 \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=1 \
     actor_rollout_ref.actor.megatron.context_parallel_size=1 \
-    actor_rollout_ref.actor.megatron.sequence_parallel=True \
+    actor_rollout_ref.actor.megatron.sequence_parallel=False \
     actor_rollout_ref.actor.megatron.use_distributed_optimizer=True \
     actor_rollout_ref.actor.megatron.param_dtype=bfloat16 \
     actor_rollout_ref.actor.megatron.param_offload=True \

@@ -21,6 +21,7 @@ import time
 import warnings
 from typing import Union
 
+from sympy.logic import true
 import torch
 import torch.distributed
 from codetiming import Timer
@@ -888,23 +889,43 @@ def global_initialize_model_parallel(config):
     if IS_INITIALIZED:
         return
 
-    # initialize model parallel
+    # For separated workers, we use actor's megatron config for distributed model initialization
+    # if hasattr(config, 'actor') and hasattr(config.actor, 'megatron'):
+    #     megatron_config = config.actor.megatron
+    # elif hasattr(config, 'megatron'):
+    #     megatron_config = config.megatron
+    # else:
+    #     return
+    
     rank = int(os.environ["LOCAL_RANK"])
     get_torch_device().set_device(rank)
-    if config.megatron.sequence_parallel:
-        os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+
+    # if megatron_config.sequence_parallel:
+    #     os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+    
+    # mpu.initialize_model_parallel(
+    #         tensor_model_parallel_size=megatron_config.tensor_model_parallel_size,
+    #         pipeline_model_parallel_size=megatron_config.pipeline_model_parallel_size,
+    #         virtual_pipeline_model_parallel_size=megatron_config.virtual_pipeline_model_parallel_size,
+    #         pipeline_model_parallel_split_rank=None,
+    #         use_sharp=False,
+    #         context_parallel_size=megatron_config.context_parallel_size,
+    #         expert_model_parallel_size=megatron_config.expert_model_parallel_size,
+    #         expert_tensor_parallel_size=megatron_config.expert_tensor_parallel_size,
+    #         nccl_communicator_config_path=None,
+    #     )   
     mpu.initialize_model_parallel(
-            tensor_model_parallel_size=config.megatron.tensor_model_parallel_size,
-            pipeline_model_parallel_size=config.megatron.pipeline_model_parallel_size,
-            virtual_pipeline_model_parallel_size=config.megatron.virtual_pipeline_model_parallel_size,
-            pipeline_model_parallel_split_rank=None,
-            use_sharp=False,
-            context_parallel_size=config.megatron.context_parallel_size,
-            expert_model_parallel_size=config.megatron.expert_model_parallel_size,
-            expert_tensor_parallel_size=config.megatron.expert_tensor_parallel_size,
-            nccl_communicator_config_path=None,
-        )    
-    set_random_seed(seed=config.megatron.seed)
+        tensor_model_parallel_size=4,
+        pipeline_model_parallel_size=1,
+        virtual_pipeline_model_parallel_size=None,
+        pipeline_model_parallel_split_rank=None,
+        use_sharp=False,
+        context_parallel_size=1,
+        expert_model_parallel_size=1,
+        expert_tensor_parallel_size=1,
+        nccl_communicator_config_path=None,
+    )    
+    set_random_seed(seed=1234)
     
     IS_INITIALIZED = True
     
@@ -927,9 +948,14 @@ class ActorWorker(MegatronWorker):
             self.config.ppo_micro_batch_size //= mpu.get_data_parallel_world_size()
             self.config.ppo_micro_batch_size_per_gpu = self.config.ppo_micro_batch_size
 
-        self._is_offload_param = self.config.megatron.param_offload
-        self._is_offload_grad = self.config.megatron.grad_offload
-        self._is_offload_optimizer = self.config.megatron.optimizer_offload
+        # self._is_offload_param = self.config.megatron.param_offload
+        # hack!
+        self._is_offload_param = True
+        # self._is_offload_grad = self.config.megatron.grad_offload
+        self._is_offload_grad = True
+        # self._is_offload_optimizer = self.config.megatron.optimizer_offload
+        # hack!
+        self._is_offload_optimizer = True
 
     def _build_actor_model_optimizer(self, model_path, optim_config, override_model_config, override_transformer_config):
         from siirl.utils.megatron.optimizer import get_megatron_optimizer
@@ -1065,7 +1091,7 @@ class ActorWorker(MegatronWorker):
     def compute_log_prob(self, data: DataProto):
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module, load_grad=False)
-            log_gpu_memory_usage("After load actor params and grad during compute_log_prob", logger=logger)
+            log_gpu_memory_usage("After load actor params during compute_log_prob", logger=logger)
         # we should always recompute old_log_probs when it is HybridEngine
         data.meta_info["micro_batch_size"] = self.config.log_prob_micro_batch_size_per_gpu
         data.meta_info["max_token_len"] = self.config.log_prob_max_token_len_per_gpu
@@ -1118,6 +1144,9 @@ class RolloutWorker(MegatronWorker):
         if self.config.log_prob_micro_batch_size:
             self.config.log_prob_micro_batch_size //= mpu.get_data_parallel_world_size()
             self.config.log_prob_micro_batch_size_per_gpu = self.config.log_prob_micro_batch_size
+        
+        # hack!
+        self._is_offload_optimizer = True
 
     def _build_rollout(self, trust_remote_code=False):
         from torch.distributed.device_mesh import init_device_mesh
@@ -1203,8 +1232,6 @@ class RolloutWorker(MegatronWorker):
 
         # Only build the inference engine (vLLM/SGLang) - no need for Megatron model
         self.rollout, self.sharding_manager = self._build_rollout(trust_remote_code=self.config.model.trust_remote_code)
-        # used for sleep/wake_up
-        self.rollout.sharding_manager = self.sharding_manager
         get_torch_device().empty_cache()
         log_gpu_memory_usage("After rollout init", logger=logger)
 
@@ -1219,17 +1246,6 @@ class RolloutWorker(MegatronWorker):
 
         with self.sharding_manager:
             log_gpu_memory_usage("After entering sharding manager", logger=logger)
-
-            # (zhangchi.usc1992) wake up kv cache here. Currently only support vllm.
-            # Will support sglang once separate wakeup of model weights and kv cache is supported
-            # This API should be exposed by the rollout. Will rewrite this part when we refactor after v0.4 release.
-            # Currently, we hack here to support running large models (QWen3-236b and DeepSeek-671b)
-            if self.config.name == "vllm":
-                import inspect
-
-                if "tags" in inspect.signature(self.rollout.inference_engine.wake_up).parameters:
-                    self.rollout.inference_engine.wake_up(tags=["kv_cache"])
-
             prompts = self.sharding_manager.preprocess_data(prompts)
             output = self.rollout.generate_sequences(prompts=prompts)
             output = self.sharding_manager.postprocess_data(output)
@@ -1261,7 +1277,9 @@ class ReferenceWorker(MegatronWorker):
         else:
             assert self.config.log_prob_micro_batch_size_per_gpu is not None, "Please note that in the ref policy configuration, `log_prob_micro_batch_size_per_gpu` and `log_prob_micro_batch_size` should not be None at the same time."
         
-        self._ref_is_offload_param = self.config.megatron.param_offload
+        # Hack!
+        # self._ref_is_offload_param = self.config.megatron.param_offload
+        self._ref_is_offload_param = True
 
     def _build_ref_model(self, model_path, override_model_config, override_transformer_config):
         from megatron.core.models.gpt.gpt_model import ModelType

@@ -59,6 +59,10 @@ actor_rollout_ref:
     ppo_mini_batch_size: 256
     ppo_micro_batch_size: null # will be deprecated, use ppo_micro_batch_size_per_gpu
     ppo_micro_batch_size_per_gpu: null
+    log_prob_micro_batch_size_per_gpu: 8
+    log_prob_max_token_len_per_gpu: 16384
+    log_prob_use_dynamic_bsz: False
+    temperature: 1.0
     use_dynamic_bsz: False
     ppo_max_token_len_per_gpu: 16384
     grad_clip: 1.0
@@ -204,13 +208,6 @@ critic:
 reward_model:
   enable: False  # Set to True to enable reward model
   strategy: megatron
-  model:
-    path: /workspace/infrawaves/Qwen2.5-7B-Instruct
-    use_shm: False
-    trust_remote_code: False
-  micro_batch_size_per_gpu: null
-  use_dynamic_bsz: False
-  forward_max_token_len_per_gpu: 16384
   megatron:
     tensor_model_parallel_size: 2
     pipeline_model_parallel_size: 1  # Reward models typically don't need PP
@@ -219,6 +216,21 @@ reward_model:
     param_dtype: "bfloat16"
     seed: 1
     override_transformer_config: {}
+  model:
+    path: /workspace/infrawaves/Qwen2.5-7B-Instruct
+    use_shm: False
+    trust_remote_code: False
+  micro_batch_size_per_gpu: null
+  use_dynamic_bsz: False
+  forward_max_token_len_per_gpu: 16384
+  reward_manager: naive
+  launch_reward_fn_async: False # custom reward function executed async on CPU, during log_prob
+  sandbox_fusion:
+    url: null # faas url to run code in cloud sandbox
+    max_concurrent: 64 # max concurrent requests to sandbox
+custom_reward_function:
+  path: null
+  name: compute_score
 
 # Training configuration
 trainer:

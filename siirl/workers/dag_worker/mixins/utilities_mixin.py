@@ -602,50 +602,100 @@ class UtilitiesMixin:
 
     def put_data_to_buffers(self, key: str, data: DataProto, source_dp_size: int, dest_dp_size: int, timing_raw: Dict[str, float]):
         """Puts data into shared Ray plasma store for consumption by downstream nodes."""
-        data.meta_info["padding_values"] = {"input_ids": self.validate_tokenizer.pad_token_id, "responses": self.validate_tokenizer.pad_token_id, "labels": -100, "attention_mask": 0, "response_mask": 0}
-        data.meta_info["padding_side"] = self.validate_tokenizer.padding_side
+        try:
+            logger.debug(f"Rank {self._rank}: Starting put_data_to_buffers for key '{key}', source_dp_size={source_dp_size}, dest_dp_size={dest_dp_size}")
+            
+            data.meta_info["padding_values"] = {"input_ids": self.validate_tokenizer.pad_token_id, "responses": self.validate_tokenizer.pad_token_id, "labels": -100, "attention_mask": 0, "response_mask": 0}
+            data.meta_info["padding_side"] = self.validate_tokenizer.padding_side
 
-        if source_dp_size == dest_dp_size:
-            with self._timer(f"put_intern_data_{key}", timing_raw):
-                logger.debug(f"Rank {self._rank}: DP size match. Storing data for key '{key}' in local cache.")
-                self.internal_data_cache[key] = data
-        else:
-            loop = asyncio.get_event_loop()
-            with self._timer(f"put_ray_proto_data_{key}", timing_raw):
-                chunks = data.chunk(chunks=len(self.data_buffers))
-                put_futures = [buf.put.remote(key, chunk) for buf, chunk in zip(self.data_buffers, chunks)]
-            with self._timer(f"put_proto_data_{key}", timing_raw):
-                loop.run_until_complete(asyncio.gather(*put_futures))
+            if source_dp_size == dest_dp_size:
+                with self._timer(f"put_intern_data_{key}", timing_raw):
+                    logger.debug(f"Rank {self._rank}: DP size match ({source_dp_size}). Storing data for key '{key}' in local cache.")
+                    self.internal_data_cache[key] = data
+                    logger.debug(f"Rank {self._rank}: Successfully stored data for key '{key}' in local cache.")
+            else:
+                logger.debug(f"Rank {self._rank}: DP size mismatch (source={source_dp_size}, dest={dest_dp_size}). Using Ray buffers for key '{key}'.")
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    logger.debug(f"Rank {self._rank}: Creating new event loop for key '{key}'")
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+
+                with self._timer(f"put_ray_proto_data_{key}", timing_raw):
+                    chunks = data.chunk(chunks=len(self.data_buffers))
+                    logger.debug(f"Rank {self._rank}: Created {len(chunks)} chunks for key '{key}'")
+                    put_futures = [buf.put.remote(key, chunk) for buf, chunk in zip(self.data_buffers, chunks)]
+                
+                with self._timer(f"put_proto_data_{key}", timing_raw):
+                    try:
+                        loop.run_until_complete(asyncio.gather(*put_futures))
+                        logger.debug(f"Rank {self._rank}: Successfully stored all chunks for key '{key}' in Ray buffers")
+                    except Exception as e:
+                        logger.error(f"Rank {self._rank}: Failed to store chunks for key '{key}' in Ray buffers: {e}")
+                        raise
+        except Exception as e:
+            logger.error(f"Rank {self._rank}: Unexpected error in put_data_to_buffers for key '{key}': {e}")
+            raise  # Re-raise the exception to maintain the original behavior
 
     def get_data_from_buffers(self, key: str, my_current_dp_rank: int, my_current_dp_size: int, timing_raw: Dict[str, float]) -> Optional[DataProto]:
         """Gets data from shared buffers that was produced by an upstream node."""
-        # First, check the high-speed internal cache.
-        with self._timer(f"get_intern_data_{key}", timing_raw):
-            if key in self.internal_data_cache:
-                logger.debug(f"Rank {self._rank}: Found data for key '{key}' in local cache. Bypassing Ray.")
-                return self.internal_data_cache.pop(key)
+        try:
+            # First, check the high-speed internal cache.
+            with self._timer(f"get_intern_data_{key}", timing_raw):
+                if key in self.internal_data_cache:
+                    logger.debug(f"Rank {self._rank}: Found data for key '{key}' in local cache. Bypassing Ray.")
+                    return self.internal_data_cache.pop(key)
 
-        # If not in the local cache, fall back to remote Ray buffers.
-        logger.debug(f"Rank {self._rank}: Data for key '{key}' not in local cache. Fetching from remote buffers.")
-        if not self.data_buffers:
+            # If not in the local cache, fall back to remote Ray buffers.
+            logger.debug(f"Rank {self._rank}: Data for key '{key}' not in local cache. Fetching from remote buffers.")
+            if not self.data_buffers:
+                logger.error(f"Rank {self._rank}: data_buffers is None, cannot get data for key '{key}'")
+                return None
+
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                logger.debug(f"Rank {self._rank}: Creating new event loop for key '{key}'")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+            try:
+                logger.debug(f"Rank {self._rank}: Attempting Ray remote call for key '{key}'")
+                first_item = loop.run_until_complete(self.data_buffers[0].get.remote(key, my_current_dp_rank, my_current_dp_size))
+                logger.debug(f"Rank {self._rank}: Completed Ray remote call for key '{key}', got result type: {type(first_item)}")
+            except Exception as e:
+                logger.error(f"Rank {self._rank}: Error getting data from Ray buffer for key '{key}': {e}")
+                return None
+
+            if first_item is None:
+                logger.error(f"Rank {self._rank}: first_item is None for key '{key}'")
+                return None
+
+            if isinstance(first_item, ray.ObjectRef):
+                with self._timer(f"get_ref_data_{key}", timing_raw):
+                    try:
+                        return loop.run_until_complete(first_item)
+                    except Exception as e:
+                        logger.error(f"Rank {self._rank}: Error resolving Ray ObjectRef for key '{key}': {e}")
+                        return None
+            elif isinstance(first_item, DataProto):
+                try:
+                    # If data was chunked, retrieve all chunks and concatenate
+                    with self._timer(f"get_proto_data_{key}", timing_raw):
+                        other_chunks_futures = [b.get.remote(key, my_current_dp_rank, my_current_dp_size) for b in self.data_buffers[1:]]
+                        other_chunks = loop.run_until_complete(asyncio.gather(*other_chunks_futures))
+                    with self._timer(f"get_proto_data_concat_chunks_{key}", timing_raw):
+                        return DataProto.concat([first_item] + other_chunks)
+                except Exception as e:
+                    logger.error(f"Rank {self._rank}: Error concatenating chunks for key '{key}': {e}")
+                    return None
+            logger.error(f"Rank {self._rank}: first_item type {type(first_item)} is neither ray.ObjectRef nor DataProto for key '{key}'")
             return None
 
-        loop = asyncio.get_event_loop()
-        first_item = loop.run_until_complete(self.data_buffers[0].get.remote(key, my_current_dp_rank, my_current_dp_size))
-        if first_item is None:
+        except Exception as e:
+            logger.error(f"Rank {self._rank}: Unexpected error in get_data_from_buffers for key '{key}': {e}")
             return None
-
-        if isinstance(first_item, ray.ObjectRef):
-            with self._timer(f"get_ref_data_{key}", timing_raw):
-                return loop.run_until_complete(first_item)
-        elif isinstance(first_item, DataProto):
-            # If data was chunked, retrieve all chunks and concatenate
-            with self._timer(f"get_proto_data_{key}", timing_raw):
-                other_chunks_futures = [b.get.remote(key, my_current_dp_rank, my_current_dp_size) for b in self.data_buffers[1:]]
-                other_chunks = loop.run_until_complete(asyncio.gather(*other_chunks_futures))
-            with self._timer(f"get_proto_data_concat_chunks_{key}", timing_raw):
-                return DataProto.concat([first_item] + other_chunks)
-        return None
 
     def reset_data_buffer(self, all_keys: List[str]):
         """
@@ -883,14 +933,26 @@ class UtilitiesMixin:
         logger.info(log_str)
 
     def _whether_put_data(self, cur_tp_rank, next_dp_size, cur_dp_size, cur_node, next_node) -> bool:
-        # Only TP rank 0 or next nodes is COMPUTE node or multi-agent rollout, puts data to avoid duplication
+        # Determine whether to put data into buffer based on node configuration
+        result = False
+        reason = "No condition met"
+        
         if cur_tp_rank == 0:
-            return True
-        if next_dp_size == cur_dp_size and next_node.node_type == NodeType.COMPUTE:
-            return True
-        if cur_node.node_role == next_node.node_role and cur_node.node_role == NodeRole.ROLLOUT:
-            return True
-        return False
+            result = True
+            reason = "Current TP rank is 0"
+        elif next_dp_size == cur_dp_size:
+            if next_node.node_type in [NodeType.COMPUTE, NodeType.MODEL_TRAIN]:
+                result = True
+                reason = f"DP sizes match and next node is {next_node.node_type}"
+        elif cur_node.node_role == next_node.node_role and cur_node.node_role == NodeRole.ROLLOUT:
+            result = True
+            reason = "Both nodes are ROLLOUT"
+            
+        logger.debug(f"Rank {self._rank}: _whether_put_data decision for {cur_node.node_id}->{next_node.node_id}: {result} ({reason}). "
+                    f"cur_tp_rank={cur_tp_rank}, next_dp_size={next_dp_size}, cur_dp_size={cur_dp_size}, "
+                    f"cur_node_type={cur_node.node_type}, next_node_type={next_node.node_type}, "
+                    f"cur_node_role={cur_node.node_role}, next_node_role={next_node.node_role}")
+        return result
 
 
     def _batch_apply_pre_template(self, batch, tokenizer, chat_template = "", key_prefix = ""):
