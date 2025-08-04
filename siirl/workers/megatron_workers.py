@@ -915,8 +915,8 @@ def global_initialize_model_parallel(config):
     #         nccl_communicator_config_path=None,
     #     )   
     mpu.initialize_model_parallel(
-        tensor_model_parallel_size=4,
-        pipeline_model_parallel_size=1,
+        tensor_model_parallel_size=2,
+        pipeline_model_parallel_size=2,
         virtual_pipeline_model_parallel_size=None,
         pipeline_model_parallel_split_rank=None,
         use_sharp=False,
@@ -929,6 +929,35 @@ def global_initialize_model_parallel(config):
     
     IS_INITIALIZED = True
     
+# def global_initialize_model_parallel(config):
+#     global IS_INITIALIZED
+#     if IS_INITIALIZED:
+#         return
+
+#     rank = int(os.environ["LOCAL_RANK"])
+#     get_torch_device().set_device(rank)
+
+#     if hasattr(config, 'actor') and hasattr(config.actor, 'megatron'):
+#         megatron_config = config.actor.megatron
+#     elif hasattr(config, 'megatron'):
+#         megatron_config = config.megatron
+#     else:
+#         raise ValueError("No megatron config found")
+
+#     mpu.initialize_model_parallel(
+#         tensor_model_parallel_size=megatron_config.tensor_model_parallel_size,
+#         pipeline_model_parallel_size=megatron_config.pipeline_model_parallel_size,
+#         virtual_pipeline_model_parallel_size=megatron_config.virtual_pipeline_model_parallel_size,
+#         pipeline_model_parallel_split_rank=None,
+#         use_sharp=False,
+#         context_parallel_size=megatron_config.context_parallel_size,
+#         expert_model_parallel_size=megatron_config.expert_model_parallel_size,
+#         expert_tensor_parallel_size=megatron_config.expert_tensor_parallel_size,
+#         nccl_communicator_config_path=None,
+#     )
+#     set_random_seed(seed=megatron_config.seed)
+
+#     IS_INITIALIZED = True
 
 class ActorWorker(MegatronWorker):
     """
@@ -1089,9 +1118,12 @@ class ActorWorker(MegatronWorker):
 
     @GPUMemoryLogger(role="compute_log_prob", logger=logger)
     def compute_log_prob(self, data: DataProto):
+        get_torch_device().empty_cache()
+        torch.cuda.synchronize()
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module, load_grad=False)
             log_gpu_memory_usage("After load actor params during compute_log_prob", logger=logger)
+
         # we should always recompute old_log_probs when it is HybridEngine
         data.meta_info["micro_batch_size"] = self.config.log_prob_micro_batch_size_per_gpu
         data.meta_info["max_token_len"] = self.config.log_prob_max_token_len_per_gpu

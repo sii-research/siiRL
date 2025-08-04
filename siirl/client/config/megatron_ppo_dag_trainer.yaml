@@ -41,7 +41,7 @@ data:
 actor_rollout_ref:
   hybrid_engine: True
   model:
-    path: /workspace/infrawaves/Qwen2.5-7B-Instruct
+    path: /workspace/infrawaves/Qwen3-8B
     use_shm: False
     external_lib: null
     override_config: { }
@@ -179,7 +179,7 @@ critic:
   checkpoint:
     contents: ['model', 'optimizer', 'extra']
   model:
-    path: /workspace/infrawaves/Qwen2.5-7B-Instruct  # Can be same as actor or different
+    path: /workspace/infrawaves/Qwen3-8B  # Can be same as actor or different
     use_shm: False
     external_lib: null
     override_config: { }
@@ -217,7 +217,7 @@ reward_model:
     seed: 1
     override_transformer_config: {}
   model:
-    path: /workspace/infrawaves/Qwen2.5-7B-Instruct
+    path: /workspace/infrawaves/Qwen3-8B
     use_shm: False
     trust_remote_code: False
   micro_batch_size_per_gpu: null

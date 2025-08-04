@@ -226,12 +226,17 @@ class MegatronPPOActor(BasePPOActor):
                     )
 
                 # broadcast across pp ranks
-                torch.distributed.broadcast(
-                    tensor=log_probs,
-                    src=mpu.get_pipeline_model_parallel_last_rank(),
-                    group=mpu.get_pipeline_model_parallel_group(),
-                    async_op=False,
-                )
+                try:
+                    torch.distributed.broadcast(
+                        tensor=log_probs,
+                        src=mpu.get_pipeline_model_parallel_last_rank(),
+                        group=mpu.get_pipeline_model_parallel_group(),
+                        async_op=False,
+                    )
+                except Exception as e:
+                    logger.error(f"Broadcast failed: {e}")
+                    raise
+
                 if calculate_entropy:
                     # Note that o[0] is metrics, o[1] is entropy
                     if mpu.is_pipeline_last_stage(ignore_virtual=True):
@@ -248,12 +253,16 @@ class MegatronPPOActor(BasePPOActor):
                             size=(batch_size, response_length), dtype=torch.float32, device=input_ids.device
                         )
                     # broadcast across pp ranks
-                    torch.distributed.broadcast(
-                        tensor=entropys,
-                        src=mpu.get_pipeline_model_parallel_last_rank(),
-                        group=mpu.get_pipeline_model_parallel_group(),
-                        async_op=False,
-                    )
+                    try:
+                        torch.distributed.broadcast(
+                            tensor=entropys,
+                            src=mpu.get_pipeline_model_parallel_last_rank(),
+                            group=mpu.get_pipeline_model_parallel_group(),
+                            async_op=False,
+                        )
+                    except Exception as e:
+                        logger.error(f"Broadcast failed: {e}")
+                        raise
 
         # add empty cache after each compute
         get_torch_device().empty_cache()

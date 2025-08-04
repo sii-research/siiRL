@@ -140,7 +140,7 @@ class ProcessorArguments:
 @dataclass
 class ModelArguments(ProcessorArguments):
     path: str = field(
-        default="/workspace/infrawaves/Qwen2.5-7B-Instruct",
+        default="/workspace/infrawaves/Qwen3-8B",
         metadata={"help": "Model path or identifier"},
     )
     external_lib: Optional[str] = field(default=None, metadata={"help": "External model library"})
@@ -424,7 +424,7 @@ class CriticArguments:
         metadata={"help": "Optimizer settings"},
     )
     model: ModelArguments = field(
-        default_factory=lambda: ModelArguments(path="/workspace/infrawaves/Qwen2.5-7B-Instruct", enable_gradient_checkpointing=True),
+        default_factory=lambda: ModelArguments(path="/workspace/infrawaves/Qwen3-8B", enable_gradient_checkpointing=True),
         metadata={"help": "Critic model"},
     )
     fsdp_config: FSDPArguments = field(default_factory=FSDPArguments, metadata={"help": "FSDP settings"})
@@ -458,7 +458,7 @@ class RewardModelArguments:
     enable: bool = field(default=False, metadata={"help": "Enable reward model"})
     strategy: str = field(default="fsdp", metadata={"help": "Parallel strategy"})
     model: ModelArguments = field(
-        default_factory=lambda: ModelArguments(path="/workspace/infrawaves/Qwen2.5-7B-Instruct", enable_gradient_checkpointing=True),
+        default_factory=lambda: ModelArguments(path="/workspace/infrawaves/Qwen3-8B", enable_gradient_checkpointing=True),
         metadata={"help": "Critic model"},
     )
     fsdp_config: FSDPArguments = field(
