@@ -1,0 +1,45 @@
+
+# Default list of files to exclude from checks.
+# Add any other paths that should be ignored by all hooks.
+exclude: |
+  (?x)^(
+      docs/.*|
+      build/.*
+  )$
+
+repos:
+-   repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+    -   id: trailing-whitespace
+    -   id: end-of-file-fixer
+    -   id: check-yaml
+    -   id: check-added-large-files
+        args: [--maxkb=500]
+    -   id: check-case-conflict
+    -   id: check-executables-have-shebangs
+    -   id: check-merge-conflict
+    -   id: check-symlinks
+    -   id: detect-private-key
+
+-   repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.12.6
+    hooks:
+    -   id: ruff
+        args: ["--fix", "--show-fixes", "--output-format=text"]
+    -   id: ruff-format
+
+-   repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.17.0
+    hooks:
+    -   id: mypy
+        exclude: ^(docs|examples|tests)/
+        additional_dependencies: [types-PyYAML]
+
+-   repo: https://github.com/codespell-project/codespell
+    rev: v2.4.0
+    hooks:
+    -   id: codespell
+        args:
+          - --skip="*.json,*.txt"
+          - --ignore-words-list=nd,repostory
