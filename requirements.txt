@@ -1,6 +1,6 @@
 accelerate
 codetiming
-datasets
+datasets>=4.0.0
 dill
 hydra-core
 numpy

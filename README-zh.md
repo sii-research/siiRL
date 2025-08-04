@@ -5,13 +5,20 @@
 <br>
 
 <h1 align="center">
-siiRL: Shanghai Inovation Institute RL Framework for LLM Post-Training
+siiRL: Shanghai Innovation Institute RL Framework for Advanced LLMs and Multi-Agent Systems
 </h1>
 
 <p align="center">
 | <a href="https://arxiv.org/abs/2507.13833"><b>📄 论文</b></a> | 
-| <a href="https://siirl.readthedocs.io/en/latest/index.html"><b>📚 文档</b></a> | 
-| <a href="asset/siiRL-feishu-group.png"><b>💬 联系我们</b></a> |
+| <a href="https://siirl.readthedocs.io/en/latest/index.html"><b>📚 文档</b></a> |
+| <a href="asset/siiRL-feishu-group.png">
+    <img src="asset/logo-feishu.png" alt="Feishu Group QR Code" height="15" /> 
+    <b> 飞书群</b>
+  </a> 
+| <a href="asset/siiRL-wechat-group.png">
+    <img src="asset/logo-wechat.png" alt="Wechat Group QR Code" height="15" /> 
+    <b> 微信群</b>
+  </a> 
 | <a href="README.md"><b> English</b></a> |
 </p>
 
