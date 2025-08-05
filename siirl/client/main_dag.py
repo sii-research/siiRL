@@ -38,6 +38,8 @@ RAY_RUNTIME_ENV_VARS = {
     "TOKENIZERS_PARALLELISM": "true",
     "NCCL_DEBUG": "WARN",
     "VLLM_LOGGING_LEVEL": "WARN",
+    # "RAY_DEBUG": "1",
+    # "RAY_DEBUG_POST_MORTEM": "1",  # this is for distributed debugging
 }
 
 # The main runner is an orchestrator, not a heavy workload.
@@ -166,7 +168,7 @@ class MainRunner:
         logger.info(f"Workflow setup and worker launch complete. Time cost: {setup_duration:.2f}s")
 
 
-@hydra.main(config_path="config", config_name="ppo_dag_trainer", version_base=None)
+@hydra.main(config_path="config", config_name="megatron_ppo_dag_trainer", version_base=None)
 def main(siirl_config: DictConfig) -> None:
     """
     Main entry point for launching the PPO DAG training job.

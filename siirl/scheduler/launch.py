@@ -1,5 +1,5 @@
 # Copyright 2025, Shanghai Innovation Institute. All rights reserved.
-#
+# Copyright 2025, Infrawaves. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -153,6 +153,19 @@ class RayTrainer:
         # For FSDP with sequence parallelism, padding must be removed to avoid hangs.
         if strategy == "fsdp" and sp_size > 1:
             assert use_remove_padding, f"Node {node.node_id} (Actor): When using SP (>1) with FSDP, enable `use_remove_padding` in the relevant model config."
+        
+        # Megatron strategy has its own sequence parallelism implementation
+        if strategy == "megatron":
+            logger.debug(f"Node {node.node_id} (Actor): Using Megatron strategy - sequence parallelism handled internally")
+            # Basic validation for Megatron parameters
+            if hasattr(actor_conf, 'megatron'):
+                megatron_conf = actor_conf.megatron
+                tp_size = megatron_conf.tensor_model_parallel_size
+                pp_size = megatron_conf.pipeline_model_parallel_size
+                assert tp_size >= 1, f"Node {node.node_id} (Actor): tensor_model_parallel_size must be >= 1, got {tp_size}"
+                assert pp_size >= 1, f"Node {node.node_id} (Actor): pipeline_model_parallel_size must be >= 1, got {pp_size}"
+                logger.debug(f"Node {node.node_id} (Actor): Megatron config - TP: {tp_size}, PP: {pp_size}")
+
 
     def validate_reference_config(self, node: Node, reference_conf: RefArguments, use_remove_padding: bool = False) -> None:
         """Validates configuration parameters specific to a Reference Policy inference node."""
@@ -218,6 +231,18 @@ class RayTrainer:
         # For FSDP with sequence parallelism, padding must be removed.
         if strategy == "fsdp" and sp_size > 1:
             assert use_remove_padding, f"Node {node.node_id} (Critic): When using SP (>1) with FSDP, enable `use_remove_padding` in critic.model."
+        
+        # Megatron strategy has its own sequence parallelism implementation
+        if strategy == "megatron":
+            logger.debug(f"Node {node.node_id} (Critic): Using Megatron strategy - sequence parallelism handled internally")
+            # Basic validation for Megatron parameters
+            if hasattr(critic_conf, 'megatron'):
+                megatron_conf = critic_conf.megatron
+                tp_size = megatron_conf.tensor_model_parallel_size
+                pp_size = megatron_conf.pipeline_model_parallel_size
+                assert tp_size >= 1, f"Node {node.node_id} (Critic): tensor_model_parallel_size must be >= 1, got {tp_size}"
+                assert pp_size >= 1, f"Node {node.node_id} (Critic): pipeline_model_parallel_size must be >= 1, got {pp_size}"
+                logger.debug(f"Node {node.node_id} (Critic): Megatron config - TP: {tp_size}, PP: {pp_size}")
 
     def validate_reward_model_config(self, node: Node, reward_model_conf: RewardModelArguments, use_remove_padding: bool = False):
         """Validates configuration parameters specific to a Reward Model training node."""
@@ -252,17 +277,17 @@ class RayTrainer:
 
             # Based on the node's type and role, select the correct config object and validator function.
             if node.node_type == NodeType.MODEL_TRAIN and node.node_role == NodeRole.ACTOR:
-                assert isinstance(intern_config, ActorRolloutRefArguments), f"Node {node_id} intern config illegal"
+                assert isinstance(intern_config, ActorArguments), f"Node {node_id} intern config illegal"
                 # Calculate the effective batch size considering the number of rollouts per sample.
-                real_train_batch_size = self.base_config.data.train_batch_size * intern_config.rollout.n
+                real_train_batch_size = self.base_config.data.train_batch_size * intern_config.rollout_n
                 assert real_train_batch_size % self.total_gpu == 0, f"real_train_batch_size ({real_train_batch_size}) must be divisible by total n_gpus ({self.total_gpu})."
-                node_specific_config = intern_config.actor
+                node_specific_config = intern_config
                 validator_function = self.validate_actor_config
                 use_remove_padding = intern_config.model.use_remove_padding
                 component_name_for_logging = "Actor"
             elif node.node_type == NodeType.MODEL_INFERENCE and node.node_role == NodeRole.ROLLOUT:
-                assert isinstance(intern_config, ActorRolloutRefArguments), f"Node {node_id} intern config illegal"
-                node_specific_config = intern_config.rollout
+                assert isinstance(intern_config, RolloutArguments), f"Node {node_id} intern config illegal"
+                node_specific_config = intern_config
                 validator_function = self.validate_rollout_config
                 component_name_for_logging = "Rollout"
             elif node.node_type == NodeType.MODEL_TRAIN and node.node_role == NodeRole.CRITIC:
@@ -280,11 +305,11 @@ class RayTrainer:
                     component_name_for_logging = "RewardModel"
                     use_remove_padding = intern_config.model.use_remove_padding
             elif node.node_type == NodeType.MODEL_TRAIN and node.node_role == NodeRole.REFERENCE:
-                assert isinstance(intern_config, ActorRolloutRefArguments), f"Node {node_id} intern config illegal"
-                node_specific_config = intern_config.ref
+                assert isinstance(intern_config, RefArguments), f"Node {node_id} intern config illegal"
+                node_specific_config = intern_config
                 validator_function = self.validate_reference_config
                 component_name_for_logging = "ReferencePolicy"
-                use_remove_padding = intern_config.ref.use_remove_padding
+                use_remove_padding = intern_config.use_remove_padding
 
             # If a validator was found for the node, execute it.
             if validator_function and node_specific_config is not None:
