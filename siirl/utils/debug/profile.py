@@ -13,9 +13,12 @@
 # limitations under the License.
 
 import os
+from typing import Callable, Optional
 
 import torch
 import torch.distributed
+
+from siirl.utils.params import ProfilerArguments
 
 
 class Profiler:
@@ -144,18 +147,8 @@ def mark_annotate(
 
 
 class DistProfiler:
-    """A distributed profiler class for collecting performance metrics across multiple ranks.
 
-    This profiler is designed to work in distributed training environments, allowing selective
-    profiling of specific ranks or all ranks. It provides basic start/stop functionality and
-    supports annotation of code sections for detailed profiling.
-
-    Args:
-        rank (int): The rank of the current process
-        config (ProfilerConfig, optional): Configuration for the profiler.
-    """
-
-    def __init__(self, rank: int, config: Optional[ProfilerConfig] = None, **kwargs):
+    def __init__(self, rank: int, config: ProfilerArguments, **kwargs):
         pass
 
     def start(self, **kwargs):
@@ -193,14 +186,14 @@ class DistProfilerExtension:
     def __init__(self, profiler: DistProfiler):
         self.profiler = profiler
 
-    from verl.single_controller.base.decorator import Dispatch, register
+    # from verl.single_controller.base.decorator import Dispatch, register
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    # @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def start_profile(self, **kwargs) -> None:
         """Start profiling for the current rank in the current training step."""
         self.profiler.start(**kwargs)
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    # @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def stop_profile(self) -> None:
         """Stop profiling for the current rank in the current training step."""
         self.profiler.stop()

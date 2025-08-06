@@ -23,6 +23,7 @@ from siirl.workers.dag_worker.algorithms import apply_kl_penalty, compute_advant
 from siirl.workers.dag_worker.core_algos import agg_loss
 from siirl.workers.dag_worker.data_structures import NodeOutput
 from siirl.workers.databuffer import DataProto
+from siirl.utils.debug import DistProfiler
 
 
 class NodeExecutorsMixin:
@@ -45,6 +46,8 @@ class NodeExecutorsMixin:
     _get_node: Any
     _reduce_and_broadcast_metrics: Any
 
+    # todo 确认颜色
+    @DistProfiler.annotate(color="red", role="generate")
     def generate(self, worker_group_index: int, batch: DataProto, **kwargs) -> NodeOutput:
         """Generates sequences for a training batch using the rollout model."""
         if self.rollout_mode == 'sync':
@@ -71,6 +74,7 @@ class NodeExecutorsMixin:
             return NodeOutput(batch=batch, metrics=metrics)
         return NodeOutput(batch=batch, metrics={})
 
+    @DistProfiler.annotate(color="yellow", role="compute_reward")
     def compute_reward(self, batch: DataProto, tp_size: int, **kwargs) -> NodeOutput:
         """Calculates rewards for a batch of generated sequences."""
         batch.meta_info["global_token_num"] = (torch.sum(batch.batch["attention_mask"], dim=-1) // tp_size).tolist()
@@ -88,6 +92,7 @@ class NodeExecutorsMixin:
             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
         return NodeOutput(batch=batch, metrics=metrics)
 
+    @DistProfiler.annotate(color="blue", role="compute_old_log_prob")
     def compute_old_log_prob(self, batch: DataProto, worker_group_index: int, **kwargs) -> NodeOutput:
         """Computes log probabilities from the actor model before the policy update."""
         if 'global_token_num' not in batch.meta_info:
@@ -113,6 +118,7 @@ class NodeExecutorsMixin:
                 metrics.update({"training/rollout_probs_diff_max": torch.max(rollout_probs_diff).item(), "training/rollout_probs_diff_mean": torch.mean(rollout_probs_diff).item(), "training/rollout_probs_diff_std": torch.std(rollout_probs_diff).item()})
         return NodeOutput(batch=processed_data, metrics=metrics)
 
+    @DistProfiler.annotate(color="blue", role="compute_ref_log_prob")
     def compute_ref_log_prob(self, batch: DataProto, worker_group_index: int, **kwargs) -> NodeOutput:
         """Computes log probabilities from the frozen reference model."""
         processed_data = self.agent_group_worker[worker_group_index][NodeRole.REFERENCE].compute_ref_log_prob(batch)
