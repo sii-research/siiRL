@@ -399,6 +399,7 @@ class RefArguments:
     profile: dict[str, Any] = field(default_factory=dict, metadata={"help": "Reference Profile settings"})
     shuffle: bool = field(default=False, metadata={"help": "Data shuffling"})
     data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
+    recompute_old_log_prob: bool = field(default=True, metadata={"help": "recompute old log prob"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

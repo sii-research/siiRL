@@ -111,7 +111,22 @@ class DistributedMetricAggregator:
                     # Use torch.max for tensors, get the scalar value
                     local_val = torch.max(value).item() if value.numel() > 0 else 0.0
                 elif is_list:
-                    local_val = max(value) if value else 0.0
+                    # Safely flatten and find max in list values, handling nested structures
+                    def flatten_and_max_list(lst):
+                        if not lst:
+                            return 0.0
+                        max_val = float('-inf')
+                        for item in lst:
+                            if isinstance(item, (list, tuple)):
+                                max_val = max(max_val, flatten_and_max_list(item))
+                            elif isinstance(item, (int, float)):
+                                max_val = max(max_val, float(item))
+                            else:
+                                # Skip non-numeric items
+                                continue
+                        return max_val if max_val != float('-inf') else 0.0
+                    
+                    local_val = flatten_and_max_list(value)
                 else: # Is a scalar float
                     local_val = value
                 buckets[op_type].append((key, local_val))
@@ -121,7 +136,22 @@ class DistributedMetricAggregator:
                 if is_tensor:
                     local_val = torch.min(value).item() if value.numel() > 0 else 0.0
                 elif is_list:
-                    local_val = min(value) if value else 0.0
+                    # Safely flatten and find min in list values, handling nested structures
+                    def flatten_and_min_list(lst):
+                        if not lst:
+                            return 0.0
+                        min_val = float('inf')
+                        for item in lst:
+                            if isinstance(item, (list, tuple)):
+                                min_val = min(min_val, flatten_and_min_list(item))
+                            elif isinstance(item, (int, float)):
+                                min_val = min(min_val, float(item))
+                            else:
+                                # Skip non-numeric items
+                                continue
+                        return min_val if min_val != float('inf') else 0.0
+                    
+                    local_val = flatten_and_min_list(value)
                 else:
                     local_val = value
                 buckets[op_type].append((key, local_val))
@@ -132,7 +162,22 @@ class DistributedMetricAggregator:
                     local_sum = torch.sum(value).item()
                     local_count = value.numel()
                 elif is_list:
-                    local_sum = sum(value) if value else 0.0
+                    # Safely flatten and sum list values, handling nested structures
+                    def flatten_and_sum_list(lst):
+                        if not lst:
+                            return 0.0
+                        total = 0.0
+                        for item in lst:
+                            if isinstance(item, (list, tuple)):
+                                total += flatten_and_sum_list(item)
+                            elif isinstance(item, (int, float)):
+                                total += float(item)
+                            else:
+                                # Skip non-numeric items
+                                continue
+                        return total
+                    
+                    local_sum = flatten_and_sum_list(value)
                     local_count = len(value)
                 else: # Is a scalar float
                     local_sum = value
@@ -536,7 +581,23 @@ class UtilitiesMixin:
 
         representative_actor_node = next((n for n in self.taskgraph.nodes.values() if n.node_role == NodeRole.ACTOR), self.first_rollout_node)
         _, _, tp_rank_in_group, _ = self._get_node_dp_info(representative_actor_node)
-        local_token_sum = sum(batch.meta_info.get("global_token_num", [0])) if tp_rank_in_group == 0 else 0
+        
+        # Safely flatten and sum global_token_num, handling nested structures
+        def flatten_and_sum(token_nums):
+            if not token_nums:
+                return 0
+            total = 0
+            for item in token_nums:
+                if isinstance(item, (list, tuple)):
+                    total += flatten_and_sum(item)
+                elif isinstance(item, (int, float)):
+                    total += item
+                else:
+                    # Skip non-numeric items
+                    continue
+            return total
+        
+        local_token_sum = flatten_and_sum(batch.meta_info.get("global_token_num", [0])) if tp_rank_in_group == 0 else 0
         metrics_to_aggregate["perf/total_num_tokens/mean"] = float(local_token_sum) # Use mean to get a sum
 
         # --- 3. Perform the aggregated, distributed reduction ---

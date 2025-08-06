@@ -20,6 +20,7 @@ import os
 import time
 import warnings
 from typing import Union
+import datetime
 
 from sympy.logic import true
 import torch
@@ -885,10 +886,6 @@ class RewardModelWorker(MegatronWorker):
 IS_INITIALIZED = False
 
 def global_initialize_model_parallel(config):
-    global IS_INITIALIZED
-    if IS_INITIALIZED:
-        return
-
     # For separated workers, we use actor's megatron config for distributed model initialization
     # if hasattr(config, 'actor') and hasattr(config.actor, 'megatron'):
     #     megatron_config = config.actor.megatron
@@ -896,9 +893,18 @@ def global_initialize_model_parallel(config):
     #     megatron_config = config.megatron
     # else:
     #     return
-    
     rank = int(os.environ["LOCAL_RANK"])
+    if not torch.distributed.is_initialized():
+        torch.distributed.init_process_group(
+            backend=get_nccl_backend(),
+            timeout=datetime.timedelta(seconds=600),
+            init_method=os.environ.get("DIST_INIT_METHOD", None),
+        )
     get_torch_device().set_device(rank)
+
+    global IS_INITIALIZED
+    if IS_INITIALIZED:
+        return
 
     # if megatron_config.sequence_parallel:
     #     os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
@@ -915,8 +921,8 @@ def global_initialize_model_parallel(config):
     #         nccl_communicator_config_path=None,
     #     )   
     mpu.initialize_model_parallel(
-        tensor_model_parallel_size=2,
-        pipeline_model_parallel_size=2,
+        tensor_model_parallel_size=4,
+        pipeline_model_parallel_size=1,
         virtual_pipeline_model_parallel_size=None,
         pipeline_model_parallel_split_rank=None,
         use_sharp=False,
@@ -1103,8 +1109,8 @@ class ActorWorker(MegatronWorker):
         metrics["perf/mfu/actor"] = estimated_flops * self.config.ppo_epochs / promised_flops / self.world_size
 
         # TODO: here, we should return all metrics
-        output = DataProto(meta_info={"metrics": metrics})
-        output = output.to("cpu")
+        data.meta_info["metrics"] = metrics
+        data = data.to("cpu")
 
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_module)
@@ -1114,7 +1120,7 @@ class ActorWorker(MegatronWorker):
             log_gpu_memory_usage("After offload actor optimizer during update_actor", logger=logger)
 
         get_torch_device().empty_cache()
-        return output
+        return data
 
     @GPUMemoryLogger(role="compute_log_prob", logger=logger)
     def compute_log_prob(self, data: DataProto):
@@ -1131,14 +1137,20 @@ class ActorWorker(MegatronWorker):
         data.meta_info["temperature"] = self.config.temperature
         data = data.to(get_device_id())
         output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
-        output = DataProto.from_dict(tensors={"old_log_probs": output, "entropys": entropys}, meta_info={"temperature": self.config.temperature})
-        output = output.to("cpu")
+
+        # store results of Actor old_log_probs
+        data.batch["old_log_probs"] = output
+        data.batch["entropys"] = entropys
+
+        # output = DataProto.from_dict(tensors={"old_log_probs": output, "entropys": entropys}, meta_info={"temperature": self.config.temperature})
+        # output.batch["response_mask"] = data.batch["response_mask"]
+        data = data.to("cpu")
         # clear kv cache
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_module)
             log_gpu_memory_usage("After offload actor params and grad during compute_log_prob", logger=logger)
         get_torch_device().empty_cache()
-        return output
+        return data
 
     def load_checkpoint(self, checkpoint_path, hdfs_path=None, del_local_after_load=True):
         if self._is_offload_param:
@@ -1278,9 +1290,7 @@ class RolloutWorker(MegatronWorker):
 
         with self.sharding_manager:
             log_gpu_memory_usage("After entering sharding manager", logger=logger)
-            prompts = self.sharding_manager.preprocess_data(prompts)
             output = self.rollout.generate_sequences(prompts=prompts)
-            output = self.sharding_manager.postprocess_data(output)
 
         output = output.to("cpu")
         # clear kv cache
@@ -1392,13 +1402,13 @@ class ReferenceWorker(MegatronWorker):
         data.meta_info["temperature"] = self.config.temperature
         data = data.to(get_device_id())
         output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
-        output = DataProto.from_dict(tensors={"ref_log_prob": output})
-        output = output.to("cpu")
+        data.batch["ref_log_prob"] = output
+        data = data.to("cpu")
         if self._ref_is_offload_param:
             offload_megatron_model_to_cpu(self.ref_module)
             log_gpu_memory_usage("After offload ref params and grad during compute_ref_log_prob", logger=logger)
         get_torch_device().empty_cache()
-        return output
+        return data
 
 
 class AsyncRolloutWorker(RolloutWorker):

@@ -417,16 +417,29 @@ class MegatronPPOActor(BasePPOActor):
                 # entropy_coeff = self.config.entropy_coeff
                 # loss_agg_mode = self.config.loss_agg_mode
 
-                loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
+                # loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
 
                 # policy_loss_fn = get_policy_loss_fn(loss_mode)
+                clip_ratio = self.config.clip_ratio
+                clip_ratio_low = self.config.clip_ratio_low if self.config.clip_ratio_low is not None else clip_ratio
+                clip_ratio_high = self.config.clip_ratio_high if self.config.clip_ratio_high is not None else clip_ratio
+                clip_ratio_c = self.config.clip_ratio_c
+                entropy_coeff = self.config.entropy_coeff
+                loss_agg_mode = self.config.loss_agg_mode
+                use_cpgd_loss = self.config.use_cpgd_loss
+                # policy_drift_coeff = self.config.policy_drift_coeff
+
                 pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = compute_policy_loss(
                     old_log_prob=old_log_prob,
                     log_prob=log_prob,
                     advantages=advantages,
                     response_mask=response_mask,
+                    cliprange=clip_ratio,
+                    cliprange_low=clip_ratio_low,
+                    cliprange_high=clip_ratio_high,
+                    clip_ratio_c=clip_ratio_c,
                     loss_agg_mode=loss_agg_mode,
-                    config=self.config,
+                    use_cpgd_loss=use_cpgd_loss,
                 )
 
                 stats.update(
@@ -512,11 +525,11 @@ class MegatronPPOActor(BasePPOActor):
                     ret = {}
                     if calculate_entropy:
                         logits_bak = logits.clone()
-                        logger.warning_once(
-                            "For memory-efficient computation, enable fused kernels via "
-                            "`actor_rollout_ref.model.use_fused_kernels=True`. "
-                            "The current `clone()` operation ensures correctness but increases memory usage."
-                        )
+                        # logger.warning_once(
+                        #     "For memory-efficient computation, enable fused kernels via "
+                        #     "`actor_rollout_ref.model.use_fused_kernels=True`. "
+                        #     "The current `clone()` operation ensures correctness but increases memory usage."
+                        # )
                         entropy = vocab_parallel_entropy(logits)
                         ret["entropy"] = entropy
                     else:
