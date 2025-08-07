@@ -15,7 +15,9 @@
 import importlib
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set
+
 from loguru import logger
+
 from siirl.utils.params import log_dict_formatted
 
 
@@ -49,6 +51,8 @@ class NodeRole(Enum):
     REFERENCE = "REFERENCE"  # Reference
     REWARD = "REWARD"  # Reward
 
+    POSTPROCESS_SAMPLING = "POSTPROCESS_SAMPLING"  # Post-process sampling for dapo
+
 
 class NodeStatus(Enum):
     """
@@ -68,7 +72,19 @@ class Node:
     Represents a node (task unit) in the DAG.
     """
 
-    def __init__(self, node_id: str, node_type: NodeType, node_role: NodeRole = NodeRole.DEFAULT, only_forward_compute: bool = False, agent_group: int = 0, dependencies: Optional[List[str]] = None, config: Optional[Dict[str, Any]] = None, executable_ref: Optional[str] = None, user_options: Optional[str] = {}, retry_limit: int = 0):
+    def __init__(
+        self,
+        node_id: str,
+        node_type: NodeType,
+        node_role: NodeRole = NodeRole.DEFAULT,
+        only_forward_compute: bool = False,
+        agent_group: int = 0,
+        dependencies: Optional[List[str]] = None,
+        config: Optional[Dict[str, Any]] = None,
+        executable_ref: Optional[str] = None,
+        user_options: Optional[str] = {},
+        retry_limit: int = 0,
+    ):
         """
         Initialize a node.
 
@@ -103,14 +119,13 @@ class Node:
         self.retry_limit: int = retry_limit
         self.retries_done: int = 0
 
-
         self.async_rollout = None
-        self.mode = 'sync'
+        self.mode = "sync"
         self._executable: Optional[Callable] = None
         self.output: Any = None  # Store the result of the node execution
         self.error_info: Optional[str] = None  # Store error information when the node fails
         self.user_options: Dict = user_options
-        self.config['user_options'] = self.user_options
+        self.config["user_options"] = self.user_options
         if self.executable_ref:
             self._resolve_executable()
 
@@ -131,7 +146,7 @@ class Node:
             if not callable(self._executable):
                 raise AttributeError(f"The object resolved from '{self.executable_ref}' is not callable.")
         except (ImportError, AttributeError, ValueError) as e:
-            raise ImportError(f"Failed to load the executable function from '{self.executable_ref}': {e}")
+            raise ImportError(f"Failed to load the executable function from '{self.executable_ref}': {e}") from e
 
     @property
     def executable(self) -> Optional[Callable]:
@@ -265,16 +280,16 @@ class Node:
 
     def copy(self) -> "Node":
         new_node = Node(
-            node_id=self.node_id, 
-            node_type=self.node_type, 
-            node_role=self.node_role, 
-            dependencies=list(self.dependencies), 
-            config=dict(self.config), 
-            executable_ref=self.executable_ref, 
-            retry_limit=self.retry_limit, 
-            only_forward_compute=self.only_forward_compute, 
-            agent_group=self.agent_group, 
-            user_options=self.user_options
+            node_id=self.node_id,
+            node_type=self.node_type,
+            node_role=self.node_role,
+            dependencies=list(self.dependencies),
+            config=dict(self.config),
+            executable_ref=self.executable_ref,
+            retry_limit=self.retry_limit,
+            only_forward_compute=self.only_forward_compute,
+            agent_group=self.agent_group,
+            user_options=self.user_options,
         )
         new_node.status = self.status
         new_node.retries_done = self.retries_done
