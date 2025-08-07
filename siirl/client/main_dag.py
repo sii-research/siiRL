@@ -36,11 +36,8 @@ from siirl.scheduler.enums import AdvantageEstimator
 # --- Constants ---
 RAY_RUNTIME_ENV_VARS = {
     "TOKENIZERS_PARALLELISM": "true",
-    "NCCL_DEBUG": "INFO",
-    "NCCL_DEBUG_SUBSYS": "COLL",
-    "NCCL_DEBUG_FILE": "/workspace/infrawaves/zp/siiRL/nccl.log",
     "VLLM_LOGGING_LEVEL": "WARN",
-    "RAY_DASHBOARD_ADDRESS": "10.1.3.201:8265",
+    # "RAY_DASHBOARD_ADDRESS": "10.1.3.201:8265",
     # "RAY_DEBUG": "1",
     # "RAY_DEBUG_POST_MORTEM": "1",  # this is for distributed debugging
 }

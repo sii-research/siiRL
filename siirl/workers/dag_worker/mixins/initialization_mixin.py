@@ -393,7 +393,7 @@ class InitializationMixin:
         tp_size = 1
         intern_config = reference_node.config
         if reference_node.node_type == NodeType.MODEL_INFERENCE:
-            print("node role is ", reference_node.node_role)
+            # print("node role is ", reference_node.node_role)
             # tp_size = intern_config.rollout.tensor_model_parallel_size
             # hack!
             tp_size = 4

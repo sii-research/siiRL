@@ -59,7 +59,7 @@ def _get_node_role_config_map(strategy: str) -> Dict[NodeRole, Tuple[str, Type]]
     Returns the appropriate configuration mapping based on the strategy.
     
     For Megatron backend, use separate config classes for each role.
-    For FSDP backend, continue using the unified ActorRolloutRefArguments.
+    For FSDP backend, continue using the hybrid ActorRolloutRefArguments.
     """
     if strategy == "megatron":
         # Use separate configuration classes for Megatron backend
@@ -72,6 +72,7 @@ def _get_node_role_config_map(strategy: str) -> Dict[NodeRole, Tuple[str, Type]]
         }
     else:
         # Default to unified configuration for FSDP and other backends
+        # Note: We should unify the config mapping as above when FSDPWorkers are separated.
         return {
             NodeRole.ACTOR: ("actor_rollout_ref", ActorRolloutRefArguments),
             NodeRole.ROLLOUT: ("actor_rollout_ref", ActorRolloutRefArguments),

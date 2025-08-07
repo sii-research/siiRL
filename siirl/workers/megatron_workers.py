@@ -21,6 +21,7 @@ import time
 import warnings
 from typing import Union
 import datetime
+import psutil
 
 from sympy.logic import true
 import torch
@@ -1106,7 +1107,11 @@ class ActorWorker(MegatronWorker):
         delta_time = timer.last
         global_num_tokens = data.meta_info["global_token_num"]
         estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
-        metrics["perf/mfu/actor"] = estimated_flops * self.config.ppo_epochs / promised_flops / self.world_size
+        metrics["perf/mfu/actor"] = estimated_flops / promised_flops
+        metrics["perf/delta_time/actor"] = delta_time
+        metrics["perf/max_memory_allocated_gb"] = get_torch_device().max_memory_allocated() / (1024**3)
+        metrics["perf/max_memory_reserved_gb"] = get_torch_device().max_memory_reserved() / (1024**3)
+        metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
         # TODO: here, we should return all metrics
         data.meta_info["metrics"] = metrics
@@ -1136,14 +1141,21 @@ class ActorWorker(MegatronWorker):
         data.meta_info["use_dynamic_bsz"] = self.config.log_prob_use_dynamic_bsz
         data.meta_info["temperature"] = self.config.temperature
         data = data.to(get_device_id())
-        output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+        with Timer(name="compute_log_prob", logger=None) as timer:
+            output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+        delta_time = timer.last
 
         # store results of Actor old_log_probs
         data.batch["old_log_probs"] = output
         data.batch["entropys"] = entropys
 
-        # output = DataProto.from_dict(tensors={"old_log_probs": output, "entropys": entropys}, meta_info={"temperature": self.config.temperature})
-        # output.batch["response_mask"] = data.batch["response_mask"]
+        # update metrics
+        metrics = {}
+        global_num_tokens = data.meta_info["global_token_num"]
+        estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+        metrics["perf/mfu/actor_log_prob"] = estimated_flops / promised_flops
+        metrics["perf/delta_time/actor_log_prob"] = delta_time
+        data.meta_info["metrics"] = metrics
         data = data.to("cpu")
         # clear kv cache
         if self._is_offload_param:
@@ -1290,8 +1302,14 @@ class RolloutWorker(MegatronWorker):
 
         with self.sharding_manager:
             log_gpu_memory_usage("After entering sharding manager", logger=logger)
-            output = self.rollout.generate_sequences(prompts=prompts)
-
+            with Timer(name="generate_sequences", logger=None) as timer:
+                output = self.rollout.generate_sequences(prompts=prompts)
+            delta_time = timer.last
+            # Note: Add metrics for Rollout, we may use them later.
+            metrics = {}
+            metrics["perf/delta_time/rollout"] = delta_time
+        log_gpu_memory_usage("After rollout generation", logger=logger)
+        output.meta_info.update({"metrics": metrics})
         output = output.to("cpu")
         # clear kv cache
         get_torch_device().empty_cache()
@@ -1387,6 +1405,7 @@ class ReferenceWorker(MegatronWorker):
             offload_megatron_model_to_cpu(self.ref_module)
             log_gpu_memory_usage("After offload ref params during init", logger=logger)
 
+        self.flops_counter = FlopsCounter(self.ref_model_config)
         get_torch_device().empty_cache()
         log_gpu_memory_usage("After init_model finish", logger=logger)
 
@@ -1401,7 +1420,18 @@ class ReferenceWorker(MegatronWorker):
         data.meta_info["use_dynamic_bsz"] = self.config.log_prob_use_dynamic_bsz
         data.meta_info["temperature"] = self.config.temperature
         data = data.to(get_device_id())
-        output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
+
+        with Timer(name="compute_ref_log_prob", logger=None) as timer:
+            output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
+        delta_time = timer.last
+
+        # update metrics
+        metrics = {}
+        global_num_tokens = data.meta_info["global_token_num"]
+        estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+        metrics["perf/mfu/ref"] = estimated_flops / promised_flops
+        metrics["perf/delta_time/ref"] = delta_time
+        data.meta_info["metrics"] = metrics
         data.batch["ref_log_prob"] = output
         data = data.to("cpu")
         if self._ref_is_offload_param:

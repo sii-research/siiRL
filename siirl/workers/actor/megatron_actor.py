@@ -409,7 +409,6 @@ class MegatronPPOActor(BasePPOActor):
             # compute policy loss
             log_prob = output["log_probs"][:, -response_length - 1 : -1].contiguous()
             ret_entropy = None
-            stats = {}
             if not forward_only:
                 old_log_prob = data["old_log_probs"]
                 advantages = data["advantages"]
@@ -442,14 +441,12 @@ class MegatronPPOActor(BasePPOActor):
                     use_cpgd_loss=use_cpgd_loss,
                 )
 
-                stats.update(
-                    {
-                        "actor/pg_loss": pg_loss.detach().item(),
-                        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-                        "actor/ppo_kl": ppo_kl.detach().item(),
-                        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
-                    }
-                )
+                metrics.update({
+                    "actor/pg_loss": pg_loss.detach().item(),
+                    "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+                    "actor/ppo_kl": ppo_kl.detach().item(),
+                    "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+                })
                 policy_loss = pg_loss
 
             if calculate_entropy:
@@ -474,9 +471,6 @@ class MegatronPPOActor(BasePPOActor):
                     metrics["actor/kl_loss"] = kl_loss.detach().item()
                     metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
-                # return loss and stats
-
-            append_to_dict(metrics, stats)
             return policy_loss, [metrics, ret_entropy]
 
         def forward_step(batch_iter, model):
