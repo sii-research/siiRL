@@ -16,12 +16,12 @@ from typing import Any, Dict, Optional
 
 from loguru import logger
 
+from siirl.scheduler.enums import AdvantageEstimator
 from siirl.scheduler.reward import compute_reward
 from siirl.utils.params import SiiRLArguments
-from siirl.scheduler.enums import AdvantageEstimator
-from siirl.workers.dag import Node, NodeType, NodeRole, NodeStatus
-from siirl.workers.databuffer import DataProto
+from siirl.workers.dag import Node, NodeRole, NodeStatus, NodeType
 from siirl.workers.dag_worker import core_algos
+from siirl.workers.databuffer import DataProto
 
 
 class ComputeNode(Node):
@@ -169,9 +169,11 @@ class ComputeNode(Node):
 
         try:
             if self.node_role == NodeRole.ADVANTAGE:
-                self.output = self.executable(kwargs["data"])
-            if self.node_role == NodeRole.REWARD:
-                self.output = self.executable(kwargs["data"], kwargs["reward_fn"])
+                if self._executable is not None:
+                    self.output = self._executable(kwargs["data"])
+            elif self.node_role == NodeRole.REWARD:
+                if self._executable is not None:
+                    self.output = self._executable(kwargs["data"], kwargs["reward_fn"])
             self.update_status(NodeStatus.COMPLETED)
             logger.info(f"Node {self.node_id} execution completed.")
             return self.output
