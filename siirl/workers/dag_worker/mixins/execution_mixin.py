@@ -24,6 +24,7 @@ from siirl.workers.dag_worker.constants import DAGConstants
 from siirl.workers.dag_worker.data_structures import NodeOutput
 from siirl.workers.dag_worker.dag_utils import remove_prefix_from_dataproto, add_prefix_to_dataproto
 from siirl.workers.databuffer import DataProto
+from siirl.utils.debug import DistProfiler
 
 
 class ExecutionMixin:
@@ -51,6 +52,7 @@ class ExecutionMixin:
     _gather_group: Optional[dist.ProcessGroup]
     enable_perf: bool
     internal_data_cache: Dict[str, DataProto]
+    _profiler: DistProfiler
 
     _set_node_executables: Any
     init_model: Any
@@ -132,9 +134,11 @@ class ExecutionMixin:
                     if self._rank == 0 and last_val_metrics:
                         logger.info(f"Final validation metrics:\n{pformat(last_val_metrics)}")
                     return
-
+                if self.global_steps in self.config.profiler.profile_steps:
+                    self._profiler.start(role="e2e", profile_step=self.global_steps)
                 ordered_metrics = self._run_training_step(epoch, batch_idx)
-
+                if self.global_steps in self.config.profiler.profile_steps:
+                    self._profiler.stop()
                 self.global_steps += 1
 
                 if ordered_metrics is not None:
@@ -226,6 +230,7 @@ class ExecutionMixin:
 
             # --- 2. Graph Traversal ---
             visited_nodes = set()
+            # todo 怎么和timer结合起来
             with self._timer("graph_execution", timing_raw):
                 while node_queue:
                     with self._timer("graph_loop_management", timing_raw):
@@ -256,8 +261,6 @@ class ExecutionMixin:
                         with self._timer("get_data_from_buffer_barrier", timing_raw):
                             dist.barrier(self._gather_group)
                     # --- 4. Node Execution ---
-                    
-
                     node_name_timer = f"{cur_node.node_role.name.lower()}"
                     if cur_node.only_forward_compute and cur_node.node_role == NodeRole.ACTOR:
                         node_name_timer = "actor_log_prob"
