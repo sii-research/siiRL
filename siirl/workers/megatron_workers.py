@@ -23,7 +23,6 @@ from typing import Union
 import datetime
 import psutil
 
-from sympy.logic import true
 import torch
 import torch.distributed
 from codetiming import Timer
@@ -49,6 +48,7 @@ from siirl.utils.extras.import_utils import import_external_libs
 from siirl.utils.extras.device import get_device_id, get_device_name, get_nccl_backend, get_torch_device
 from siirl.utils.model_utils.model import load_mcore_dist_weights, load_megatron_gptmodel_weights
 from siirl.utils.model_utils.torch_dtypes import PrecisionType
+from siirl.utils.params.model_args import ActorRolloutRefArguments
 from siirl.workers.actor.megatron_actor import MegatronPPOActor
 from siirl.workers.critic.megatron_critic import MegatronPPOCritic
 from siirl.workers.reward_model.megatron.reward_model import MegatronRewardModel
@@ -884,16 +884,12 @@ class RewardModelWorker(MegatronWorker):
 
 # ================================= Separated Workers =================================
 
-IS_INITIALIZED = False
+IS_ACTOR_ROLLOUT_REF_INITIALIZED = False
 
-def global_initialize_model_parallel(config):
+def global_initialize_model_parallel(config: ActorRolloutRefArguments):
     # For separated workers, we use actor's megatron config for distributed model initialization
-    # if hasattr(config, 'actor') and hasattr(config.actor, 'megatron'):
-    #     megatron_config = config.actor.megatron
-    # elif hasattr(config, 'megatron'):
-    #     megatron_config = config.megatron
-    # else:
-    #     return
+    megatron_config = config.actor.megatron
+    
     rank = int(os.environ["LOCAL_RANK"])
     if not torch.distributed.is_initialized():
         torch.distributed.init_process_group(
@@ -903,68 +899,35 @@ def global_initialize_model_parallel(config):
         )
     get_torch_device().set_device(rank)
 
-    global IS_INITIALIZED
-    if IS_INITIALIZED:
+    global IS_ACTOR_ROLLOUT_REF_INITIALIZED
+    if IS_ACTOR_ROLLOUT_REF_INITIALIZED:
         return
 
-    # if megatron_config.sequence_parallel:
-    #     os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+    if megatron_config.sequence_parallel:
+        os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     
-    # mpu.initialize_model_parallel(
-    #         tensor_model_parallel_size=megatron_config.tensor_model_parallel_size,
-    #         pipeline_model_parallel_size=megatron_config.pipeline_model_parallel_size,
-    #         virtual_pipeline_model_parallel_size=megatron_config.virtual_pipeline_model_parallel_size,
-    #         pipeline_model_parallel_split_rank=None,
-    #         use_sharp=False,
-    #         context_parallel_size=megatron_config.context_parallel_size,
-    #         expert_model_parallel_size=megatron_config.expert_model_parallel_size,
-    #         expert_tensor_parallel_size=megatron_config.expert_tensor_parallel_size,
-    #         nccl_communicator_config_path=None,
-    #     )   
     mpu.initialize_model_parallel(
-        tensor_model_parallel_size=4,
-        pipeline_model_parallel_size=1,
-        virtual_pipeline_model_parallel_size=None,
-        pipeline_model_parallel_split_rank=None,
-        use_sharp=False,
-        context_parallel_size=1,
-        expert_model_parallel_size=1,
-        expert_tensor_parallel_size=1,
-        nccl_communicator_config_path=None,
-    )    
-    set_random_seed(seed=1234)
+            tensor_model_parallel_size=megatron_config.tensor_model_parallel_size,
+            pipeline_model_parallel_size=megatron_config.pipeline_model_parallel_size,
+            virtual_pipeline_model_parallel_size=megatron_config.virtual_pipeline_model_parallel_size,
+            pipeline_model_parallel_split_rank=None,
+            use_sharp=False,
+            context_parallel_size=megatron_config.context_parallel_size,
+            expert_model_parallel_size=megatron_config.expert_model_parallel_size,
+            expert_tensor_parallel_size=megatron_config.expert_tensor_parallel_size,
+            nccl_communicator_config_path=None,
+        )    
+    set_random_seed(seed=megatron_config.seed)
     
-    IS_INITIALIZED = True
-    
-# def global_initialize_model_parallel(config):
-#     global IS_INITIALIZED
-#     if IS_INITIALIZED:
-#         return
+    IS_ACTOR_ROLLOUT_REF_INITIALIZED = True
 
-#     rank = int(os.environ["LOCAL_RANK"])
-#     get_torch_device().set_device(rank)
+def megatron_model_provider(tf_config, hf_config, pre_process, post_process, share_embeddings_and_output_weights, value, freeze_moe_router):
+    from siirl.models.mcore import init_mcore_model
 
-#     if hasattr(config, 'actor') and hasattr(config.actor, 'megatron'):
-#         megatron_config = config.actor.megatron
-#     elif hasattr(config, 'megatron'):
-#         megatron_config = config.megatron
-#     else:
-#         raise ValueError("No megatron config found")
+    parallel_model = init_mcore_model(tf_config, hf_config, pre_process, post_process, share_embeddings_and_output_weights=share_embeddings_and_output_weights, value=value, freeze_moe_router=freeze_moe_router)
+    parallel_model.to(get_device_name())
+    return parallel_model
 
-#     mpu.initialize_model_parallel(
-#         tensor_model_parallel_size=megatron_config.tensor_model_parallel_size,
-#         pipeline_model_parallel_size=megatron_config.pipeline_model_parallel_size,
-#         virtual_pipeline_model_parallel_size=megatron_config.virtual_pipeline_model_parallel_size,
-#         pipeline_model_parallel_split_rank=None,
-#         use_sharp=False,
-#         context_parallel_size=megatron_config.context_parallel_size,
-#         expert_model_parallel_size=megatron_config.expert_model_parallel_size,
-#         expert_tensor_parallel_size=megatron_config.expert_tensor_parallel_size,
-#         nccl_communicator_config_path=None,
-#     )
-#     set_random_seed(seed=megatron_config.seed)
-
-#     IS_INITIALIZED = True
 
 class ActorWorker(MegatronWorker):
     """
@@ -972,51 +935,43 @@ class ActorWorker(MegatronWorker):
     """
 
     def __init__(self, config: DictConfig, process_group=None):
+        # For backward compatibility, we do not seperate the hybrid configurations,
+        # i.e., the `config` here is still ActorRolloutRefArguments
+        assert isinstance(config, ActorRolloutRefArguments), "config of ActorWorker must be ActorRolloutRefArguments"
         super().__init__()
         self.config = config
 
         global_initialize_model_parallel(self.config)
 
-        # normalize config - use rollout_n from ActorArguments
-        self.config.ppo_mini_batch_size *= self.config.rollout_n
-        self.config.ppo_mini_batch_size //= mpu.get_data_parallel_world_size()
-        if self.config.ppo_micro_batch_size:
-            self.config.ppo_micro_batch_size //= mpu.get_data_parallel_world_size()
-            self.config.ppo_micro_batch_size_per_gpu = self.config.ppo_micro_batch_size
+        self.config.actor.ppo_mini_batch_size *= self.config.actor.rollout_n
+        self.config.actor.ppo_mini_batch_size //= mpu.get_data_parallel_world_size()
+        if self.config.actor.ppo_micro_batch_size:
+            self.config.actor.ppo_micro_batch_size //= mpu.get_data_parallel_world_size()
+            self.config.actor.ppo_micro_batch_size_per_gpu = self.config.actor.ppo_micro_batch_size
 
-        # self._is_offload_param = self.config.megatron.param_offload
-        # hack!
-        self._is_offload_param = True
-        # self._is_offload_grad = self.config.megatron.grad_offload
-        self._is_offload_grad = True
-        # self._is_offload_optimizer = self.config.megatron.optimizer_offload
-        # hack!
-        self._is_offload_optimizer = True
+        self._is_offload_param = self.config.actor.megatron.param_offload
+        self._is_offload_grad = self.config.actor.megatron.grad_offload
+        self._is_offload_optimizer = self.config.actor.megatron.optimizer_offload
 
     def _build_actor_model_optimizer(self, model_path, optim_config, override_model_config, override_transformer_config):
         from siirl.utils.megatron.optimizer import get_megatron_optimizer
         from siirl.utils.megatron.megatron_utils import get_model, init_megatron_optim_config
-        from siirl.utils.model_utils.model import get_generation_config, print_model_size
+        from siirl.utils.model_utils.model import print_model_size
 
-        self._init_hf_config_and_tf_config(model_path, model_path, self.dtype, override_model_config, override_transformer_config, self.config.model.trust_remote_code)
+        self._init_hf_config_and_tf_config(model_path, model_path, self.dtype, override_model_config, override_transformer_config, self.config.actor.model.trust_remote_code)
 
         def megatron_actor_model_provider(pre_process, post_process):
-            from siirl.models.mcore import init_mcore_model
-
-            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=self.share_embeddings_and_output_weights, value=False, freeze_moe_router=override_model_config.get("moe_config", {}).get("freeze_moe_router", False))
-            parallel_model.to(get_device_name())
-            return parallel_model
+            return megatron_model_provider(self.tf_config, self.hf_config, pre_process, post_process, self.share_embeddings_and_output_weights, False, override_model_config.get("moe_config", {}).get("freeze_moe_router", False))
 
         # Step 3: initialize the megatron model
         actor_module = get_model(
             megatron_actor_model_provider,
             wrap_with_ddp=True,
-            use_distributed_optimizer=self.config.megatron.use_distributed_optimizer,
+            use_distributed_optimizer=self.config.actor.megatron.use_distributed_optimizer,
         )
-        print(f"actor_module: {len(actor_module)}")
-        if self.config.load_weight:
-            if self.config.megatron.use_dist_checkpointing:
-                load_mcore_dist_weights(actor_module, self.config.megatron.dist_checkpointing_path, is_value_model=False)
+        if self.config.actor.load_weight:
+            if self.config.actor.megatron.use_dist_checkpointing:
+                load_mcore_dist_weights(actor_module, self.config.actor.megatron.dist_checkpointing_path, is_value_model=False)
             else:
                 load_megatron_gptmodel_weights(self.config, self.hf_config, actor_module, params_dtype=self.dtype, is_value_model=False)
 
@@ -1036,7 +991,7 @@ class ActorWorker(MegatronWorker):
         import_external_libs(self.config.model.external_lib)
 
         override_model_config = self.config.model.override_config
-        override_transformer_config = self.config.megatron.override_transformer_config
+        override_transformer_config = self.config.actor.megatron.override_transformer_config
         
         if not override_transformer_config:
             override_transformer_config = OmegaConf.create()
@@ -1047,9 +1002,9 @@ class ActorWorker(MegatronWorker):
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         # we need the model for actor
-        optim_config = self.config.optim
+        optim_config = self.config.actor.optim
         self.actor_module, self.actor_optimizer, self.actor_model_config, self.actor_optim_config = self._build_actor_model_optimizer(
-            model_path=self.config.model.path,
+            model_path=self.config.actor.model.path,
             optim_config=optim_config,
             override_model_config=override_model_config,
             override_transformer_config=override_transformer_config,
@@ -1062,7 +1017,7 @@ class ActorWorker(MegatronWorker):
             log_gpu_memory_usage("After offload actor optimizer during init", logger=logger)
 
         self.actor = MegatronPPOActor(
-            config=self.config,
+            config=self.config.actor,
             model_config=self.actor_model_config,
             hf_config=self.hf_config,
             tf_config=self.tf_config,
@@ -1083,8 +1038,8 @@ class ActorWorker(MegatronWorker):
             share_embeddings_and_output_weights=self.share_embeddings_and_output_weights,
             tokenizer=self.tokenizer,
             optimizer=self.actor_optimizer,
-            use_distributed_optimizer=self.config.megatron.use_distributed_optimizer,
-            checkpoint_contents=self.config.checkpoint.contents,
+            use_distributed_optimizer=self.config.actor.megatron.use_distributed_optimizer,
+            checkpoint_contents=self.config.actor.checkpoint.contents,
         )
         get_torch_device().empty_cache()
         log_gpu_memory_usage("After init_model finish", logger=logger)
@@ -1099,7 +1054,7 @@ class ActorWorker(MegatronWorker):
             log_gpu_memory_usage("After load actor optimizer during update_actor", logger=logger)
         data.batch = data.batch.to(get_device_name())
 
-        micro_batch_size = self.config.ppo_micro_batch_size_per_gpu
+        micro_batch_size = self.config.actor.ppo_micro_batch_size_per_gpu
         data.meta_info["micro_batch_size"] = micro_batch_size
         dataloader = self.actor.make_minibatch_iterator(data=data)
         with Timer(name="update_policy", logger=None) as timer:
@@ -1136,10 +1091,10 @@ class ActorWorker(MegatronWorker):
             log_gpu_memory_usage("After load actor params during compute_log_prob", logger=logger)
 
         # we should always recompute old_log_probs when it is HybridEngine
-        data.meta_info["micro_batch_size"] = self.config.log_prob_micro_batch_size_per_gpu
-        data.meta_info["max_token_len"] = self.config.log_prob_max_token_len_per_gpu
-        data.meta_info["use_dynamic_bsz"] = self.config.log_prob_use_dynamic_bsz
-        data.meta_info["temperature"] = self.config.temperature
+        data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
+        data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
+        data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
+        data.meta_info["temperature"] = self.config.rollout.temperature
         data = data.to(get_device_id())
         with Timer(name="compute_log_prob", logger=None) as timer:
             output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
@@ -1191,77 +1146,65 @@ class RolloutWorker(MegatronWorker):
     """
 
     def __init__(self, config: DictConfig, process_group=None):
+        # For backward compatibility, we do not seperate the hybrid configurations,
+        # i.e., the `config` here is still ActorRolloutRefArguments
+        assert isinstance(config, ActorRolloutRefArguments), "config of RolloutWorker must be ActorRolloutRefArguments"
         super().__init__()
         self.config = config
 
         # normalize rollout config
         global_initialize_model_parallel(self.config)
 
-        if self.config.log_prob_micro_batch_size:
-            self.config.log_prob_micro_batch_size //= mpu.get_data_parallel_world_size()
-            self.config.log_prob_micro_batch_size_per_gpu = self.config.log_prob_micro_batch_size
-        
-        # hack!
-        self._is_offload_optimizer = True
+        if self.config.rollout.log_prob_micro_batch_size:
+            self.config.rollout.log_prob_micro_batch_size //= mpu.get_data_parallel_world_size()
+            self.config.rollout.log_prob_micro_batch_size_per_gpu = self.config.rollout.log_prob_micro_batch_size
 
     def _build_rollout(self, trust_remote_code=False):
         from torch.distributed.device_mesh import init_device_mesh
+        infer_tp = self.config.rollout.tensor_model_parallel_size
+        dp = self.world_size // infer_tp
+        assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
 
-        if self.config.name == "vllm":
-            from torch.distributed.device_mesh import init_device_mesh
-
-            from siirl.workers.rollout.vllm_rollout import vllm_mode, vLLMRollout
+        if self.config.rollout.name == "vllm":
+            from siirl.workers.rollout.vllm_rollout import vLLMRollout
             # NOTE(sgm): If the QKV and gate_up projection layer are concate together in actor,
             # we will reorganize their weight format when resharding from actor to rollout.
-
-            infer_tp = self.config.tensor_model_parallel_size
-            dp = self.world_size // infer_tp
-            assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
             rollout_device_mesh = init_device_mesh(get_device_name(), mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
             log_gpu_memory_usage("Before building vllm rollout", logger=None)
-
-            local_path = copy_to_local(self.config.model.path, use_shm=self.config.model.use_shm)
+            # local_path = copy_to_local(self.config.model.path, use_shm=self.config.model.use_shm)
             rollout = vLLMRollout(
-                model_path=local_path,
-                config=self.config,
+                model_path=self.local_path,
+                config=self.config.rollout,
                 tokenizer=self.tokenizer,
-                model_hf_config=self.rollout_model_config,
+                model_hf_config=self.hf_config,
                 device_mesh=rollout_device_mesh,
                 trust_remote_code=trust_remote_code,
             )
             log_gpu_memory_usage("After building vllm rollout", logger=logger)
 
-        elif self.config.name in ["sglang", "sglang_async"]:
-            if self.config.name == "sglang_async":
+        elif self.config.rollout.name in ["sglang", "sglang_async"]:
+            from siirl.workers.rollout.sglang_rollout import SGLangRollout
+            if self.config.rollout.name == "sglang_async":
                 warnings.warn(
                     "'sglang_async' has been deprecated and merged into 'sglang'. Please use 'sglang' going forward.",
                     DeprecationWarning,
                     stacklevel=2,
                 )
-            from siirl.workers.rollout.sglang_rollout import SGLangRollout
-
-            from siirl.workers.sharding_manager.megatron_sglang import MegatronSGLangShardingManager
-
-            infer_tp = self.config.tensor_model_parallel_size
-            dp = self.world_size // infer_tp
-            assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
             rollout_device_mesh = init_device_mesh("cpu", mesh_shape=(dp, infer_tp, 1), mesh_dim_names=("dp", "tp", "pp"))
-
-            local_path = copy_to_local(self.config.model.path)
-            log_gpu_memory_usage(f"Before building {self.config.name} rollout", logger=None)
+            # local_path = copy_to_local(self.config.model.path)
+            log_gpu_memory_usage(f"Before building {self.config.rollout.name} rollout", logger=None)
             rollout = SGLangRollout(
-                actor_module=local_path,
-                config=self.config,
+                actor_module=self.local_path,
+                config=self.config.rollout,
                 tokenizer=self.tokenizer,
-                model_hf_config=self.rollout_model_config,
+                model_hf_config=self.hf_config,
                 trust_remote_code=trust_remote_code,
                 device_mesh=rollout_device_mesh,
             )
-            log_gpu_memory_usage(f"After building {self.config.name} rollout", logger=None)
+            log_gpu_memory_usage(f"After building {self.config.rollout.name} rollout", logger=None)
         else:
             raise NotImplementedError("Only vllmRollout and SGLangRollout are supported with Megatron now")
         
-        print("rollout init done")
         return rollout, None
 
     def init_model(self):
@@ -1273,18 +1216,16 @@ class RolloutWorker(MegatronWorker):
 
         # Initialize HF config and tokenizer for inference engine setup
         from siirl.utils.model_utils.model import get_generation_config
-        from siirl.models.loader import load_tokenizer
-        from transformers import AutoConfig
         
-        self.local_path = copy_to_local(self.config.model.path, use_shm=self.config.model.use_shm)
-        self.tokenizer = load_tokenizer(model_args=self.config.model)['tokenizer']
+        # self.local_path = copy_to_local(self.config.model.path, use_shm=self.config.model.use_shm)
+        # self.tokenizer = load_tokenizer(model_args=self.config.model)['tokenizer']
+        model_path = self.config.model.path
+        model_override_config = self.config.model.override_config
+        model_override_transformer_config = self.config.actor.megatron.override_transformer_config
+        model_trust_remote_code = self.config.actor.model.trust_remote_code
+        
+        self._init_hf_config_and_tf_config(model_path, model_path, self.dtype, model_override_config, model_override_transformer_config, model_trust_remote_code)
         self.generation_config = get_generation_config(self.local_path)
-        
-        # Load HF config for inference engines without building Megatron model
-        self.rollout_model_config = AutoConfig.from_pretrained(
-            self.local_path,
-            trust_remote_code=self.config.model.trust_remote_code
-        )
 
         # Only build the inference engine (vLLM/SGLang) - no need for Megatron model
         self.rollout, self.sharding_manager = self._build_rollout(trust_remote_code=self.config.model.trust_remote_code)
@@ -1325,76 +1266,68 @@ class ReferenceWorker(MegatronWorker):
     """
 
     def __init__(self, config: DictConfig, process_group=None):
+        # For backward compatibility, we do not seperate the hybrid configurations,
+        # i.e., the `config` here is still ActorRolloutRefArguments
+        assert isinstance(config, ActorRolloutRefArguments), "config must be ActorRolloutRefArguments"
         super().__init__()
         self.config = config
 
         global_initialize_model_parallel(self.config)
 
         # normalize ref config
-        if self.config.log_prob_micro_batch_size:
-            self.config.log_prob_micro_batch_size //= mpu.get_data_parallel_world_size()
-            self.config.log_prob_micro_batch_size_per_gpu = self.config.log_prob_micro_batch_size
+        if self.config.ref.log_prob_micro_batch_size:
+            self.config.ref.log_prob_micro_batch_size //= mpu.get_data_parallel_world_size()
+            self.config.ref.log_prob_micro_batch_size_per_gpu = self.config.ref.log_prob_micro_batch_size
         else:
-            assert self.config.log_prob_micro_batch_size_per_gpu is not None, "Please note that in the ref policy configuration, `log_prob_micro_batch_size_per_gpu` and `log_prob_micro_batch_size` should not be None at the same time."
+            assert self.config.ref.log_prob_micro_batch_size_per_gpu is not None, "Please note that in the ref policy configuration, `log_prob_micro_batch_size_per_gpu` and `log_prob_micro_batch_size` should not be None at the same time."
         
-        # Hack!
-        # self._ref_is_offload_param = self.config.megatron.param_offload
-        self._ref_is_offload_param = True
+        self._ref_is_offload_param = self.config.ref.megatron.param_offload
 
     def _build_ref_model(self, model_path, override_model_config, override_transformer_config):
         from megatron.core.models.gpt.gpt_model import ModelType
         from siirl.utils.megatron.megatron_utils import get_model
-        from siirl.utils.model_utils.model import get_generation_config, print_model_size
 
         self._init_hf_config_and_tf_config(model_path, model_path, self.dtype, override_model_config, override_transformer_config, self.config.model.trust_remote_code)
-        self.generation_config = get_generation_config(self.local_path)
 
         def megatron_ref_model_provider(pre_process, post_process):
-            from siirl.models.mcore import init_mcore_model
+            return megatron_model_provider(self.tf_config, self.hf_config, pre_process, post_process, self.share_embeddings_and_output_weights, False, override_model_config.get("moe_config", {}).get("freeze_moe_router", False))
 
-            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=self.share_embeddings_and_output_weights, value=False, freeze_moe_router=override_model_config.get("moe_config", {}).get("freeze_moe_router", False))
-            parallel_model.to(get_device_name())
-            return parallel_model
-
-        print(f"self.config.load_weight: {self.config.load_weight}")
         ref_module = get_model(
-            model_provider_func=megatron_ref_model_provider,
+            megatron_ref_model_provider,
             model_type=ModelType.encoder_or_decoder,
             wrap_with_ddp=False,
-            use_distributed_optimizer=self.config.megatron.use_distributed_optimizer,
+            use_distributed_optimizer=self.config.ref.megatron.use_distributed_optimizer,
         )
 
-        if self.config.load_weight:
-            print("load ref weight start")
-            if self.config.megatron.use_dist_checkpointing:
-                load_mcore_dist_weights(ref_module, self.config.megatron.dist_checkpointing_path, is_value_model=False)
+        if self.config.ref.load_weight:
+            logger.info("Loading ref model weight")
+            if self.config.ref.megatron.use_dist_checkpointing:
+                load_mcore_dist_weights(ref_module, self.config.ref.megatron.dist_checkpointing_path, is_value_model=False)
             else:
                 load_megatron_gptmodel_weights(self.config, self.hf_config, ref_module, params_dtype=self.dtype, is_value_model=False)
-        log_gpu_memory_usage("After ref module init", logger=logger)
         return ref_module, self.hf_config
 
     def init_model(self):
         import_external_libs(self.config.model.external_lib)
 
         override_model_config = self.config.model.override_config
-        override_transformer_config = self.config.megatron.override_transformer_config
+        override_transformer_config = self.config.ref.megatron.override_transformer_config
         
         if not override_transformer_config:
             override_transformer_config = OmegaConf.create()
         
         self.param_dtype = torch.bfloat16
-        log_gpu_memory_usage("Before init ref model", logger=logger)
-
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
+        log_gpu_memory_usage("Before init ref model", logger=logger)
         self.ref_module, self.ref_model_config = self._build_ref_model(
             model_path=self.config.model.path,
             override_model_config=override_model_config,
             override_transformer_config=override_transformer_config,
         )
-        log_gpu_memory_usage("After ref model init", logger=logger)
+        log_gpu_memory_usage("After init ref model", logger=logger)
         self.ref_policy = MegatronPPOActor(
-            config=self.config,
+            config=self.config.ref,
             model_config=self.ref_model_config,
             hf_config=self.hf_config,
             tf_config=self.tf_config,
@@ -1407,18 +1340,18 @@ class ReferenceWorker(MegatronWorker):
 
         self.flops_counter = FlopsCounter(self.ref_model_config)
         get_torch_device().empty_cache()
-        log_gpu_memory_usage("After init_model finish", logger=logger)
+        log_gpu_memory_usage("After finish ref model init", logger=logger)
 
     @GPUMemoryLogger(role="compute_ref_log_prob", logger=logger)
     def compute_ref_log_prob(self, data: DataProto):
         if self._ref_is_offload_param:
             load_megatron_model_to_gpu(self.ref_module, load_grad=False)
             log_gpu_memory_usage("After load ref params and grad during compute_ref_log_prob", logger=logger)
-        micro_batch_size = self.config.log_prob_micro_batch_size_per_gpu
+        micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
         data.meta_info["micro_batch_size"] = micro_batch_size
-        data.meta_info["max_token_len"] = self.config.log_prob_max_token_len_per_gpu
-        data.meta_info["use_dynamic_bsz"] = self.config.log_prob_use_dynamic_bsz
-        data.meta_info["temperature"] = self.config.temperature
+        data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
+        data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
+        data.meta_info["temperature"] = self.config.rollout.temperature
         data = data.to(get_device_id())
 
         with Timer(name="compute_ref_log_prob", logger=None) as timer:
@@ -1448,7 +1381,7 @@ class AsyncRolloutWorker(RolloutWorker):
         # NOTE: rollout is not actually initialized here, it's deferred
         # to be initialized by AsyncvLLMServer.
 
-        self.vllm_tp_size = self.config.tensor_model_parallel_size
+        self.vllm_tp_size = self.config.rollout.tensor_model_parallel_size
         self.vllm_dp_rank = int(os.environ["RANK"]) // self.vllm_tp_size
         self.vllm_tp_rank = int(os.environ["RANK"]) % self.vllm_tp_size
 

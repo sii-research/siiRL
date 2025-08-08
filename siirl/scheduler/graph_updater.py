@@ -54,34 +54,6 @@ def unflatten_dict_with_omegaconf(flat_dict: Dict[str, Any]) -> Dict[str, Any]:
     return OmegaConf.to_container(config, resolve=True, throw_on_missing=False)
 
 
-def _get_node_role_config_map(strategy: str) -> Dict[NodeRole, Tuple[str, Type]]:
-    """
-    Returns the appropriate configuration mapping based on the strategy.
-    
-    For Megatron backend, use separate config classes for each role.
-    For FSDP backend, continue using the hybrid ActorRolloutRefArguments.
-    """
-    if strategy == "megatron":
-        # Use separate configuration classes for Megatron backend
-        return {
-            NodeRole.ACTOR: ("actor_rollout_ref.actor", ActorArguments),
-            NodeRole.ROLLOUT: ("actor_rollout_ref.rollout", RolloutArguments), 
-            NodeRole.REFERENCE: ("actor_rollout_ref.ref", RefArguments),
-            NodeRole.CRITIC: ("critic", CriticArguments),
-            NodeRole.REWARD: ("reward_model", RewardModelArguments),
-        }
-    else:
-        # Default to unified configuration for FSDP and other backends
-        # Note: We should unify the config mapping as above when FSDPWorkers are separated.
-        return {
-            NodeRole.ACTOR: ("actor_rollout_ref", ActorRolloutRefArguments),
-            NodeRole.ROLLOUT: ("actor_rollout_ref", ActorRolloutRefArguments),
-            NodeRole.REFERENCE: ("actor_rollout_ref", ActorRolloutRefArguments),
-            NodeRole.CRITIC: ("critic", CriticArguments),
-            NodeRole.REWARD: ("reward_model", RewardModelArguments),
-        }
-
-
 def update_task_graph_node_configs(workerflow_taskgraph: TaskGraph, basic_common_config: "SiiRLArguments") -> TaskGraph:
     """
     Updates node configurations by merging global defaults with node-specific overrides,
@@ -97,19 +69,13 @@ def update_task_graph_node_configs(workerflow_taskgraph: TaskGraph, basic_common
     logger.info("Starting update of TaskGraph node configurations (using OmegaConf and Dacite)...")
     workerflow_taskgraph.build_adjacency_lists()
 
-    # Determine strategy from the first actor-like node
-    strategy = "fsdp"  # default
-    for node in workerflow_taskgraph.nodes.values():
-        if node.node_role in [NodeRole.ACTOR, NodeRole.ROLLOUT, NodeRole.REFERENCE]:
-            node_config = node.config or {}
-            node_config_dict = unflatten_dict_with_omegaconf(node_config)
-            if "strategy" in node_config_dict:
-                strategy = node_config_dict["strategy"]
-            elif hasattr(basic_common_config, 'actor_rollout_ref') and hasattr(basic_common_config.actor_rollout_ref, 'actor') and hasattr(basic_common_config.actor_rollout_ref.actor, 'strategy'):
-                strategy = basic_common_config.actor_rollout_ref.actor.strategy
-            break
-    
-    node_role_config_map = _get_node_role_config_map(strategy)
+    node_role_config_map: Dict[NodeRole, Tuple[str, Type]] = {
+        NodeRole.ACTOR: ("actor_rollout_ref", ActorRolloutRefArguments),
+        NodeRole.ROLLOUT: ("actor_rollout_ref", ActorRolloutRefArguments),
+        NodeRole.REFERENCE: ("actor_rollout_ref", ActorRolloutRefArguments),
+        NodeRole.CRITIC: ("critic", CriticArguments),
+        NodeRole.REWARD: ("reward_model", RewardModelArguments),
+    }
 
     for node_id, node in workerflow_taskgraph.nodes.items():
         if node.node_type not in [NodeType.MODEL_INFERENCE, NodeType.MODEL_TRAIN]:
@@ -125,17 +91,7 @@ def update_task_graph_node_configs(workerflow_taskgraph: TaskGraph, basic_common
 
         if node.node_role in node_role_config_map:
             default_config_attr_name, target_dataclass_type = node_role_config_map[node.node_role]
-            
-            # Handle nested attribute access (e.g., "actor_rollout_ref.actor")
-            def get_nested_attr(obj, attr_path):
-                attrs = attr_path.split('.')
-                for attr in attrs:
-                    obj = getattr(obj, attr, None)
-                    if obj is None:
-                        return None
-                return obj
-            
-            default_config_branch_instance = get_nested_attr(basic_common_config, default_config_attr_name)
+            default_config_branch_instance = getattr(basic_common_config, default_config_attr_name, None)
 
             merged_omega_conf: Optional[DictConfig] = None
 
