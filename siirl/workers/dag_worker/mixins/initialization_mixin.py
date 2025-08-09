@@ -15,34 +15,37 @@
 import inspect
 import os
 from typing import Dict, Type
-import torch
+
 import ray
 import torch
-
 import torch.distributed as dist
 from loguru import logger
 
 from siirl.dataloader import DataLoaderNode
 from siirl.models.loader import load_tokenizer
-from siirl.workers.base_worker import Worker
 from siirl.scheduler.reward import create_reward_manager
+from siirl.utils.extras.device import get_device_name, get_nccl_backend
+from siirl.workers.base_worker import Worker
 from siirl.workers.dag.node import NodeRole, NodeType
 from siirl.workers.dag_worker.constants import DAGConstants
-from siirl.utils.extras.device import get_device_name, get_nccl_backend
+
 device_name = get_device_name()
+
 
 class InitializationMixin:
     """Handles the initialization and setup logic for the DAGWorker."""
 
-    from typing import Dict, List, Optional, Type, Any
+    from typing import Any, Dict, List, Optional, Type
+
     from torch.distributed import ProcessGroup
-    from siirl.utils.params import SiiRLArguments
-    from siirl.scheduler.process_group_manager import ProcessGroupManager
+
     from siirl.models.loader import TokenizerModule
+    from siirl.scheduler.process_group_manager import ProcessGroupManager
+    from siirl.utils.logger.tracking import Tracking
+    from siirl.utils.params import SiiRLArguments
+    from siirl.workers.base_worker import Worker
     from siirl.workers.dag import TaskGraph
     from siirl.workers.dag.node import Node, NodeRole
-    from siirl.workers.base_worker import Worker
-    from siirl.utils.logger.tracking import Tracking
 
     # Attributes from DAGWorker's __init__
     config: SiiRLArguments
@@ -97,8 +100,8 @@ class InitializationMixin:
             raise ValueError("Environment variable 'RANK' is not set. This is required for distributed setup.")
         try:
             return int(rank_str)
-        except ValueError:
-            raise ValueError(f"Invalid RANK format: '{rank_str}'. Must be an integer.")
+        except ValueError as e:
+            raise ValueError(f"Invalid RANK format: '{rank_str}'. Must be an integer.") from e
 
     def _get_taskgraph_for_rank(self, taskgraph_mapping: Dict[int, "TaskGraph"]) -> "TaskGraph":
         """Retrieves the TaskGraph for the current rank from the provided mapping."""
@@ -224,8 +227,8 @@ class InitializationMixin:
         if not self.validate_tokenizer:
             logger.warning("No tokenizer loaded; reward functions might fail or use a default one.")
 
-        self.val_reward_fn = create_reward_manager(self.config, self.validate_tokenizer, num_examine=1)
-        self.reward_fn = create_reward_manager(self.config, self.validate_tokenizer, num_examine=0, **self.config.reward_model.reward_kwargs)
+        self.val_reward_fn = create_reward_manager(self.config, self.validate_tokenizer, num_examine=1, max_resp_len=self.config.data.max_response_length, overlong_buffer_cfg=self.config.reward_model.overlong_buffer)
+        self.reward_fn = create_reward_manager(self.config, self.validate_tokenizer, num_examine=0, max_resp_len=self.config.data.max_response_length, overlong_buffer_cfg=self.config.reward_model.overlong_buffer, **self.config.reward_model.reward_kwargs)
 
         if self.config.algorithm.use_kl_in_reward:
             from siirl.workers.dag_worker import core_algos
@@ -308,7 +311,7 @@ class InitializationMixin:
                 self.agent_group_worker[node.agent_group][node.node_role] = worker_instance
                 self.agent_group_process_group[node.agent_group][node.node_role] = node_process_group
                 logger.success(f"Rank {self._rank}: Successfully created worker '{worker_cls.__name__}' for node: {node.node_id}")
-                
+
                 # note all agents share same critic in multi-agent(Marft)
                 if node.node_role == NodeRole.CRITIC and node.agent_group != 0:
                     for agent in range(node.agent_group):
@@ -409,8 +412,8 @@ class InitializationMixin:
                     continue
                 node_worker.init_model()
                 have_init_workers.add(self._generate_node_worker_key(node))
-                if node.node_role == NodeRole.ROLLOUT and node.config['intern_config'].rollout.mode == 'async':
-                    self.rollout_mode = 'async'
+                if node.node_role == NodeRole.ROLLOUT and node.config["intern_config"].rollout.mode == "async":
+                    self.rollout_mode = "async"
                     self.zmq_address = node_worker.get_zeromq_address()
         logger.success("All worker models initialized.")
 
@@ -442,7 +445,7 @@ class InitializationMixin:
                 model_config=actor_worker.actor_model_config,
                 parallel_config=parallel_config,
                 full_params="hf" in rollout_worker.config.rollout.load_format,
-                offload_param=getattr(actor_worker, "_is_offload_param", False)
+                offload_param=getattr(actor_worker, "_is_offload_param", False),
             )
         elif self.config.actor_rollout_ref.rollout.name == "sglang":
             from siirl.workers.sharding_manager.fsdp_sglang import MultiAgentFSDPSGLangShardingManager
@@ -450,9 +453,7 @@ class InitializationMixin:
             sharding_manager_cls = MultiAgentFSDPSGLangShardingManager
             tp_size = parallel_config.get("rollout_parallel_size")
             world_size = parallel_config.get("rollout_world_size")
-            rollout_device_mesh = torch.distributed.init_device_mesh(
-                device_name, mesh_shape=(world_size // tp_size, tp_size), mesh_dim_names=["dp", "infer_tp"]
-            )
+            rollout_device_mesh = torch.distributed.init_device_mesh(device_name, mesh_shape=(world_size // tp_size, tp_size), mesh_dim_names=["dp", "infer_tp"])
             sharding_manager = sharding_manager_cls(
                 module=actor_worker.actor_module_fsdp,
                 inference_engine=rollout_worker.rollout.inference_engine,
@@ -461,7 +462,7 @@ class InitializationMixin:
                 rollout_config=rollout_worker.config.rollout,
                 full_params="hf" in rollout_worker.config.rollout.load_format,
                 offload_param=getattr(actor_worker, "_is_offload_param", False),
-                multi_stage_wake_up=rollout_worker.config.rollout.multi_stage_wake_up
+                multi_stage_wake_up=rollout_worker.config.rollout.multi_stage_wake_up,
             )
         else:
             raise NotImplementedError(f"{self.config.actor_rollout_ref.rollout.name} not supported")
@@ -474,12 +475,10 @@ class InitializationMixin:
         self.init_model()
         self._load_checkpoint()
         # Ensure all models are initialized and checkpoints are loaded before starting.
-        dist.barrier(self._gather_group)    
-        
-        
+        dist.barrier(self._gather_group)
+
     def set_async_rollout_manager(self, async_rollout_manager):
         self._async_rollout_manager = async_rollout_manager
-        
+
     def get_zeromq_address(self):
         return self.zmq_address
-

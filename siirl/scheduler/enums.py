@@ -29,7 +29,6 @@ class AdvantageEstimator(str, Enum):
     OPO = "opo"
     GRPO_PASSK = "grpo_passk"
     CPGD = "cpgd"
-    DAPO = "dapo"
 
 
 class Role(Enum):
@@ -44,3 +43,20 @@ class Role(Enum):
     RefPolicy = 4
     RewardModel = 5
     ActorRolloutRef = 6
+
+
+class AlgorithmType(Enum):
+    """
+    Enum to represent different algorithm types.
+    """
+
+    PPO = "ppo"
+    GRPO = "grpo"
+    DAPO = "dapo"
+    REINFORCE_PLUS_PLUS = "reinforce_plus_plus"
+    REMAX = "remax"
+    RLOO = "rloo"
+    OPO = "opo"
+    GRPO_PASSK = "grpo_passk"
+    CPGD = "cpgd"
+    REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"

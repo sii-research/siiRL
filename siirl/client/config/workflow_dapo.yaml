@@ -65,21 +65,8 @@ nodes:
     dependencies:
       - "actor_old_log_prob"
 
-  - node_id: "critic_value"
-    node_type: "MODEL_TRAIN"
-    node_role: "CRITIC"
-    only_forward_compute: true
-    dependencies:
-      - "reference_log_prob"
-
-  - node_id: "critic_train"
-    node_type: "MODEL_TRAIN"
-    node_role: "CRITIC"
-    dependencies:
-      - "calculate_advantages"
-
   - node_id: "actor_train"
     node_type: "MODEL_TRAIN"
     node_role: "ACTOR"
     dependencies:
-      - "critic_train"
+      - "reference_log_prob"

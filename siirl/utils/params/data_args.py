@@ -14,7 +14,7 @@
 
 
 from dataclasses import asdict, dataclass, field
-from typing import Optional, Dict, Literal, Any, List
+from typing import Any, Dict, List, Literal, Optional
 
 from siirl.utils.params.model_args import ProcessorArguments
 
@@ -37,6 +37,7 @@ class DataArguments:
     max_prompt_length: int = field(default=512, metadata={"help": "Max token length for prompts"})
     max_response_length: int = field(default=512, metadata={"help": "Max token length for responses"})
     train_batch_size: int = field(default=1024, metadata={"help": "Training batch size"})
+    gen_batch_size: Optional[int] = field(default=None, metadata={"help": "Generation batch size for DAPO (typically 3x train_batch_size)"})
     val_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Validation batch handling"})
     return_raw_input_ids: bool = field(default=False, metadata={"help": "Return raw token IDs"})
     return_raw_chat: bool = field(default=False, metadata={"help": "Return unprocessed chat data"})

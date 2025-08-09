@@ -20,7 +20,7 @@ import ray
 from loguru import logger
 from omegaconf import DictConfig
 
-from siirl.scheduler.enums import AdvantageEstimator
+from siirl.scheduler.enums import AdvantageEstimator, AlgorithmType
 from siirl.scheduler.graph_updater import display_node_config, update_task_graph_node_configs
 from siirl.scheduler.launch import RayTrainer
 from siirl.scheduler.process_group_manager import ProcessGroupManager, log_process_group_manager_details
@@ -58,9 +58,9 @@ def determine_workflow_config(self, siirl_args: SiiRLArguments) -> str:
         AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE,
         AdvantageEstimator.CPGD,
     ]:
+        if siirl_args.algorithm.algorithm_name == AlgorithmType.DAPO.value:
+            return os.path.join(current_dir, "config/workflow_dapo.yaml")
         return os.path.join(current_dir, "config/workflow_grpo.yaml")
-    elif siirl_args.algorithm.adv_estimator == AdvantageEstimator.DAPO:
-        return os.path.join(current_dir, "config/workflow_dapo.yaml")
     else:
         raise NotImplementedError
 

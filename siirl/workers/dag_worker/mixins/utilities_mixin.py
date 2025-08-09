@@ -31,10 +31,14 @@ from loguru import logger
 from tensordict import TensorDict
 from zoneinfo import ZoneInfo
 
+from siirl.dataloader import DataLoaderNode
 from siirl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from siirl.utils.extras.device import get_device_id, get_device_name
 from siirl.utils.metrics.metric_utils import compute_throughout_metrics, compute_timing_metrics
-from siirl.workers.dag.node import NodeRole, NodeType
+from siirl.utils.params import SiiRLArguments
+from siirl.workers.base_worker import Worker
+from siirl.workers.dag import TaskGraph
+from siirl.workers.dag.node import Node, NodeRole, NodeType
 from siirl.workers.databuffer import DataProto
 
 
@@ -186,20 +190,6 @@ class DistributedMetricAggregator:
 
 class UtilitiesMixin:
     """A collection of utility methods for the DAGWorker, including I/O, logging, and metrics."""
-
-    # Type annotations for mixin attributes
-    from typing import TYPE_CHECKING, Dict, List, Optional
-
-    if TYPE_CHECKING:
-        import ray
-        import torch.distributed as dist
-
-        from siirl.dataloader import DataLoaderNode
-        from siirl.utils.params import SiiRLArguments
-        from siirl.workers.base_worker import Worker
-        from siirl.workers.dag import TaskGraph
-        from siirl.workers.dag.node import Node, NodeRole
-        from siirl.workers.databuffer import DataProto
 
     enable_perf: bool
     taskgraph: TaskGraph
