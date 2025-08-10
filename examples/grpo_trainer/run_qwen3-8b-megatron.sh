@@ -26,12 +26,12 @@ export BASE_CKPT_PATH=/workspace/infrawaves/ckpts
 export BASE_TENSORBOARD_PATH=/workspace/infrawaves/tensorboard
 
 # --- Key Training Hyperparameters ---
-export TRAIN_BATCH_SIZE_PER_NODE=512
-export PPO_MINI_BATCH_SIZE_PER_NODE=256
+export TRAIN_BATCH_SIZE_PER_NODE=128
+export PPO_MINI_BATCH_SIZE_PER_NODE=16
 export PPO_MICRO_BATCH_SIZE_PER_GPU=8
-export MAX_PROMPT_LENGTH=1024
-export MAX_RESPONSE_LENGTH=2048
-export ROLLOUT_GPU_MEMORY_UTILIZATION=0.5
+export MAX_PROMPT_LENGTH=512
+export MAX_RESPONSE_LENGTH=512
+export ROLLOUT_GPU_MEMORY_UTILIZATION=0.45
 export ROLLOUT_N=8
 export SAVE_FREQ=30
 export TEST_FREQ=10
@@ -114,7 +114,7 @@ TRAINING_CMD=(
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=\$ACTOR_REF_TP
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=\$ACTOR_REF_PP
-    actor_rollout_ref.ref.megatron.param_offload=True
+    actor_rollout_ref.ref.megatron.param_offload=False
     trainer.logger=['console']
     trainer.project_name=\$PROJECT_NAME
     trainer.experiment_name=\$EXPERIMENT_NAME
