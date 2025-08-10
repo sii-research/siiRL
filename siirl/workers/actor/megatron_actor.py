@@ -1,4 +1,5 @@
 # Copyright 2024 Bytedance Ltd. and/or its affiliates
+# Copyright 2025, Infrawaves. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -412,13 +413,6 @@ class MegatronPPOActor(BasePPOActor):
             if not forward_only:
                 old_log_prob = data["old_log_probs"]
                 advantages = data["advantages"]
-
-                # entropy_coeff = self.config.entropy_coeff
-                # loss_agg_mode = self.config.loss_agg_mode
-
-                # loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
-
-                # policy_loss_fn = get_policy_loss_fn(loss_mode)
                 clip_ratio = self.config.clip_ratio
                 clip_ratio_low = self.config.clip_ratio_low if self.config.clip_ratio_low is not None else clip_ratio
                 clip_ratio_high = self.config.clip_ratio_high if self.config.clip_ratio_high is not None else clip_ratio
@@ -497,6 +491,7 @@ class MegatronPPOActor(BasePPOActor):
 
             from siirl.models.mcore import get_mcore_forward_fn
 
+            # TODO(Ping Zhang): use fused kernels for memory-efficient computation in the near future
             if False:
                 forward_fn = get_mcore_forward_fused_fn(self.hf_config)
                 # return dict of [logits, entropy]

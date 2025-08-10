@@ -140,7 +140,7 @@ class ProcessorArguments:
 @dataclass
 class ModelArguments(ProcessorArguments):
     path: str = field(
-        default="/workspace/infrawaves/Qwen3-8B",
+        default="~/models/deepseek-llm-7b-chat",
         metadata={"help": "Model path or identifier"},
     )
     external_lib: Optional[str] = field(default=None, metadata={"help": "External model library"})
@@ -221,13 +221,9 @@ class CheckpointArguments:
 @dataclass
 class ActorArguments:
     strategy: str = field(default="fsdp", metadata={"help": "Parallel strategy"})
-    model: ModelArguments = field(default_factory=ModelArguments, metadata={"help": "Model settings"})
     ppo_mini_batch_size: int = field(default=256, metadata={"help": "PPO mini-batch size"})
     ppo_micro_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Micro-batch size"})
     ppo_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU micro-batch size"})
-    log_prob_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU log prob batch size"})
-    log_prob_use_dynamic_bsz: bool = field(default=False, metadata={"help": "Dynamic log prob batch size"})
-    log_prob_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU"})
     use_dynamic_bsz: bool = field(default=False, metadata={"help": "Dynamic batch sizing"})
     ppo_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU"})
     grad_clip: float = field(default=1.0, metadata={"help": "Gradient clipping"})
@@ -257,9 +253,7 @@ class ActorArguments:
     recompute_old_log_prob: bool = field(default=True, metadata={"help": "recompute old log prob"})
     use_cpgd_loss: bool = field(default=False, metadata={"help": "use cpgd loss"})
     policy_drift_coeff: float = field(default=0.0, metadata={"help": "policy drift coeff for CPGD"})
-    rollout_n: int = field(default=1, metadata={"help": "Number of rollout samples per prompt"})
     data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
-    profile: dict[str, Any] = field(default_factory=dict, metadata={"help": "Actor Profile settings"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -330,8 +324,6 @@ class EngineArguments:
 @dataclass
 class RolloutArguments:
     name: str = field(default="vllm", metadata={"help": "Rollout engine"})
-    model: ModelArguments = field(default_factory=ModelArguments, metadata={"help": "Model settings"})
-    megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
     temperature: float = field(default=1.0, metadata={"help": "Sampling temperature"})
     top_k: int = field(default=-1, metadata={"help": "Top-k sampling"})
     top_p: float = field(default=1.0, metadata={"help": "Top-p sampling"})
@@ -368,7 +360,6 @@ class RolloutArguments:
     calculate_log_probs: bool = field(default=False, metadata={"help": "support logging rollout prob for debugging purpose"})
     agent: AgentArguments = field(default_factory=AgentArguments)
     multi_stage_wake_up: bool = field(default=False, metadata={"help": "# Whether to wake up inference engine in multi-stage. (Wake up model weights first, then resume kv cache)"})
-    profile: dict[str, Any] = field(default_factory=dict, metadata={"help": "Rollout Profile settings"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -377,7 +368,6 @@ class RolloutArguments:
 @dataclass
 class RefArguments:
     strategy: str = field(default="fsdp", metadata={"help": "Parallel strategy"})
-    model: ModelArguments = field(default_factory=ModelArguments, metadata={"help": "Model settings"})
     fsdp_config: FSDPArguments = field(default_factory=FSDPArguments, metadata={"help": "Reference FSDP settings"})
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
     log_prob_micro_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Log prob batch size"})
@@ -394,10 +384,6 @@ class RefArguments:
     grad_offload: bool = field(default=False, metadata={"help": "Enable grad offload or not"})
     optimizer_offload: bool = field(default=False, metadata={"help": "Enable optimizer offload or not"})
     load_weight: bool = field(default=True)
-    profile: dict[str, Any] = field(default_factory=dict, metadata={"help": "Reference Profile settings"})
-    shuffle: bool = field(default=False, metadata={"help": "Data shuffling"})
-    data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
-    recompute_old_log_prob: bool = field(default=True, metadata={"help": "recompute old log prob"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -423,7 +409,7 @@ class CriticArguments:
         metadata={"help": "Optimizer settings"},
     )
     model: ModelArguments = field(
-        default_factory=lambda: ModelArguments(path="/workspace/infrawaves/Qwen3-8B", enable_gradient_checkpointing=True),
+        default_factory=lambda: ModelArguments(path="~/models/deepseek-llm-7b-chat", enable_gradient_checkpointing=True),
         metadata={"help": "Critic model"},
     )
     fsdp_config: FSDPArguments = field(default_factory=FSDPArguments, metadata={"help": "FSDP settings"})
@@ -445,8 +431,6 @@ class CriticArguments:
     checkpoint: CheckpointArguments = field(default_factory=CheckpointArguments, metadata={"help": "Checkpoint configuration"})
     ppo_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU"})
     loss_agg_mode: str = field(default="token-mean", metadata={"help": "token-mean, seq-mean-token-sum, seq-mean-token-mean"})
-    profile: dict[str, Any] = field(default_factory=dict, metadata={"help": "Critic Profile settings"})
-    data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -457,7 +441,7 @@ class RewardModelArguments:
     enable: bool = field(default=False, metadata={"help": "Enable reward model"})
     strategy: str = field(default="fsdp", metadata={"help": "Parallel strategy"})
     model: ModelArguments = field(
-        default_factory=lambda: ModelArguments(path="/workspace/infrawaves/Qwen3-8B", enable_gradient_checkpointing=True),
+        default_factory=lambda: ModelArguments(path="~/models/deepseek-llm-7b-chat", enable_gradient_checkpointing=True),
         metadata={"help": "Critic model"},
     )
     fsdp_config: FSDPArguments = field(
@@ -478,9 +462,6 @@ class RewardModelArguments:
     launch_reward_fn_async: bool = field(default=False, metadata={"help": "custom reward function executed async on CPU, during log_prob"})
     reward_kwargs: Dict[str, Any] = field(default_factory=lambda: {})
     sandbox_fusion: Optional[Dict[str, Any]] = field(default=None)
-    profile: dict[str, Any] = field(default_factory=dict, metadata={"help": "Reward Model Profile settings"})
-    shuffle: bool = field(default=False, metadata={"help": "Data shuffling"})
-    data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

@@ -369,9 +369,14 @@ class InitializationMixin:
         if found_node is None:
             raise RuntimeError(f"Could not find a node with role {role.name} for agent_group {agent_group}")
         return found_node
-
-    def _get_node_dp_info(self, node: Node) -> tuple[int, int, int, int]:
-        """Calculates Data Parallel (DP) and Tensor Parallel (TP) info for a node."""
+    
+    def _get_node_dp_info(self, node: Node) -> tuple[int, int, int, int, int, int]:
+        """
+        Calculates Data Parallel (DP), Tensor Parallel (TP), and Pipeline Parallel (PP) info for a node.
+        
+        Returns:
+            tuple: (dp_size, dp_rank, tp_rank, tp_size, pp_rank, pp_size)
+        """
         reference_node = node
         if node.node_type == NodeType.COMPUTE:
             # If the node is a COMPUTE type, find its true data source ancestor.
@@ -390,20 +395,81 @@ class InitializationMixin:
             group_world_size = dist.get_world_size(process_group)
             group_rank = dist.get_rank(process_group)
 
+        # Get parallelism configuration based on backend strategy
+        tp_size, pp_size = self._get_parallelism_config(reference_node)
+        
+        # Calculate total parallel size (TP * PP)
+        total_parallel_size = tp_size * pp_size
+        
+        if group_world_size % total_parallel_size != 0:
+            raise ValueError(f"Configuration error for node {node.node_id}: Group world size ({group_world_size}) is not divisible by total parallel size (TP={tp_size} * PP={pp_size} = {total_parallel_size}). Check your parallel configuration.")
+        
+        dp_size = group_world_size // total_parallel_size
+        
+        # Calculate ranks within the data parallel group
+        dp_rank = group_rank // total_parallel_size
+        
+        # Calculate position within the TP-PP grid
+        local_rank_in_tp_pp_group = group_rank % total_parallel_size
+        
+        # For 2D parallelism: ranks are arranged as [PP0_TP0, PP0_TP1, ..., PP0_TP(tp_size-1), PP1_TP0, ...]
+        pp_rank = local_rank_in_tp_pp_group // tp_size
+        tp_rank = local_rank_in_tp_pp_group % tp_size
+        
+        return dp_size, dp_rank, tp_rank, tp_size, pp_rank, pp_size
+    
+    def _get_parallelism_config(self, reference_node: Node) -> tuple[int, int]:
+        """
+        Extract tensor parallel and pipeline parallel sizes based on backend strategy.
+        Currently, only FSDP and Megatron backends are supported, in which Megatron supports PP.
+        
+        Args:
+            reference_node: The node to extract parallelism config from
+            
+        Returns:
+            tuple: (tp_size, pp_size)
+        """
         tp_size = 1
+        pp_size = 1
+        
         if intern_config := reference_node.config.get(DAGConstants.INTERN_CONFIG):
             if reference_node.node_type == NodeType.MODEL_INFERENCE:
-                tp_size = intern_config.rollout.tensor_model_parallel_size
-            # TODO: Add support for Megatron strategy, reading from its specific model config.
-            elif reference_node.node_type == NodeType.MODEL_TRAIN:
-                tp_size = intern_config.actor.megatron.tensor_model_parallel_size
+                # For rollout nodes, only TP is supported currently.
+                # Pipeline parallelism is not typically used for inference
 
-        if group_world_size % tp_size != 0:
-            raise ValueError(f"Configuration error for node {node.node_id}: Group world size ({group_world_size}) is not divisible by tensor parallel size ({tp_size}). Check your parallel configuration.")
-        dp_size = group_world_size // tp_size
-        dp_rank = group_rank // tp_size
-        tp_rank = group_rank % tp_size
-        return dp_size, dp_rank, tp_rank, tp_size
+                # TODO(Ping Zhang): support PP for rollout nodes, which will be used for very large models
+                # that need multi-server inference.
+                tp_size = intern_config.rollout.tensor_model_parallel_size
+                pp_size = 1
+
+            elif reference_node.node_type == NodeType.MODEL_TRAIN:
+                # Extract strategy based on the specific config type
+                strategy = 'fsdp'  # default
+                
+                if hasattr(intern_config, 'actor') and hasattr(intern_config.actor, 'strategy'):
+                    # For ActorRolloutRefArguments, strategy is in actor
+                    strategy = intern_config.actor.strategy
+                elif hasattr(intern_config, 'strategy'):
+                    # For CriticArguments, RefArguments, RewardModelArguments, strategy is direct attribute
+                    strategy = intern_config.strategy
+                
+                if strategy in DAGConstants.MEGATRON_STRATEGYS:
+                    # Megatron backend supports both TP and PP
+                    if hasattr(intern_config, 'actor') and hasattr(intern_config.actor, 'megatron'):
+                        # ActorRolloutRefArguments case
+                        tp_size = intern_config.actor.megatron.tensor_model_parallel_size
+                        pp_size = intern_config.actor.megatron.pipeline_model_parallel_size
+                    elif hasattr(intern_config, 'megatron'):
+                        # CriticArguments, RefArguments, RewardModelArguments cases
+                        tp_size = intern_config.megatron.tensor_model_parallel_size
+                        pp_size = intern_config.megatron.pipeline_model_parallel_size
+                else:
+                    # FSDP's ZeRO-like parallelism is essentially DP; therefore,
+                    # For MODEL_TRAIN type, we should keep TP=PP=1.
+                    tp_size = 1
+                    pp_size = 1
+
+        return tp_size, pp_size
 
     def log_ray_actor_info(self):
         """Logs detailed information about the Ray actor's context for debugging."""

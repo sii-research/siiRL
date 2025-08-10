@@ -943,7 +943,7 @@ class ActorWorker(MegatronWorker):
 
         global_initialize_model_parallel(self.config)
 
-        self.config.actor.ppo_mini_batch_size *= self.config.actor.rollout_n
+        self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
         self.config.actor.ppo_mini_batch_size //= mpu.get_data_parallel_world_size()
         if self.config.actor.ppo_micro_batch_size:
             self.config.actor.ppo_micro_batch_size //= mpu.get_data_parallel_world_size()
@@ -958,7 +958,7 @@ class ActorWorker(MegatronWorker):
         from siirl.utils.megatron.megatron_utils import get_model, init_megatron_optim_config
         from siirl.utils.model_utils.model import print_model_size
 
-        self._init_hf_config_and_tf_config(model_path, model_path, self.dtype, override_model_config, override_transformer_config, self.config.actor.model.trust_remote_code)
+        self._init_hf_config_and_tf_config(model_path, model_path, self.dtype, override_model_config, override_transformer_config, self.config.actor.trust_remote_code)
 
         def megatron_actor_model_provider(pre_process, post_process):
             return megatron_model_provider(self.tf_config, self.hf_config, pre_process, post_process, self.share_embeddings_and_output_weights, False, override_model_config.get("moe_config", {}).get("freeze_moe_router", False))
@@ -1004,7 +1004,7 @@ class ActorWorker(MegatronWorker):
         # we need the model for actor
         optim_config = self.config.actor.optim
         self.actor_module, self.actor_optimizer, self.actor_model_config, self.actor_optim_config = self._build_actor_model_optimizer(
-            model_path=self.config.actor.model.path,
+            model_path=self.config.model.path,
             optim_config=optim_config,
             override_model_config=override_model_config,
             override_transformer_config=override_transformer_config,
@@ -1222,7 +1222,7 @@ class RolloutWorker(MegatronWorker):
         model_path = self.config.model.path
         model_override_config = self.config.model.override_config
         model_override_transformer_config = self.config.actor.megatron.override_transformer_config
-        model_trust_remote_code = self.config.actor.model.trust_remote_code
+        model_trust_remote_code = self.config.model.trust_remote_code
         
         self._init_hf_config_and_tf_config(model_path, model_path, self.dtype, model_override_config, model_override_transformer_config, model_trust_remote_code)
         self.generation_config = get_generation_config(self.local_path)

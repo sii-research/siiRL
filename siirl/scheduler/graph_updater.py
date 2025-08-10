@@ -20,7 +20,7 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 
 from siirl.workers.dag import NodeRole, NodeType, TaskGraph
-from siirl.utils.params import ActorRolloutRefArguments, ActorArguments, RolloutArguments, RefArguments, CriticArguments, RewardModelArguments, SiiRLArguments
+from siirl.utils.params import ActorRolloutRefArguments, CriticArguments, RewardModelArguments, SiiRLArguments
 
 from typing import TYPE_CHECKING
 

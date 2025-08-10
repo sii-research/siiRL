@@ -1,4 +1,5 @@
 # Copyright 2025, Shanghai Innovation Institute. All rights reserved.
+# Copyright 2025, Infrawaves. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -234,8 +235,8 @@ class ExecutionMixin:
                             continue
                         visited_nodes.add(cur_node.node_id)
 
-                        cur_dp_size, cur_dp_rank, cur_tp_rank, cur_tp_size = self._get_node_dp_info(cur_node)
-                        logger.debug(f"current node({cur_node.node_id}) dp_size: {cur_dp_size}, dp_rank: {cur_dp_rank}, tp_rank: {cur_tp_rank}")
+                        cur_dp_size, cur_dp_rank, cur_tp_rank, cur_tp_size, cur_pp_rank, cur_pp_size = self._get_node_dp_info(cur_node)
+                        logger.debug(f"current node({cur_node.node_id}) dp_size: {cur_dp_size}, dp_rank: {cur_dp_rank}, tp_rank: {cur_tp_rank}, pp_rank: {cur_pp_rank}, pp_size: {cur_pp_size}")
                     from siirl.workers.dag.node import NodeRole
                     # --- 3. Get Input Data ---
                     if cur_node.node_id != entry_node_id:
@@ -296,7 +297,7 @@ class ExecutionMixin:
                         if next_nodes := self.taskgraph.get_downstream_nodes(cur_node.node_id):
                             # Currently supports single downstream node, can be extended to a loop.
                             next_node = next_nodes[0]
-                            next_dp_size, _, _, _ = self._get_node_dp_info(next_node)
+                            next_dp_size, _, _, _, _, _ = self._get_node_dp_info(next_node)
                             node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node)
                             if cur_node.node_role == NodeRole.ROLLOUT and cur_node.user_options.get("post_chat_template", None):
                                 agent_key = self._generate_agent_group_key(cur_node)

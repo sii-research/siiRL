@@ -1,4 +1,5 @@
 # Copyright 2025, Shanghai Innovation Institute. All rights reserved.
+# Copyright 2025, Infrawaves. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -283,13 +284,13 @@ class UtilitiesMixin:
                 saved_worker_keys.add(node_worker_key)
 
         # In each DP group, only TP rank 0 saves the DataLoader state to avoid redundancy.
-        _, dp_rank, tp_rank, _ = self._get_node_dp_info(self.first_rollout_node)
-        if tp_rank == 0:
+        _, dp_rank, tp_rank, _, pp_rank, _ = self._get_node_dp_info(self.first_rollout_node)
+        if tp_rank == 0 and pp_rank == 0:
             # The filename is based on the DP rank to distinguish different data partitions.
             dataloader_path = os.path.join(step_dir, f"data_dp_rank_{dp_rank}.pt")
             dataloader_state = self.dataloader.state_dict()
             torch.save(dataloader_state, dataloader_path)
-            logger.debug(f"Rank {self._rank} (DP_Rank {dp_rank}, TP_Rank {tp_rank}): Saved dataloader state.")
+            logger.debug(f"Rank {self._rank} (DP_Rank {dp_rank}, TP_Rank {tp_rank}, PP_Rank {pp_rank}): Saved dataloader state.")
 
         # --- 2. All ranks wait for I/O to complete ---
         # This barrier ensures all data is written BEFORE committing the checkpoint via the tracker file.
@@ -384,7 +385,7 @@ class UtilitiesMixin:
                     logger.warning(f"Rank {self._rank}: Checkpoint for agent {node.agent_group}'s {node.node_role.name} not found at {checkpoint_path}. Weights will be from initialization.")
 
         # Load dataloader state. All ranks in a DP group load from the same file.
-        _, dp_rank, _, _ = self._get_node_dp_info(self.first_rollout_node)
+        _, dp_rank, _, _, _, _ = self._get_node_dp_info(self.first_rollout_node)
         dataloader_path = os.path.join(global_step_folder, f"data_dp_rank_{dp_rank}.pt")
         if os.path.exists(dataloader_path):
             dataloader_state = torch.load(dataloader_path, map_location="cpu")
@@ -535,8 +536,8 @@ class UtilitiesMixin:
                 metrics_to_aggregate[f"{prefix}/mean"] = local_data[key]
 
         representative_actor_node = next((n for n in self.taskgraph.nodes.values() if n.node_role == NodeRole.ACTOR), self.first_rollout_node)
-        _, _, tp_rank_in_group, _ = self._get_node_dp_info(representative_actor_node)
-        local_token_sum = sum(batch.meta_info.get("global_token_num", [0])) if tp_rank_in_group == 0 else 0
+        _, _, tp_rank_in_group, _, pp_rank_in_group, _ = self._get_node_dp_info(representative_actor_node)
+        local_token_sum = sum(batch.meta_info.get("global_token_num", [0])) if tp_rank_in_group == 0 and pp_rank_in_group == 0 else 0
         metrics_to_aggregate["perf/total_num_tokens/mean"] = float(local_token_sum) # Use mean to get a sum
 
         # --- 3. Perform the aggregated, distributed reduction ---
@@ -600,6 +601,7 @@ class UtilitiesMixin:
         # or just ignore them. This is cleaner than returning an empty dict.
         return final_metrics
 
+    # TODO(Ping Zhang): revisit this for Megatron PP
     def put_data_to_buffers(self, key: str, data: DataProto, source_dp_size: int, dest_dp_size: int, timing_raw: Dict[str, float]):
         """Puts data into shared Ray plasma store for consumption by downstream nodes."""
         try:
@@ -638,6 +640,7 @@ class UtilitiesMixin:
             logger.error(f"Rank {self._rank}: Unexpected error in put_data_to_buffers for key '{key}': {e}")
             raise  # Re-raise the exception to maintain the original behavior
 
+    # TODO(Ping Zhang): revisit this for Megatron PP
     def get_data_from_buffers(self, key: str, my_current_dp_rank: int, my_current_dp_size: int, timing_raw: Dict[str, float]) -> Optional[DataProto]:
         """Gets data from shared buffers that was produced by an upstream node."""
         try:
