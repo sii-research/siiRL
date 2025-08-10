@@ -126,6 +126,3 @@ outputs
 
 *tensorboard
 tensorboard/
-
-transformer_engine*
-megatron*
