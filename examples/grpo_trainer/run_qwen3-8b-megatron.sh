@@ -3,9 +3,9 @@
 # ===                       USER CONFIGURATION SECTION                            ===
 # ===================================================================================
 
-# --- For config debugging
-export HYDRA_FULL_ERROR=1
-export SIIRL_LOG_VERBOSITY=DEBUG
+# --- For debugging
+export HYDRA_FULL_ERROR=0
+export SIIRL_LOG_VERBOSITY=INFO
 
 # --- Experiment and Model Definition ---
 export DATASET=gsm8k
@@ -13,17 +13,13 @@ export ALG=grpo
 export MODEL_NAME=qwen3-8b
 
 # --- Path Definitions ---
-# export TRAIN_DATA_PATH=$HOME/data/datasets/$DATASET/train.parquet
-# export TEST_DATA_PATH=$HOME/data/datasets/$DATASET/test.parquet
-# export MODEL_PATH=$HOME/data/models/Qwen3-8B
-
-export TRAIN_DATA_PATH=$HOME/data/$DATASET/train.parquet
-export TEST_DATA_PATH=$HOME/data/$DATASET/test.parquet
-export MODEL_PATH=/workspace/infrawaves/Qwen3-8B
+export TRAIN_DATA_PATH=$HOME/data/datasets/$DATASET/train.parquet
+export TEST_DATA_PATH=$HOME/data/datasets/$DATASET/test.parquet
+export MODEL_PATH=$HOME/data/models/Qwen3-8B
 
 # Base output paths
-export BASE_CKPT_PATH=/workspace/infrawaves/ckpts
-export BASE_TENSORBOARD_PATH=/workspace/infrawaves/tensorboard
+export BASE_CKPT_PATH=$HOME/ckpts
+export BASE_TENSORBOARD_PATH=$HOME/tensorboard
 
 # --- Key Training Hyperparameters ---
 export TRAIN_BATCH_SIZE_PER_NODE=128
@@ -51,12 +47,10 @@ export ACTOR_REF_SP=False
 # export GLOO_SOCKET_IFNAME=bond0  # Modify as needed
 
 # --- Distributed Training & Infrastructure ---
-export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-4}
+export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-8}
 export NNODES=${PET_NNODES:-1}
-export CUDA_VISIBLE_DEVICES=0,1,2,3
 export NODE_RANK=${PET_NODE_RANK:-0}
-# export MASTER_ADDR=${MASTER_ADDR:-localhost}
-export MASTER_ADDR=${MASTER_ADDR:-10.1.3.201}
+export MASTER_ADDR=${MASTER_ADDR:-localhost}
 
 # --- Output Paths and Experiment Naming ---
 export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_hybrid_${NNODES}nodes
