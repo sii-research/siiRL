@@ -564,6 +564,7 @@ class InitializationMixin:
                     "transformer_config": actor_worker.tf_config,
                     "layer_name_mapping": layer_name_mapping,
                     "weight_converter": get_mcore_weight_converter(actor_worker.actor_model_config, actor_worker.dtype),
+                    "offload_param": actor_worker._is_offload_param,
                 },
             ),
             # TODO(Ping Zhang): update for SGLang later
@@ -589,7 +590,7 @@ class InitializationMixin:
         sharding_manager_cls_str, kwargs_builder = sharding_manager_map[(strategy, rollout_name)]
         sharding_manager_cls = import_string(sharding_manager_cls_str)
         sharding_manager = sharding_manager_cls(**kwargs_builder())
-        rollout_worker.set_sharding_manager(sharding_manager)
+        rollout_worker.set_rollout_sharding_manager(sharding_manager)
         logger.debug(f"Set up {sharding_manager_cls.__name__}  for agent group {agent_group}.")
 
     def init_graph(self):

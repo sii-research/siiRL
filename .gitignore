@@ -126,3 +126,5 @@ outputs
 
 *tensorboard
 tensorboard/
+
+*.csv

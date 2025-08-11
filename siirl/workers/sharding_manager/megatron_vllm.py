@@ -275,6 +275,7 @@ class MultiAgentMegatronVLLMShardingManager(BaseShardingManager):
         layer_name_mapping,
         weight_converter: McoreToHFWeightConverterBase,
         module: AllGatherPPModel = None,
+        offload_param: bool = False,
     ):
         from megatron.core import parallel_state as mpu
 
@@ -303,7 +304,7 @@ class MultiAgentMegatronVLLMShardingManager(BaseShardingManager):
         self.train_etp_group = mpu.get_expert_tensor_parallel_group()
         self.need_tp_reshard = self.train_tp_size != self.infer_tp_size
         self.train_tp_larger = self.train_tp_size > self.infer_tp_size
-        self.offload_param = True
+        self.offload_param = offload_param
 
     @GPUMemoryLogger(role="megatron vllm sharding_manager", logger=logger)
     def __enter__(self):

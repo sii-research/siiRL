@@ -958,7 +958,7 @@ class ActorWorker(MegatronWorker):
         from siirl.utils.megatron.megatron_utils import get_model, init_megatron_optim_config
         from siirl.utils.model_utils.model import print_model_size
 
-        self._init_hf_config_and_tf_config(model_path, model_path, self.dtype, override_model_config, override_transformer_config, self.config.actor.trust_remote_code)
+        self._init_hf_config_and_tf_config(model_path, model_path, self.dtype, override_model_config, override_transformer_config, self.config.model.trust_remote_code)
 
         def megatron_actor_model_provider(pre_process, post_process):
             return megatron_model_provider(self.tf_config, self.hf_config, pre_process, post_process, self.share_embeddings_and_output_weights, False, override_model_config.get("moe_config", {}).get("freeze_moe_router", False))
@@ -1119,10 +1119,10 @@ class ActorWorker(MegatronWorker):
         get_torch_device().empty_cache()
         return data
 
-    def load_checkpoint(self, checkpoint_path, hdfs_path=None, del_local_after_load=True):
+    def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=True):
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module)
-        self.checkpoint_mananager.load_checkpoint(local_path=checkpoint_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load)
+        self.checkpoint_mananager.load_checkpoint(local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load)
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_module)
         if self._is_offload_optimizer:
@@ -1131,10 +1131,10 @@ class ActorWorker(MegatronWorker):
     def load_pretrained_model(self, checkpoint_path, del_local_after_load=True):
         pass
 
-    def save_checkpoint(self, checkpoint_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
+    def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module)
-        self.checkpoint_mananager.save_checkpoint(local_path=checkpoint_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep)
+        self.checkpoint_mananager.save_checkpoint(local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep)
         torch.distributed.barrier()
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_module)
@@ -1256,7 +1256,7 @@ class RolloutWorker(MegatronWorker):
         get_torch_device().empty_cache()
         return output
     
-    def set_sharding_manager(self, sharding_manager):
+    def set_rollout_sharding_manager(self, sharding_manager):
         self.sharding_manager = sharding_manager
 
 
@@ -1410,6 +1410,6 @@ class AsyncRolloutWorker(RolloutWorker):
         # return something to block the caller
         return True
 
-    def set_sharding_manager(self, sharding_manager):
-        super().set_sharding_manager(sharding_manager)
+    def set_rollout_sharding_manager(self, sharding_manager):
+        super().set_rollout_sharding_manager(sharding_manager)
         self.rollout.sharding_manager = sharding_manager
