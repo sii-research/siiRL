@@ -536,8 +536,10 @@ class UtilitiesMixin:
                 metrics_to_aggregate[f"{prefix}/mean"] = local_data[key]
 
         representative_actor_node = next((n for n in self.taskgraph.nodes.values() if n.node_role == NodeRole.ACTOR), self.first_rollout_node)
-        _, _, tp_rank_in_group, _, pp_rank_in_group, _ = self._get_node_dp_info(representative_actor_node)
-        local_token_sum = sum(batch.meta_info.get("global_token_num", [0])) if tp_rank_in_group == 0 and pp_rank_in_group == 0 else 0
+        _, _, _, _, pp_rank_in_group, _ = self._get_node_dp_info(representative_actor_node)
+        # NOTE: We have already taken TP into account when we set global_token_num in compute_reward.
+        # see: siirl/workers/dag_worker/mixins/node_executors_mixin.py:compute_reward
+        local_token_sum = sum(batch.meta_info.get("global_token_num", [0])) if pp_rank_in_group == 0 else 0
         metrics_to_aggregate["perf/total_num_tokens/mean"] = float(local_token_sum) # Use mean to get a sum
 
         # --- 3. Perform the aggregated, distributed reduction ---
