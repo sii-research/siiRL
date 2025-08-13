@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from siirl.workers.base_worker.base.worker import DistGlobalInfo, DistRankInfo, Worker
+from siirl.utils.params import ActorRolloutRefArguments
 
 
 class MegatronWorker(Worker):
@@ -89,7 +90,13 @@ class MegatronWorker(Worker):
                 tf_config.recompute_method = gradient_checkpointing_cfg.get("activations_checkpoint_method", "uniform")
                 tf_config.recompute_granularity = gradient_checkpointing_cfg.get("activations_checkpoint_granularity", None)
                 tf_config.recompute_num_layers = gradient_checkpointing_cfg.get("activations_checkpoint_num_layers", 1)
-            if megatron_config := self.config.actor.megatron:
+            
+            if isinstance(self.config, ActorRolloutRefArguments):
+                megatron_config = self.config.actor.megatron
+            else:
+                megatron_config = self.config.megatron
+
+            if megatron_config:
                 if extra := megatron_config.extra:
                     for k, v in extra.items():
                         setattr(tf_config, k, v)

@@ -607,14 +607,10 @@ class CriticWorker(MegatronWorker):
         from siirl.utils.megatron.megatron_utils import get_model, init_megatron_optim_config
         from siirl.utils.model_utils.model import print_model_size
 
-        self._init_hf_config_and_tf_config(model_path, self.config.model.tokenizer_path, self.dtype, override_model_config, override_transformer_config, self.config.model.trust_remote_code)
+        self._init_hf_config_and_tf_config(model_path, model_path, self.dtype, override_model_config, override_transformer_config, self.config.model.trust_remote_code)
 
         def megatron_critic_model_provider(pre_process, post_process):
-            from siirl.models.mcore import init_mcore_model
-
-            parallel_model = init_mcore_model(self.tf_config, self.hf_config, pre_process, post_process, share_embeddings_and_output_weights=False, value=True, freeze_moe_router=override_model_config.moe_config.freeze_moe_router)
-            parallel_model.to(get_device_name())
-            return parallel_model
+            return megatron_model_provider(self.tf_config, self.hf_config, pre_process, post_process, False, True, override_model_config.get("moe_config", {}).get("freeze_moe_router", False))
 
         # Step 3: initialize the megatron model
         critic_module = get_model(
@@ -649,7 +645,7 @@ class CriticWorker(MegatronWorker):
         # create critic
         import_external_libs(self.config.model.external_lib)
         override_model_config = self.config.model.override_config
-        override_transformer_config = self.config.model.override_transformer_config
+        override_transformer_config = self.config.megatron.override_transformer_config
 
         if not override_transformer_config:
             override_transformer_config = OmegaConf.create()
@@ -701,11 +697,11 @@ class CriticWorker(MegatronWorker):
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.critic_module)
         values = self.critic.compute_values(data=data)
-        output = DataProto.from_dict(tensors={"values": values})
-        output = output.to("cpu")
+        data.batch["values"] = values
+        data = data.to("cpu")
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.critic_module)
-        return output
+        return data
 
     def update_critic(self, data: DataProto):
         data = data.to(get_device_id())
@@ -721,29 +717,31 @@ class CriticWorker(MegatronWorker):
         delta_time = timer.last
         global_num_tokens = data.meta_info["global_token_num"]
         estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
-        metrics["perf/mfu/critic"] = estimated_flops * self.config.ppo_epochs / promised_flops / self.world_size
-        output = DataProto(batch=None, meta_info={"metrics": metrics})
+        metrics["perf/mfu/critic"] = estimated_flops * self.config.ppo_epochs / promised_flops
+        metrics["perf/delta_time/critic"] = delta_time
+        data.meta_info["metrics"] = metrics
+        data = data.to("cpu")
 
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.critic_module)
         if self._is_offload_optimizer:
             offload_megatron_optimizer(self.critic_optimizer)
-        output = output.to("cpu")
-        return output
+        
+        return data
 
-    def load_checkpoint(self, checkpoint_path, hdfs_path=None, del_local_after_load=True):
+    def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=True):
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.critic_module)
-        self.checkpoint_mananager.load_checkpoint(local_path=checkpoint_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load)
+        self.checkpoint_mananager.load_checkpoint(local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load)
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.critic_module)
         if self._is_offload_optimizer:
             offload_megatron_optimizer(self.critic_optimizer)
 
-    def save_checkpoint(self, checkpoint_path, hdfs_path=None, global_steps=0, max_ckpt_to_keep=None):
+    def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.critic_module)
-        self.checkpoint_mananager.save_checkpoint(local_path=checkpoint_path, hdfs_path=hdfs_path, global_step=global_steps, max_ckpt_to_keep=max_ckpt_to_keep)
+        self.checkpoint_mananager.save_checkpoint(local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep)
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.critic_module)
 
