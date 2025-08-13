@@ -13,6 +13,7 @@
 [build-system]
 requires = [
     "setuptools>=61.0",
+    "setuptools_scm[toml]>=6.2",
     "wheel"
 ]
 build-backend = "setuptools.build_meta"
@@ -146,6 +147,9 @@ ignore = [ "F405", "F403", "E731", "B007", "UP032", "UP007", "G004" ]
 include-package-data = true
 # Modern equivalent of find_packages()
 packages = { find = {} }
+
+[tool.setuptools_scm]
+write_to = "siirl/version/version"
 
 [tool.setuptools.dynamic]
 version = {file = "siirl/version/version"}
