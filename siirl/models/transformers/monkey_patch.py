@@ -160,16 +160,18 @@ def apply_monkey_patch(
     )
     # TODO: VLM models only, unify monkey patch to LLM models.
     if model.config.model_type == "qwen2_5_vl":
-        from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
-            Qwen2_5_VLFlashAttention2,
-            Qwen2_5_VLForConditionalGeneration,
-        )
+        if is_transformers_version_in_range(min_version="4.53.0"):
+            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLAttention
+        else:
+            from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+                Qwen2_5_VLFlashAttention2 as Qwen2_5_VLAttention,
+            )
 
         if use_remove_padding or ulysses_sp_size > 1:
             from siirl.models.transformers.qwen2_vl import ulysses_flash_attn_forward
 
-            Qwen2_5_VLFlashAttention2.forward = ulysses_flash_attn_forward
-            print("Monkey patch FlashAttention2.forward in Qwen2.5VL")
+            Qwen2_5_VLAttention.forward = ulysses_flash_attn_forward
+            logger.info("Monkey patch FlashAttention2.forward in Qwen2.5VL")
 
         if ulysses_sp_size > 1:
             if is_transformers_version_in_range(min_version="4.52.0"):
@@ -181,23 +183,19 @@ def apply_monkey_patch(
 
                 patch_vlm_for_ulysses_input_slicing(Qwen2_5_VLModel)
 
-        if use_fused_kernels:
-            from siirl.models.transformers.qwen2_5_vl import forward_for_ppo
-
-            Qwen2_5_VLForConditionalGeneration.forward = forward_for_ppo
-
-        return
-
     elif model.config.model_type == "qwen2_vl":
-        from transformers.models.qwen2_vl.modeling_qwen2_vl import (
-            Qwen2VLFlashAttention2,
-            Qwen2VLForConditionalGeneration,
-        )
+        if is_transformers_version_in_range(min_version="4.53.0"):
+            from transformers.models.qwen2_vl.modeling_qwen2_vl import Qwen2VLAttention
+        else:
+            from transformers.models.qwen2_vl.modeling_qwen2_vl import (
+                Qwen2VLFlashAttention2 as Qwen2VLAttention,
+                Qwen2VLForConditionalGeneration,
+            )
 
         if use_remove_padding or ulysses_sp_size > 1:
             from siirl.models.transformers.qwen2_vl import ulysses_flash_attn_forward
 
-            Qwen2VLFlashAttention2.forward = ulysses_flash_attn_forward
+            Qwen2VLAttention.forward = ulysses_flash_attn_forward
             logger.info("Monkey patch FlashAttention2.forward in Qwen2VL")
 
         if ulysses_sp_size > 1:
@@ -220,14 +218,17 @@ def apply_monkey_patch(
     elif model.config.model_type == "kimi_vl":
         if use_remove_padding or ulysses_sp_size > 1:
             # TODO: Changes need to be made when transformers are adapted.
-            from siirl.models.transformers.kimi_vl import _merge_with_image_features, _ulysses_flash_attn_forward
+            from siirl.models.transformers.kimi_vl import _ulysses_flash_attn_forward
 
-            module.KimiVLForConditionalGeneration._merge_with_image_features = _merge_with_image_features
             module.DeepseekV3FlashAttention2.forward = _ulysses_flash_attn_forward
-            print("Monkey patch FlashAttention2.forward in KimiVL")
+            logger.info("Monkey patch FlashAttention2.forward in KimiVL")
+
+        if ulysses_sp_size > 1:
+            patch_vlm_for_ulysses_input_slicing(module.DeepseekV3ForCausalLM)
 
         if use_fused_kernels:
-            print("Not support fused kernels for KimiVL")
+            logger.warning("Not support fused kernels for KimiVL")
+
         return
 
     # transformers<=4.47.1
@@ -242,10 +243,6 @@ def apply_monkey_patch(
             flash_attention._flash_attention_forward = _ulysses_flash_attention_forward
             logger.info(f"Monkey patch _flash_attention_forward in {flash_attention.__name__}")
 
-    if use_fused_kernels:
-        from siirl.models.transformers.llama import forward_for_ppo
-
-        model.__class__.forward = forward_for_ppo
 
 
 @lru_cache

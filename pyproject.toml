@@ -84,9 +84,9 @@ dependencies = [
     "qwen_vl_utils",
     "scipy",
     "fastapi",
-    "transformers<=4.51.3",
+    "transformers",
     "math-verify",
-    "vllm==0.8.5.post1",
+    "vllm>=0.8.5.post1",
 ]
 
 
@@ -114,9 +114,9 @@ geo = ["mathruler"]
 gpu = ["liger-kernel", "flash-attn"]
 sglang = [
     "tensordict>=0.8.0,<=0.9.1,!=0.9.0",
-    "sglang[all]==0.4.6.post5",
+    "sglang[all]>=0.4.6.post5",
     "torch-memory-saver>=0.0.5",
-    "torch==2.6.0",
+    "torch>=2.6.0",
 ]
 
 
