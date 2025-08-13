@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM nvcr.io/nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+FROM nvcr.io/nvidia/cuda:12.6.3-cudnn-devel-ubuntu22.04
 
 LABEL maintainer="SII AI Infra Team"
 
 # base environment
 RUN apt update \
-    && apt install -y rdma-core ibverbs-providers ibverbs-utils   \
+    && apt install -y rdma-core ibverbs-providers ibverbs-utils libnuma-dev  \
     && apt install -y python3 python3-pip \
     && ln -sf /usr/bin/python3 /usr/bin/python  \
     && python -m pip install -U pip \
@@ -28,13 +28,10 @@ RUN apt update \
 RUN apt install -y git cmake ninja-build vim
 
 # python packages
-RUN pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124   \
-    && pip install flashinfer-python -i https://flashinfer.ai/whl/cu124/torch2.6/   \
-    && pip install flash-attn==2.7.3 --no-build-isolation   \
-    && pip install vllm==0.8.5.post1    \
-    && pip install accelerate codetiming datasets dill hydra-core pandas wandb loguru tensorboard qwen_vl_utils \
-    && pip install 'ray[default]>=2.47.1' \
-    && pip install opentelemetry-exporter-prometheus==0.47b0
+RUN pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1   \
+    && pip install flash-attn==2.8.2 --no-build-isolation   \
+    && pip install vllm==0.10.0    \
+    && pip install accelerate codetiming datasets dill hydra-core pandas wandb loguru tensorboard qwen_vl_utils
 
 # apex
 RUN git clone https://github.com/NVIDIA/apex.git \
@@ -43,5 +40,5 @@ RUN git clone https://github.com/NVIDIA/apex.git \
     && cd .. && rm -rf apex
 
 # optional: sglang
-RUN pip install 'sglang[all]==0.4.6.post5'    \
-    && pip install xgrammar==0.1.18
+RUN pip install 'sglang[all]==0.4.10.post2' \
+    && pip install outlines==1.2.3 xgrammar==0.1.21
