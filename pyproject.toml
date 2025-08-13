@@ -149,10 +149,7 @@ include-package-data = true
 packages = { find = {} }
 
 [tool.setuptools_scm]
-write_to = "siirl/version/version"
-
-[tool.setuptools.dynamic]
-version = {file = "siirl/version/version"}
+write_to = "siirl/version/_version.py"
 
 [tool.setuptools.package-dir]
 "" = "."
