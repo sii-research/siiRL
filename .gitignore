@@ -126,3 +126,6 @@ outputs
 
 *tensorboard
 tensorboard/
+
+# version file
+siirl/_version.py
