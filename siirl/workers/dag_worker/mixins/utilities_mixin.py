@@ -88,19 +88,61 @@ class DistributedMetricAggregator:
             self.device = "cpu"
         self.op_buckets = self._bucket_local_metrics(local_metrics)
 
-    def _bucket_local_metrics(self, metrics: Dict) -> defaultdict:
+    def _bucket_local_metrics(self, metrics: Dict, expected_keys: set = None) -> defaultdict:
         """
         Parses local metrics and groups them by the required reduction operation.
         This step also performs local pre-aggregation on lists and tensors.
         This version correctly handles multi-element tensors as input.
+        
+        For Pipeline Parallel (PP), different stages may have different metrics.
+        This method ensures all ranks have the same set of keys by adding missing
+        metrics with default values (0.0) to avoid tensor shape mismatch in all_reduce.
 
+        Args:
+            metrics: Local metrics dictionary
+            expected_keys: Optional set of all expected metric keys across all ranks
+            
         Returns:
             A defaultdict containing keys and pre-aggregated values,
             grouped by reduction operation type (_ReduceOp).
         """
         buckets = defaultdict(list)
+        
+        # If expected_keys is provided, ensure all ranks have the same metrics
+        if expected_keys:
+            # define metrics that should be excluded from non-computing ranks
+            # these are training-specific metrics that only the last PP stage should contribute
+            training_metrics = {
+                'actor/pg_loss', 'actor/kl_loss', 'actor/entropy_loss', 'actor/ppo_kl',
+                'actor/pg_clipfrac', 'actor/pg_clipfrac_lower', 'actor/kl_coef',
+                'critic/vf_loss', 'critic/clipfrac'
+            }
+
+            # Token counting metrics should only be contributed by PP rank 0 to avoid double counting
+            token_counting_metrics = {
+                'perf/total_num_tokens/mean'
+            }
+            
+            for key in expected_keys:
+                if key not in metrics:
+                    # for training metrics: use None to indicate this rank shouldn't contribute
+                    # for other metrics: use 0.0 as default
+                    if any(key.startswith(prefix) for prefix in training_metrics) or key in token_counting_metrics:
+                        # mark as None - will be handled specially in aggregation
+                        metrics[key] = None
+                    else:
+                        # performance metrics get default value 0.0
+                        metrics[key] = 0.0
+        
         for key in sorted(metrics.keys()):
             value = metrics[key]
+            
+            # Skip None values (training metrics from non-contributing ranks)
+            if value is None:
+                # for training metrics that this rank (those ranks that are not the last PP stage) shouldn't contribute to,
+                # add with count=0 so it doesn't affect the average
+                buckets[_ReduceOp.SUM].append((key, (0.0, 0)))
+                continue
 
             # Determine if the value is a list or a tensor that needs aggregation
             is_list = isinstance(value, list)
@@ -410,6 +452,8 @@ class UtilitiesMixin:
     ) -> Dict[str, float]:
         """
         Aggregates metrics in a distributed environment using a dedicated helper class.
+        For Pipeline Parallel setups, ensures all ranks have the same metric keys to avoid
+        tensor shape mismatch during all_reduce operations.
 
         Args:
             local_metrics: A dictionary of metrics on each rank.
@@ -435,8 +479,21 @@ class UtilitiesMixin:
                         final_metrics[key] = float(value)
             return final_metrics
 
-        # In a distributed setting, use the aggregator to perform communication.
+        # In Megatron with Pipeline Parallel:
+        # 1. First gather all metric keys from all ranks to ensure consistency
+        local_keys = set(local_metrics.keys())
+        all_keys_list = [None] * world_size
+        dist.all_gather_object(all_keys_list, local_keys, group=group)
+        
+        # 2. Union all keys to get the complete set of expected metrics
+        all_expected_keys = set()
+        for keys_set in all_keys_list:
+            all_expected_keys.update(keys_set)
+        
+        # 3. Use the aggregator with unified keys to perform communication
         aggregator = DistributedMetricAggregator(local_metrics, group)
+        # NOTE(Ping Zhang): Ensure all ranks have the same metrics by adding missing ones with default values
+        aggregator.op_buckets = aggregator._bucket_local_metrics(local_metrics, all_expected_keys)
         return aggregator.aggregate_and_get_results()
 
     def _prepare_local_batch_metrics(self, batch: DataProto, use_critic: bool = True) -> Dict[str, torch.Tensor]:
@@ -537,10 +594,13 @@ class UtilitiesMixin:
 
         representative_actor_node = next((n for n in self.taskgraph.nodes.values() if n.node_role == NodeRole.ACTOR), self.first_rollout_node)
         _, _, _, _, pp_rank_in_group, _ = self._get_node_dp_info(representative_actor_node)
-        # NOTE: We have already taken TP into account when we set global_token_num in compute_reward.
+        # (1) For TP: we have already taken TP into account when we set global_token_num in compute_reward.
         # see: siirl/workers/dag_worker/mixins/node_executors_mixin.py:compute_reward
-        local_token_sum = sum(batch.meta_info.get("global_token_num", [0])) if pp_rank_in_group == 0 else 0
-        metrics_to_aggregate["perf/total_num_tokens/mean"] = float(local_token_sum) # Use mean to get a sum
+        # (2) For PP: only PP rank 0 contributes to avoid double counting within PP groups
+        # The aggregation will average across DP groups and multiply by world size to get global estimate
+        if pp_rank_in_group == 0:
+            local_token_sum = sum(batch.meta_info.get("global_token_num", [0]))
+            metrics_to_aggregate["perf/total_num_tokens/mean"] = float(local_token_sum)
 
         # --- 3. Perform the aggregated, distributed reduction ---
         with self._timer("metrics_aggregation", timing_raw):

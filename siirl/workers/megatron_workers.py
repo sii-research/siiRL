@@ -1342,6 +1342,7 @@ class ReferenceWorker(MegatronWorker):
 
     @GPUMemoryLogger(role="compute_ref_log_prob", logger=logger)
     def compute_ref_log_prob(self, data: DataProto):
+        torch.cuda.empty_cache()
         if self._ref_is_offload_param:
             load_megatron_model_to_gpu(self.ref_module, load_grad=False)
             log_gpu_memory_usage("After load ref params and grad during compute_ref_log_prob", logger=logger)
