@@ -14,7 +14,10 @@
 
 import os
 import re
+
+from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
+from tqdm import tqdm
 from typing import Dict, Optional, Sequence
 
 import datasets
@@ -166,24 +169,18 @@ class PartitionedRLHFDataset(Dataset):
         # are preserved. The .map() function will then add the new columns
         # returned by _preprocess_function. This is safer than removing all
         # columns and rebuilding the dataset from scratch.
-        self.load_on_the_fly = self.force_on_the_fly or self.processor is not None
+        self.load_on_the_fly = self.force_on_the_fly
         if self.load_on_the_fly:
             self.processed_dataframe = raw_dataframe
         else:
             if self._rank == 0:
                 logger.warning("Currently preloading and preprocessing the entire dataset. If you encounter Out-Of-Memory issues, please set data.force_on_the_fly=True to enable on-the-fly loading mode.")
-            self.processed_dataframe = raw_dataframe.map(
-                self._preprocess_function,
-                batched=False,  # Process one item at a time
-                num_proc=self.num_workers,
-                remove_columns=[self.prompt_key],
-                desc=f"Rank {self.ddp_rank} preprocessing data",
-            )
-            self.processed_dataframe.set_format(
-                type="torch",
-                columns=["input_ids", "attention_mask", "position_ids"],
-                output_all_columns=True,
-            )
+            with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+                self.processed_dataframe = list(tqdm(
+                    executor.map(self._preprocess_function, raw_dataframe),
+                    total=len(raw_dataframe),
+                    desc="Processing"
+                ))
 
     def _load_partitioned_raw_data(self, dataset_files: Sequence[str]) -> Optional[datasets.Dataset]:
         """

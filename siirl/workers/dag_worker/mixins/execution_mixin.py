@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import torch.distributed as dist
+
 from collections import deque
 from pprint import pformat
 
-import torch.distributed as dist
 from loguru import logger
 from tqdm import tqdm
 
