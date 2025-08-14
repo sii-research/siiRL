@@ -14,6 +14,7 @@
 
 from collections import deque
 from pprint import pformat
+from typing import Any, List, Optional, Set, Tuple
 
 import torch.distributed as dist
 from loguru import logger
@@ -29,7 +30,7 @@ from siirl.workers.databuffer import DataProto
 class ExecutionMixin:
     """Handles the core DAG execution and training loop logic."""
 
-    from typing import Any, Dict, List, Optional, Tuple
+    from typing import Dict
 
     import torch.distributed as dist
     from tqdm import tqdm
@@ -137,6 +138,11 @@ class ExecutionMixin:
 
                 ordered_metrics = self._run_training_step(epoch, batch_idx)
 
+                if ordered_metrics is None:
+                    if self.progress_bar:
+                        self.progress_bar.update(1)
+                    continue
+
                 self.global_steps += 1
 
                 if ordered_metrics is not None:
@@ -208,6 +214,19 @@ class ExecutionMixin:
                     visited.add(dep_id)
                     queue.append(dep_id)
         return None
+
+    def _cleanup_step_buffers(self, visited_nodes: Set[str], timing_raw: dict) -> None:
+        """
+        Encapsulates the logic for resetting and clearing all step-related buffers.
+        This includes the distributed Ray data buffers and the local internal cache.
+        This is called at the end of a step, whether it completed successfully or was aborted.
+        """
+        # Reset the distributed (Ray) buffers for all keys that were used in this step.
+        with self._timer("reset_data_buffer", timing_raw):
+            self.reset_data_buffer(list(visited_nodes))
+        # Clear the local, in-process cache for the next step.
+        with self._timer("reset_intern_data_buffer", timing_raw):
+            self.internal_data_cache.clear()
 
     def _run_training_step(self, epoch: int, batch_idx: int) -> Optional[List[Tuple[str, Any]]]:
         """Executes a single training step by traversing the computational graph."""
@@ -292,6 +311,14 @@ class ExecutionMixin:
 
                     # --- 5. Process Output & Pass to Children ---
                     with self._timer("graph_output_handling", timing_raw):
+                        if cur_node.node_role == NodeRole.POSTPROCESS_SAMPLING:
+                            if len(node_output.batch) == 0:
+                                logger.warning(f"Rank {self._rank}: Data after postprocess_sampling is insufficient. Caching and skipping the rest of the training step.")
+                                self._cleanup_step_buffers(visited_nodes, timing_raw)
+                                return None
+                            if "postprocess_status" in node_output.metrics:
+                                del node_output.metrics["postprocess_status"]
+
                         if self._rank == 0 and node_output.metrics:
                             ordered_metrics.extend(sorted(node_output.metrics.items()))
 
@@ -327,10 +354,7 @@ class ExecutionMixin:
                         dist.barrier(self._gather_group)
 
             # --- 6. Final Metrics Collection ---
-            with self._timer("reset_data_buffer", timing_raw):
-                self.reset_data_buffer(list(visited_nodes))
-            with self._timer("reset_intern_data_buffer", timing_raw):
-                self.internal_data_cache.clear()
+            self._cleanup_step_buffers(visited_nodes, timing_raw)
 
         final_metrics = self._collect_final_metrics(batch, timing_raw)
         if final_metrics:

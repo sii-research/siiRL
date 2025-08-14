@@ -626,10 +626,6 @@ class UtilitiesMixin:
                 logger.debug(f"Rank {self._rank}: Found data for key '{key}' in local cache. Bypassing Ray.")
                 return self.internal_data_cache.pop(key)
 
-        # If not in cache, try to get from Ray buffers
-        # This is a placeholder implementation - the actual implementation would be more complex
-        return None
-
         # If not in the local cache, fall back to remote Ray buffers.
         logger.debug(f"Rank {self._rank}: Data for key '{key}' not in local cache. Fetching from remote buffers.")
         if not self.data_buffers:

@@ -71,6 +71,7 @@ class InitializationMixin:
     kl_ctrl_in_reward: Optional[Any]
     validate_tokenizer: Any
     role_worker_mapping: Dict[NodeRole, Type[Worker]]
+    postsampling_masters_group: Optional[ProcessGroup] = None
 
     def _initialize_worker(self):
         """Orchestrates the ordered initialization of all worker components."""
@@ -141,9 +142,45 @@ class InitializationMixin:
                 self._gather_group = None
         self._build_all_process_groups()
         self._resolve_taskgraph_process_groups()
+
+        # try create post sampling process_groups for dapo
+        self._create_postsampling_masters_group()
+
         # Ensure all ranks have finished group creation before proceeding.
         dist.barrier(self._gather_group)
         logger.info(f"Rank {self._rank}: Distributed environment setup complete.")
+
+    def _create_postsampling_masters_group(self):
+        """
+        Creates a dedicated process group containing only master ranks (tp_rank=0).
+        This group is used for post-sampling rebalancing logic to prevent deadlocks.
+        """
+        logger.info(f"Rank {self._rank}: Attempting to create dedicated process group for post-sampling masters...")
+        try:
+            # To create the group, we need the tensor parallel size (tp_size).
+            # We derive it from the first rollout node, as this setting governs the rebalancing logic.
+            rollout_nodes = [n for n in self.taskgraph.nodes.values() if n.node_type == NodeType.MODEL_INFERENCE]
+            if not rollout_nodes:
+                logger.warning("No MODEL_INFERENCE nodes found. Skipping creation of post-sampling masters group.")
+                self.postsampling_masters_group = None
+                return
+
+            first_rollout_node = rollout_nodes[0]
+            tp_size = first_rollout_node.config[DAGConstants.INTERN_CONFIG].rollout.tensor_model_parallel_size
+
+            # The group is only necessary for distributed training with tensor parallelism.
+            if self.world_size > 1 and tp_size > 1:
+                all_ranks = list(range(self.world_size))
+                master_ranks = [rank for rank in all_ranks if (rank % tp_size) == 0]
+                self.postsampling_masters_group = dist.new_group(ranks=master_ranks)
+                logger.success(f"Rank {self._rank}: Successfully created 'postsampling_masters_group' with ranks: {master_ranks}")
+            else:
+                logger.info(f"Rank {self._rank}: No need to create 'postsampling_masters_group' (world_size={self.world_size}, tp_size={tp_size}).")
+                self.postsampling_masters_group = None
+
+        except (AttributeError, KeyError) as e:
+            logger.error(f"Failed to create post-sampling masters group due to missing config. Error: {e}", exc_info=True)
+            self.postsampling_masters_group = None
 
     def _build_all_process_groups(self):
         """Builds all process groups defined in the ProcessGroupManager."""

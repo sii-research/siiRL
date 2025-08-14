@@ -23,7 +23,7 @@ from torch import distributed as dist
 
 from siirl.scheduler.reward import compute_reward
 from siirl.utils.extras.device import get_device_id, get_device_name
-from siirl.workers.dag.node import NodeRole
+from siirl.workers.dag.node import NodeRole, NodeType
 from siirl.workers.dag_worker.algorithms import apply_kl_penalty, compute_advantage, compute_response_mask
 from siirl.workers.dag_worker.core_algos import agg_loss
 from siirl.workers.dag_worker.data_structures import NodeOutput
@@ -50,6 +50,7 @@ class NodeExecutorsMixin:
     _get_node_process_group: Any
     _get_node: Any
     _reduce_and_broadcast_metrics: Any
+    _find_first_non_compute_ancestor: Any
 
     def generate(self, worker_group_index: int, batch: DataProto, **kwargs) -> NodeOutput:
         """Generates sequences for a training batch using the rollout model."""
@@ -171,102 +172,129 @@ class NodeExecutorsMixin:
         metrics = self._reduce_and_broadcast_metrics(processed_data.meta_info.get("metrics"), process_group)
         return NodeOutput(batch=processed_data, metrics=metrics)
 
-    def _get_rebalancing_context(self, current_node_id: str) -> Optional[Dict[str, Any]]:
+    def init_postsampling_process_group(world_size: int, tp_size: int) -> Optional[dist.ProcessGroup]:
         """
-        Determines the distributed context for THIS node's rebalancing operation.
-        It is self-contained and does not depend on downstream nodes.
+        Initializes a custom process group containing only the master ranks (tp_rank=0).
+
+        This function should be called once during startup, after the default
+        process group has been initialized. It is used to create a safe communication
+        channel for collective operations among a subset of ranks.
 
         Args:
-            current_node_id: The ID of the node currently executing.
+            world_size (int): The total number of processes in the default world.
+            tp_size (int): The size of the tensor parallel group.
 
         Returns:
-            A dictionary with the distributed context if applicable, otherwise None.
+            A new ProcessGroup object for the master ranks, or None if no group
+            is needed (i.e., tp_size <= 1 or world_size <= 1).
+        """
+        # The group is only necessary for distributed training with tensor parallelism.
+        if world_size <= 1 or tp_size <= 1:
+            return None
+
+        all_ranks = list(range(world_size))
+
+        # Identify master ranks (those with tp_rank == 0).
+        # In a typical setup, rank 'r' has tp_rank = r % tp_size.
+        master_ranks = [rank for rank in all_ranks if (rank % tp_size) == 0]
+
+        # Create the dedicated process group for these master ranks.
+        postsampling_masters_group = dist.new_group(ranks=master_ranks)
+
+        return postsampling_masters_group
+
+    def _get_rebalancing_context(self, current_node_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Determines the distributed context for this node's rebalancing operation.
+        If the node is of type COMPUTE, it intelligently finds its first non-COMPUTE
+        ancestor and uses its distributed context, ensuring correct behavior.
         """
         current_node = self.taskgraph.get_node(current_node_id)
+        if not current_node:
+            logger.error(f"Rank {self._rank}: Could not find node '{current_node_id}' in the task graph.")
+            return None
+
+        reference_node = current_node
+        if current_node.node_type == NodeType.COMPUTE:
+            ancestor = self._find_first_non_compute_ancestor(current_node.node_id)
+            if ancestor:
+                logger.error(f"Rank {self._rank}: Node '{current_node.node_id}' is a COMPUTE node. Using context from its ancestor '{ancestor.node_id}'.")
+                reference_node = ancestor
+            else:
+                logger.error(f"Rank {self._rank}: Could not find a non-COMPUTE ancestor for COMPUTE node '{current_node.node_id}'. Cannot determine distributed context.")
+                return None
+
         try:
-            my_process_group = self._get_node_process_group(current_node)
-            dp_size, dp_rank, tp_rank, tp_size = self._get_node_dp_info(current_node)
-        except (ValueError, AttributeError):
-            # This can happen if the node is not part of a distributed setup, which is valid.
+            my_process_group = self._get_node_process_group(reference_node)
+            dp_size, dp_rank, tp_rank, tp_size = self._get_node_dp_info(reference_node)
+        except (ValueError, AttributeError) as e:
+            logger.error(f"Rank {self._rank}: Could not get distributed context for reference node '{reference_node.node_id}'. This is expected if the node is not part of a distributed setup. Error: {e}")
             return None
 
         return {"my_pg": my_process_group, "dp_size": dp_size, "my_dp_rank": dp_rank, "my_tp_rank": tp_rank, "tp_size": tp_size}
 
-    def _gather_global_batch_counts(self, local_count: int, context: Dict[str, Any]) -> List[int]:
+    def _gather_global_state(self, local_new_count: int, context: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        Gathers data counts from all TP Masters to form a global view,
-        efficiently, without creating new process groups.
+        Gathers both new and cached data counts from all TP Masters to form a
+        complete and consistent global state view.
         """
-        my_info = {"dp_rank": context["my_dp_rank"], "tp_rank": context["my_tp_rank"], "count": local_count}
-        all_ranks_info = [None] * dist.get_world_size(group=context["my_pg"])
-        dist.all_gather_object(all_ranks_info, my_info, group=context["my_pg"])
+        cache_size = 0
+        if self.sampling_leftover_cache and "uid" in self.sampling_leftover_cache.non_tensor_batch:
+            # BUG FIX: Calculate cache size based on unique UIDs, not total rows.
+            cache_size = len(set(self.sampling_leftover_cache.non_tensor_batch["uid"]))
 
-        master_infos = sorted([info for info in all_ranks_info if info["tp_rank"] == 0], key=lambda x: x["dp_rank"])
-        return [info["count"] for info in master_infos]
+        my_state = {
+            "dp_rank": context["my_dp_rank"],
+            "tp_rank": context["my_tp_rank"],
+            "new_count": local_new_count,
+            "cached_count": cache_size,
+        }
+        all_ranks_state = [None] * dist.get_world_size(group=context["my_pg"])
+        dist.all_gather_object(all_ranks_state, my_state, group=context["my_pg"])
 
-    def _create_migration_plan(self, global_counts: List[int], target_batch_size: int, dp_world_size: int) -> Tuple[List[Dict[str, Any]], List[int]]:
-        """Creates a deterministic, globally consistent data migration plan."""
-        # ## Step 1: Calculate the target number of prompts for each worker ##
-        # Evenly distribute the target batch size, assigning any remainder to the first few workers.
-        base_prompts_per_worker = target_batch_size // dp_world_size
+        return sorted([state for state in all_ranks_state if state["tp_rank"] == 0], key=lambda x: x["dp_rank"])
+
+    def _create_migration_plan(self, global_state: List[Dict[str, Any]], target_batch_size: int, dp_world_size: int) -> Tuple[List[Dict[str, Any]], List[int]]:
+        """
+        Creates a deterministic data migration plan based on the complete global state,
+        considering the total data (new + cached) on each rank.
+        """
+        # BUG FIX: Use the total count (new + cached) for each rank to determine the current data distribution.
+        current_counts = [state["new_count"] + state["cached_count"] for state in global_state]
+
+        base_items = target_batch_size // dp_world_size
         remainder = target_batch_size % dp_world_size
-        target_counts = [base_prompts_per_worker + 1 if rank < remainder else base_prompts_per_worker for rank in range(dp_world_size)]
+        target_counts = [base_items + 1 if rank < remainder else base_items for rank in range(dp_world_size)]
 
-        # ## Step 2: Identify which workers have a data surplus and which have a deficit ##
-        # A deficit means a worker has fewer prompts than its target.
-        # A surplus means a worker has more prompts than its target.
-        deficits = {rank: target_counts[rank] - count for rank, count in enumerate(global_counts) if count < target_counts[rank]}
-        surpluses = {rank: count - target_counts[rank] for rank, count in enumerate(global_counts) if count > target_counts[rank]}
+        deficits = {rank: target_counts[rank] - count for rank, count in enumerate(current_counts) if count < target_counts[rank]}
+        surpluses = {rank: count - target_counts[rank] for rank, count in enumerate(current_counts) if count > target_counts[rank]}
 
-        # ## Step 3: Create the migration plan by matching surpluses to deficits ##
-        # Sort by rank to ensure the matching process is deterministic across all workers.
         migration_plan = []
         deficit_workers = sorted(deficits.items())
         surplus_workers = sorted(surpluses.items())
 
-        deficit_worker_index = 0
-        surplus_worker_index = 0
+        d_idx, s_idx = 0, 0
+        while d_idx < len(deficit_workers) and s_idx < len(surplus_workers):
+            poor_rank, needed = deficit_workers[d_idx]
+            rich_rank, available = surplus_workers[s_idx]
+            amount = min(needed, available)
+            if amount > 0:
+                migration_plan.append({"from": rich_rank, "to": poor_rank, "amount": amount})
 
-        # Greedily match workers until either all deficits are filled or all surpluses are exhausted.
-        while deficit_worker_index < len(deficit_workers) and surplus_worker_index < len(surplus_workers):
-            # Get the current worker with a deficit (the "poor" worker)
-            poor_worker_rank, needed = deficit_workers[deficit_worker_index]
+            deficit_workers[d_idx] = (poor_rank, needed - amount)
+            surplus_workers[s_idx] = (rich_rank, available - amount)
 
-            # Get the current worker with a surplus (the "rich" worker)
-            rich_worker_rank, available = surplus_workers[surplus_worker_index]
-
-            # Determine the amount of data to move in this step
-            amount_to_move = min(needed, available)
-
-            if amount_to_move > 0:
-                migration_plan.append(
-                    {
-                        "from": rich_worker_rank,
-                        "to": poor_worker_rank,
-                        "amount": amount_to_move,
-                    }
-                )
-
-            # Update the remaining amounts for the current workers
-            deficit_workers[deficit_worker_index] = (poor_worker_rank, needed - amount_to_move)
-            surplus_workers[surplus_worker_index] = (rich_worker_rank, available - amount_to_move)
-
-            # If a worker's deficit is filled, move to the next one.
-            if deficit_workers[deficit_worker_index][1] == 0:
-                deficit_worker_index += 1
-
-            # If a worker's surplus is exhausted, move to the next one.
-            if surplus_workers[surplus_worker_index][1] == 0:
-                surplus_worker_index += 1
+            if deficit_workers[d_idx][1] == 0:
+                d_idx += 1
+            if surplus_workers[s_idx][1] == 0:
+                s_idx += 1
 
         return migration_plan, target_counts
 
     def _execute_p2p_migration(self, plan: List[Dict[str, Any]], batch: DataProto, local_uids: List[str], context: Dict[str, Any]) -> List[DataProto]:
-        """Executes data migration between TP masters using P2P send/recv with global ranks."""
-        my_dp_rank = context["my_dp_rank"]
-        tp_size = context["tp_size"]
+        """Executes data migration between ranks using P2P send/recv."""
+        my_dp_rank, tp_size = context["my_dp_rank"], context["tp_size"]
         pg_ranks = dist.get_process_group_ranks(context["my_pg"])
-
         my_sends = [task for task in plan if task["from"] == my_dp_rank]
         my_receives = [task for task in plan if task["to"] == my_dp_rank]
 
@@ -274,29 +302,29 @@ class NodeExecutorsMixin:
         device = get_device_name() if get_device_name() == "cpu" else f"{get_device_name()}:{get_device_id()}"
 
         for task in my_receives:
-            sender_global_rank = pg_ranks[task["from"] * tp_size]
+            sender_rank = pg_ranks[task["from"] * tp_size]
             size_tensor = torch.tensor([0], dtype=torch.long, device=device)
-            dist.recv(tensor=size_tensor, src=sender_global_rank)
+            dist.recv(tensor=size_tensor, src=sender_rank)
             if size_tensor.item() > 0:
                 buffer = torch.empty(size_tensor.item(), dtype=torch.uint8, device=device)
-                req = dist.irecv(tensor=buffer, src=sender_global_rank)
+                req = dist.irecv(tensor=buffer, src=sender_rank)
                 requests.append(req)
-                received_buffers[sender_global_rank] = buffer
+                received_buffers[sender_rank] = buffer
 
         if my_sends:
-            uids_to_send_pool = local_uids[-sum(task["amount"] for task in my_sends) :]
+            uids_to_send = local_uids[-sum(task["amount"] for task in my_sends) :]
             for task in my_sends:
-                dest_global_rank = pg_ranks[task["to"] * tp_size]
-                uids, uids_to_send_pool = uids_to_send_pool[: task["amount"]], uids_to_send_pool[task["amount"] :]
+                dest_rank = pg_ranks[task["to"] * tp_size]
+                uids, uids_to_send = uids_to_send[: task["amount"]], uids_to_send[task["amount"] :]
                 indices = [i for i, uid in enumerate(batch.non_tensor_batch["uid"]) if uid in uids]
 
                 if not indices:
-                    dist.send(tensor=torch.tensor([0], dtype=torch.long, device=device), dst=dest_global_rank)
+                    dist.send(tensor=torch.tensor([0], dtype=torch.long, device=device), dst=dest_rank)
                     continue
 
-                serialized_data = pickle.dumps(batch[indices])
-                dist.send(tensor=torch.tensor([len(serialized_data)], dtype=torch.long, device=device), dst=dest_global_rank)
-                req = dist.isend(tensor=torch.from_numpy(np.frombuffer(serialized_data, dtype=np.uint8)).to(device), dst=dest_global_rank)
+                serialized = pickle.dumps(batch[indices])
+                dist.send(tensor=torch.tensor([len(serialized)], dtype=torch.long, device=device), dst=dest_rank)
+                req = dist.isend(tensor=torch.from_numpy(np.frombuffer(serialized, dtype=np.uint8)).to(device), dst=dest_rank)
                 requests.append(req)
 
         for req in requests:
@@ -305,7 +333,7 @@ class NodeExecutorsMixin:
         return [pickle.loads(buf.cpu().numpy().tobytes()) for buf in received_buffers.values()]
 
     def _truncate_local_batch(self, batch: DataProto, target_count: int, local_uids: List[str]) -> DataProto:
-        """Deterministically truncates the local batch to the target count."""
+        """Deterministically truncates the local batch to its target size."""
         if len(local_uids) <= target_count:
             return batch
         uids_to_keep = set(local_uids[:target_count])
@@ -314,107 +342,223 @@ class NodeExecutorsMixin:
 
     def _master_rebalance_logic(self, batch: DataProto, context: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Encapsulates the entire rebalancing logic that is executed ONLY by the TP Master.
-
-        Returns:
-            The decision package to be synchronized with TP peers.
+        The core decision-making logic, executed by all master ranks (tp_rank=0).
+        It now makes a consistent decision based on the true global state.
         """
-        local_uids_count = len(set(batch.non_tensor_batch.get("uid", [])))
-        global_counts = self._gather_global_batch_counts(local_uids_count, context)
+        logger.error(f"Rank {self._rank} (Master): Entering _master_rebalance_logic.")
+        local_new_count = len(set(batch.non_tensor_batch.get("uid", [])))
 
-        cache_was_used = hasattr(self, "sampling_leftover_cache") and self.sampling_leftover_cache and len(self.sampling_leftover_cache) > 0
-        if cache_was_used:
-            working_batch = DataProto.concat([self.sampling_leftover_cache, batch])
-            self.sampling_leftover_cache = None
+        # --- [CORE MODIFICATION] ---
+        # Instead of calling _gather_global_state which causes a deadlock,
+        # we perform the collective communication directly here using the safe, dedicated group.
+        if self.postsampling_masters_group is None:
+            raise RuntimeError("The dedicated 'postsampling_masters_group' has not been initialized. This group is required for rebalancing logic to prevent deadlocks. Please call 'init_postsampling_process_group' after 'dist.init_process_group' and set the returned group on this class instance.")
+
+        # 1. Prepare the local state object for this master rank.
+        cache_size = 0
+        if self.sampling_leftover_cache and "uid" in self.sampling_leftover_cache.non_tensor_batch:
+            cache_size = len(set(self.sampling_leftover_cache.non_tensor_batch["uid"]))
+
+        my_state = {
+            # The local rank within the masters_group corresponds to the DP rank.
+            "dp_rank": dist.get_rank(group=self.postsampling_masters_group),
+            "new_count": local_new_count,
+            "cached_count": cache_size,
+        }
+
+        # 2. Perform the all-gather operation on the dedicated masters group.
+        num_masters = dist.get_world_size(group=self.postsampling_masters_group)
+        global_state_list = [None] * num_masters
+        dist.all_gather_object(global_state_list, my_state, group=self.postsampling_masters_group)
+        global_state = sorted(global_state_list, key=lambda x: x["dp_rank"])
+        # --- [END OF MODIFICATION] ---
+
+        logger.error(f"Rank {self._rank} (Master): Gathered global state: {global_state}.")
+
+        total_new = sum(s["new_count"] for s in global_state)
+        total_cached = sum(s["cached_count"] for s in global_state)
+        total_prompts = total_new + total_cached
+        cache_was_used = total_cached > 0
+
+        target_batch_size = self.config.data.train_batch_size
+        logger.error(f"Rank {self._rank} (Master): Total prompts (new={total_new}, cached={total_cached}, total={total_prompts}). Target: {target_batch_size}.")
+
+        if total_prompts < target_batch_size:
+            decision = {"action": "cache", "status": "INSUFFICIENT_DATA", "cache_was_used": cache_was_used}
+            logger.error(f"Rank {self._rank} (Master): Data insufficient. Decision: {decision}")
+            return decision
         else:
+            logger.error(f"Rank {self._rank} (Master): Data sufficient. Proceeding to rebalance.")
             working_batch = batch
+            if self.sampling_leftover_cache:
+                working_batch = DataProto.concat([self.sampling_leftover_cache, batch])
 
-        local_uids = sorted(list(set(working_batch.non_tensor_batch.get("uid", []))))
+            plan, targets = self._create_migration_plan(global_state, target_batch_size, context["dp_size"])
+            logger.error(f"Rank {self._rank} (Master): Migration plan: {plan}. Targets: {targets}.")
 
-        if sum(global_counts) < self.config.data.train_batch_size:
-            self.sampling_leftover_cache = working_batch
-            return {"action": "cache", "cache_was_used": cache_was_used}
-        else:
-            plan, targets = self._create_migration_plan(global_counts, self.config.data.train_batch_size, context["dp_size"])
-            received_shards = self._execute_p2p_migration(plan, working_batch, local_uids, dist.get_process_group_ranks(context["my_pg"]), context)
-
+            # The P2P migration still correctly uses the original `context` to resolve global ranks.
+            received_shards = self._execute_p2p_migration(plan, working_batch, sorted(list(set(working_batch.non_tensor_batch.get("uid", [])))), context)
             my_target_count = targets[context["my_dp_rank"]]
+            decision = {"action": "rebalance", "status": "OK", "incremental_data": received_shards, "local_filter_info": {"target_count": my_target_count, "cache_was_used": cache_was_used}}
 
-            return {"action": "rebalance", "incremental_data": received_shards, "local_filter_info": {"target_count": my_target_count, "cache_was_used": cache_was_used}}
+            # Create a concise summary of the decision for logging.
+            decision_summary = {
+                "action": decision.get("action"),
+                "status": decision.get("status"),
+                "target_count": decision.get("local_filter_info", {}).get("target_count"),
+                "cache_was_used": decision.get("local_filter_info", {}).get("cache_was_used"),
+                "received_shards": len(decision.get("incremental_data", [])),
+            }
+            logger.error(f"Rank {self._rank} (Master): Rebalance complete. Decision summary: {decision_summary}")
+            return decision
 
     def _synchronize_decision_to_peers(self, decision_package: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Synchronizes the decision from the TP Master to its Peers using P2P communication.
+        Synchronizes a decision package from the master rank (tp_rank=0) to its peers
+        within the same tensor-parallel group.
+
+        This function uses a robust, two-phase asynchronous point-to-point (P2P) protocol:
+        1.  A synchronous exchange of the data size to ensure receivers can allocate buffers correctly.
+        2.  An asynchronous transfer of the actual data payload to maximize network parallelism.
+
+        Args:
+            decision_package: The Python dictionary to be synchronized. This is only provided on the
+                            master rank (tp_rank=0).
+            context: A dictionary containing the distributed context, including tp_rank, tp_size, etc.
+
+        Returns:
+            The synchronized decision package, now available on all ranks in the TP group.
         """
-        sync_container = [decision_package]
-        if context["tp_size"] > 1:
-            pg_ranks = dist.get_process_group_ranks(context["my_pg"])
-            dp_rank = context["my_dp_rank"]
-            master_global_rank = pg_ranks[dp_rank * context["tp_size"]]
+        tp_size = context.get("tp_size", 1)
 
-            if context["my_tp_rank"] == 0:
-                for peer_tp_rank in range(1, context["tp_size"]):
-                    peer_global_rank = pg_ranks[dp_rank * context["tp_size"] + peer_tp_rank]
-                    dist.send_object(sync_container[0], dst=peer_global_rank)
-            else:
-                sync_container[0] = dist.recv_object(src=master_global_rank)
+        # --- Base Case: No synchronization needed if there's only one rank in the group. ---
+        if tp_size <= 1:
+            return decision_package
 
-        return sync_container[0]
+        # --- Setup common distributed variables ---
+        pg_ranks = dist.get_process_group_ranks(context["my_pg"])
+        dp_rank = context["my_dp_rank"]
+        tp_rank = context["my_tp_rank"]
+        device = get_device_name() if get_device_name() == "cpu" else f"{get_device_name()}:{get_device_id()}"
+
+        if tp_rank == 0:
+            # ========================================================================
+            # SENDER LOGIC (MASTER: tp_rank == 0)
+            # ========================================================================
+
+            # Ensure we have a valid object to send.
+            if decision_package is None:
+                logger.warning("Decision package is None on master, creating a default error package.")
+                decision_package = {"action": "error", "status": "ERROR_NO_DECISION"}
+
+            # 1. Serialize the Python object into a byte buffer.
+            serialized_decision = pickle.dumps(decision_package)
+            data_tensor = torch.from_numpy(np.frombuffer(serialized_decision, dtype=np.uint8)).to(device)
+            size_tensor = torch.tensor([data_tensor.numel()], dtype=torch.long, device=device)
+
+            # --- Phase 1: Synchronously send the size to all peers. ---
+            # This blocking step is a crucial synchronization point. It guarantees that
+            # all receivers are ready and know the data size before we start sending the payload.
+            for peer_tp_rank in range(1, tp_size):
+                peer_global_rank = pg_ranks[dp_rank * tp_size + peer_tp_rank]
+                dist.send(tensor=size_tensor, dst=peer_global_rank)
+
+            # --- Phase 2: Asynchronously send the data payload to all peers. ---
+            # This allows all send operations to be in-flight simultaneously.
+            requests = []
+            for peer_tp_rank in range(1, tp_size):
+                peer_global_rank = pg_ranks[dp_rank * tp_size + peer_tp_rank]
+                req = dist.isend(tensor=data_tensor, dst=peer_global_rank)
+                requests.append(req)
+
+            # Wait for all asynchronous send operations to complete.
+            for req in requests:
+                req.wait()
+
+            return decision_package
+
+        else:
+            # ========================================================================
+            # RECEIVER LOGIC (PEER: tp_rank != 0)
+            # ========================================================================
+            master_global_rank = pg_ranks[dp_rank * tp_size]
+
+            # --- Phase 1: Synchronously receive the size. ---
+            # This blocking receive ensures we have the correct size before allocating a buffer.
+            size_tensor = torch.tensor([0], dtype=torch.long, device=device)
+            dist.recv(tensor=size_tensor, src=master_global_rank)
+
+            # --- Phase 2: Asynchronously receive the data payload. ---
+            # Allocate the buffer and post the non-blocking receive operation.
+            buffer_size = size_tensor.item()
+            buffer = torch.empty(buffer_size, dtype=torch.uint8, device=device)
+            request = dist.irecv(tensor=buffer, src=master_global_rank)
+
+            # Wait for the data to be fully received.
+            request.wait()
+
+            # Deserialize the byte buffer back into a Python object.
+            received_decision = pickle.loads(buffer.cpu().numpy().tobytes())
+
+            return received_decision
 
     def _reconstruct_batch_from_decision(self, batch: DataProto, decision: Dict[str, Any]) -> DataProto:
         """
-        Reconstructs the final batch on ALL ranks based on the synchronized decision.
+        Reconstructs the final data batch on all ranks based on the synchronized decision.
+        This method is the single source of truth for updating `self.sampling_leftover_cache`.
         """
-        if decision["action"] == "cache":
-            if decision["cache_was_used"]:
+        action = decision.get("action")
+        logger.error(f"Rank {self._rank}: Reconstructing batch with action: '{action}'.")
+        if action == "cache":
+            if decision.get("cache_was_used") and self.sampling_leftover_cache:
                 working_batch = DataProto.concat([self.sampling_leftover_cache, batch])
             else:
                 working_batch = batch
             self.sampling_leftover_cache = working_batch
+            if "uid" in self.sampling_leftover_cache.non_tensor_batch:
+                logger.error(f"Rank {self._rank}: Cache updated. New unique cache size: {len(set(self.sampling_leftover_cache.non_tensor_batch['uid']))}. Returning empty DataProto.")
             return DataProto()
-
-        elif decision["action"] == "rebalance":
-            filter_info = decision["local_filter_info"]
-
-            if filter_info["cache_was_used"]:
+        elif action == "rebalance":
+            working_batch = batch
+            if decision["local_filter_info"]["cache_was_used"] and self.sampling_leftover_cache:
                 working_batch = DataProto.concat([self.sampling_leftover_cache, batch])
-                self.sampling_leftover_cache = None
-            else:
-                working_batch = batch
+
+            self.sampling_leftover_cache = None
 
             local_uids = sorted(list(set(working_batch.non_tensor_batch.get("uid", []))))
-
-            local_filtered_batch = self._truncate_local_batch(working_batch, filter_info["target_count"], local_uids)
-
+            target_count = decision["local_filter_info"]["target_count"]
+            local_filtered_batch = self._truncate_local_batch(working_batch, target_count, local_uids)
             incremental_data = decision["incremental_data"]
-            if incremental_data:
-                return DataProto.concat([local_filtered_batch] + incremental_data)
-            else:
-                return local_filtered_batch
 
-        logger.error(f"Rank {self._rank}: Received unknown action '{decision.get('action')}' in sync package.")
-        return batch  # Fallback to the original batch
+            final_batch = DataProto.concat([local_filtered_batch] + incremental_data) if incremental_data else local_filtered_batch
+            final_uid_count = len(set(final_batch.non_tensor_batch.get("uid", [])))
+            logger.error(f"Rank {self._rank}: Rebalance complete. Final batch unique UIDs: {final_uid_count}.")
+            return final_batch
+
+        logger.error(f"Rank {self._rank}: Received unknown or error action '{action}' in sync package.")
+        self.sampling_leftover_cache = None
+        return batch
 
     def postprocess_sampling(self, batch: DataProto, **kwargs) -> NodeOutput:
         """
-        A stateful, distributed-aware node that rebalances data within its OWN process group.
-        This is the final, robust, and highly optimized implementation with clear encapsulation.
+        A stateful, distributed-aware node that rebalances data across ranks.
+        It makes a globally consistent decision on whether to cache or rebalance.
         """
-        context = self._get_rebalancing_context(kwargs["node_config"]["_node_id_"])
-
+        node_id = kwargs.get("node_config", {}).get("_node_id_", "Unknown")
+        logger.error(f"Rank {self._rank}: --- Starting postprocess_sampling for node '{node_id}' ---")
+        context = self._get_rebalancing_context(node_id)
         if context is None:
-            # This node is not part of a distributed setup, act as a passthrough.
-            return NodeOutput(batch=batch)
+            logger.error(f"Rank {self._rank}: Node is not distributed. Passing data through.")
+            return NodeOutput(batch=batch, metrics={"postprocess_status": "OK_SINGLE_NODE"})
 
-        # Step 1: TP Master alone determines the rebalancing plan and decision.
         decision_package = None
         if context["my_tp_rank"] == 0:
             decision_package = self._master_rebalance_logic(batch, context)
 
-        # Step 2: The decision is synchronized from the Master to all its Peers.
         final_decision = self._synchronize_decision_to_peers(decision_package, context)
-
-        # Step 3: All ranks (Master and Peers) use the synchronized decision to build the final batch.
         final_batch = self._reconstruct_batch_from_decision(batch, final_decision)
+        status = final_decision.get("status", "UNKNOWN")
 
-        return NodeOutput(batch=final_batch)
+        final_uid_count = len(set(final_batch.non_tensor_batch.get("uid", []))) if final_batch else 0
+        logger.error(f"Rank {self._rank}: --- Finished postprocess_sampling for node '{node_id}'. Final unique UIDs: {final_uid_count}, Status: {status} ---")
+        return NodeOutput(batch=final_batch, metrics={"postprocess_status": status})
