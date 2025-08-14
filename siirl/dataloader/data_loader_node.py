@@ -82,8 +82,6 @@ class DataLoaderNode(Node):
         """
         super().__init__(node_id, NodeType.DATA_LOAD, NodeRole.DEFAULT, config=config, retry_limit=retry_limit)
         self.global_config = global_config
-        self.num_loader_workers = 0 if global_config.actor_rollout_ref.rollout.name == "sglang" else config.get("num_loader_workers", 8)
-
 
         if "tokenizer" in self.config:
             self.tokenizer = self.config["tokenizer"]
@@ -93,6 +91,11 @@ class DataLoaderNode(Node):
             tokenizer_module = load_tokenizer(model_args=global_config.actor_rollout_ref.model)
             self.tokenizer = tokenizer_module["tokenizer"]
             self.processor = tokenizer_module["processor"]
+            
+        # force load in main process for vision language model
+        self.num_loader_workers = 0 if global_config.actor_rollout_ref.rollout.name == "sglang" or self.processor is not None \
+            else config.get("num_loader_workers", 8)
+        
         # Get group world size, rank, parallel size from config.
         #   Group world size means the rollout pytorch distributed group total gpus.
         #   Group rank means the process index in distributed group.
