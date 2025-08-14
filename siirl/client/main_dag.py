@@ -14,7 +14,6 @@
 
 import os
 import time
-import torch.multiprocessing as mp
 
 import hydra
 import ray
@@ -200,5 +199,4 @@ def main(siirl_config: DictConfig) -> None:
 
 
 if __name__ == "__main__":
-    mp.set_start_method("spawn", force=True)
     main()
