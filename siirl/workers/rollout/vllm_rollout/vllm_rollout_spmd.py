@@ -171,6 +171,7 @@ class vLLMRollout(BaseRollout):
             os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
             os.environ["TORCH_CUDA_ARCH_LIST"] = f"{cap[0]}.{cap[1]}+PTX"
 
+        # the rollout's config `free_cache_engine` controls wether 
         self.inference_engine = LLM(
             model=model_path,
             enable_sleep_mode=config.free_cache_engine,

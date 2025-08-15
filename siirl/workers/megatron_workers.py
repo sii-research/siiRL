@@ -33,7 +33,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from siirl import DataProto
 from siirl.workers.base_worker.megatron.worker import MegatronWorker
-from siirl.utils import hf_tokenizer
+from siirl.models.loader import load_tokenizer
 from siirl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
 from siirl.utils.debug import GPUMemoryLogger, log_gpu_memory_usage
 from siirl.utils.model_utils.flops_counter import FlopsCounter
@@ -840,12 +840,12 @@ class RewardModelWorker(MegatronWorker):
 
         use_shm = self.config.model.use_shm
         sft_tokenizer_local_path = copy_to_local(self.config.model.input_tokenizer, use_shm=use_shm)
-        sft_tokenizer = hf_tokenizer(sft_tokenizer_local_path)
+        sft_tokenizer = load_tokenizer(path=sft_tokenizer_local_path)["tokenizer"]
         rm_tokenizer_path = self.config.model.rm_tokenizer
         rm_tokenizer = None
         if rm_tokenizer_path is not None:
             rm_tokenizer_local_path = copy_to_local(rm_tokenizer_path, use_shm=use_shm)
-            rm_tokenizer = hf_tokenizer(rm_tokenizer_local_path, trust_remote_code=self.config.model.trust_remote_code)
+            rm_tokenizer = load_tokenizer(path=rm_tokenizer_local_path)["tokenizer"]
 
         self.param_dtype = torch.bfloat16
         self.dtype = PrecisionType.to_dtype(self.param_dtype)

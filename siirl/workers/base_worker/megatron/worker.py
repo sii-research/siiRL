@@ -53,16 +53,16 @@ class MegatronWorker(Worker):
         from transformers import AutoConfig
 
         from siirl.models.mcore import hf_to_mcore_config
-        from siirl.utils import hf_tokenizer
+        from siirl.models.loader import load_tokenizer
         from siirl.utils.extras.fs import copy_to_local
         from siirl.utils.model_utils.model import update_model_config
 
         # Step 1: initialize the tokenizer
         self.local_path = copy_to_local(model_path)
         if tokenizer_or_path is None:
-            self.tokenizer = hf_tokenizer(self.local_path, trust_remote_code=trust_remote_code)
+            self.tokenizer = load_tokenizer(path=self.local_path)["tokenizer"]
         elif isinstance(tokenizer_or_path, str):
-            self.tokenizer = hf_tokenizer(copy_to_local(tokenizer_or_path), trust_remote_code=trust_remote_code)
+            self.tokenizer = load_tokenizer(path=copy_to_local(tokenizer_or_path))["tokenizer"]
         else:
             self.tokenizer = tokenizer_or_path
 
