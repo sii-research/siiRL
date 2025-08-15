@@ -25,6 +25,4 @@ dacite
 qwen_vl_utils
 scipy
 fastapi
-transformers<=4.51.3
-math-verify
-vllm==0.8.5.post1
+vllm>=0.8.5.post1
