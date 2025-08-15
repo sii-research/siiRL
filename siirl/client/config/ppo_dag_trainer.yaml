@@ -133,6 +133,8 @@ actor_rollout_ref:
       virtual_pipeline_model_parallel_size: null
       sequence_parallel: True
       use_distributed_optimizer: False  # Reference doesn't need optimizer
+      use_dist_checkpointing: False
+      dist_checkpointing_path: ""
       param_dtype: "bfloat16"
       seed: 1
       context_parallel_size: 1
