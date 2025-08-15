@@ -20,18 +20,16 @@ import ray
 from loguru import logger
 from omegaconf import DictConfig
 
-from siirl.workers.dag import DAGConfigLoader
-from siirl.workers.databuffer import init_data_buffer
+from siirl.scheduler.enums import AdvantageEstimator
+from siirl.scheduler.graph_updater import display_node_config, update_task_graph_node_configs
 from siirl.scheduler.launch import RayTrainer
-from siirl.scheduler.graph_updater import display_node_config
-from siirl.utils.params import log_dict_formatted
-from siirl.scheduler.graph_updater import update_task_graph_node_configs
 from siirl.scheduler.process_group_manager import ProcessGroupManager, log_process_group_manager_details
 from siirl.scheduler.task_scheduler import TaskScheduler, log_schedule_assignments
 from siirl.utils.logger.logging_utils import set_basic_config
-from siirl.utils.params import SiiRLArguments, parse_config
+from siirl.utils.params import SiiRLArguments, log_dict_formatted, parse_config
+from siirl.workers.dag import DAGConfigLoader
+from siirl.workers.databuffer import init_data_buffer
 from siirl.workers.environment import EnvironmentConfigLoader
-from siirl.scheduler.enums import AdvantageEstimator
 
 # --- Constants ---
 RAY_RUNTIME_ENV_VARS = {
@@ -61,6 +59,8 @@ def determine_workflow_config(self, siirl_args: SiiRLArguments) -> str:
         AdvantageEstimator.CPGD,
     ]:
         return os.path.join(current_dir, "config/workflow_grpo.yaml")
+    elif siirl_args.algorithm.adv_estimator == AdvantageEstimator.DAPO:
+        return os.path.join(current_dir, "config/workflow_dapo.yaml")
     else:
         raise NotImplementedError
 

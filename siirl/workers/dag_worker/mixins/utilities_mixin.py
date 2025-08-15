@@ -19,26 +19,28 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Union
-from zoneinfo import ZoneInfo
 from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import numpy as np
 import psutil
 import ray
 import torch
 import torch.distributed as dist
 from loguru import logger
-from torch.distributed import ProcessGroup
+from tensordict import TensorDict
+from zoneinfo import ZoneInfo
 
-from siirl.utils.extras.device import get_device_id, get_device_name
 from siirl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
+from siirl.utils.extras.device import get_device_id, get_device_name
 from siirl.utils.metrics.metric_utils import compute_throughout_metrics, compute_timing_metrics
 from siirl.workers.dag.node import NodeRole, NodeType
 from siirl.workers.databuffer import DataProto
-from tensordict import TensorDict
+
 
 class _ReduceOp(Enum):
     """Enumeration for supported reduction operations."""
+
     SUM = dist.ReduceOp.SUM
     MAX = dist.ReduceOp.MAX
     MIN = dist.ReduceOp.MIN
@@ -71,7 +73,8 @@ class DistributedMetricAggregator:
     A helper class to encapsulate the logic for aggregating metrics
     in a distributed environment.
     """
-    def __init__(self, local_metrics: Dict[str, Union[float, List[float], torch.Tensor]], group: dist.ProcessGroup):
+
+    def __init__(self, local_metrics: Dict[str, Union[float, List[float], torch.Tensor]], group: Optional[dist.ProcessGroup]):
         """
         Initializes the aggregator and prepares metrics for reduction.
 
@@ -112,7 +115,7 @@ class DistributedMetricAggregator:
                     local_val = torch.max(value).item() if value.numel() > 0 else 0.0
                 elif is_list:
                     local_val = max(value) if value else 0.0
-                else: # Is a scalar float
+                else:  # Is a scalar float
                     local_val = value
                 buckets[op_type].append((key, local_val))
 
@@ -134,7 +137,7 @@ class DistributedMetricAggregator:
                 elif is_list:
                     local_sum = sum(value) if value else 0.0
                     local_count = len(value)
-                else: # Is a scalar float
+                else:  # Is a scalar float
                     local_sum = value
                     local_count = 1
                 buckets[op_type].append((key, (local_sum, local_count)))
@@ -160,17 +163,19 @@ class DistributedMetricAggregator:
                 sum_tensor = torch.tensor(sums, dtype=torch.float32, device=self.device)
                 count_tensor = torch.tensor(counts, dtype=torch.float32, device=self.device)
 
-                dist.all_reduce(sum_tensor, op=op_type.value, group=self.group)
-                dist.all_reduce(count_tensor, op=op_type.value, group=self.group)
+                if self.group is not None:
+                    dist.all_reduce(sum_tensor, op=op_type.value, group=self.group)
+                    dist.all_reduce(count_tensor, op=op_type.value, group=self.group)
 
                 global_sums = sum_tensor.cpu().numpy()
                 global_counts = count_tensor.cpu().numpy()
 
                 for i, key in enumerate(keys):
                     final_metrics[key] = global_sums[i] / global_counts[i] if global_counts[i] > 0 else 0.0
-            else: # MAX or MIN operations
+            else:  # MAX or MIN operations
                 value_tensor = torch.tensor(values, dtype=torch.float32, device=self.device)
-                dist.all_reduce(value_tensor, op=op_type.value, group=self.group)
+                if self.group is not None:
+                    dist.all_reduce(value_tensor, op=op_type.value, group=self.group)
 
                 global_values = value_tensor.cpu().numpy()
                 for i, key in enumerate(keys):
@@ -182,15 +187,19 @@ class DistributedMetricAggregator:
 class UtilitiesMixin:
     """A collection of utility methods for the DAGWorker, including I/O, logging, and metrics."""
 
-    from typing import Any, Dict, List, Optional
-    import ray
-    import torch.distributed as dist
-    from siirl.utils.params import SiiRLArguments
-    from siirl.workers.dag import TaskGraph
-    from siirl.workers.dag.node import Node, NodeRole
-    from siirl.workers.base_worker import Worker
-    from siirl.dataloader import DataLoaderNode
-    from siirl.workers.databuffer import DataProto
+    # Type annotations for mixin attributes
+    from typing import TYPE_CHECKING, Dict, List, Optional
+
+    if TYPE_CHECKING:
+        import ray
+        import torch.distributed as dist
+
+        from siirl.dataloader import DataLoaderNode
+        from siirl.utils.params import SiiRLArguments
+        from siirl.workers.base_worker import Worker
+        from siirl.workers.dag import TaskGraph
+        from siirl.workers.dag.node import Node, NodeRole
+        from siirl.workers.databuffer import DataProto
 
     enable_perf: bool
     taskgraph: TaskGraph
@@ -214,6 +223,7 @@ class UtilitiesMixin:
     train_critic: Any
     _generate_node_worker_key: Any
     _get_node_dp_info: Any
+    postprocess_sampling: Any
 
     @contextmanager
     def _timer(self, name: str, timing_dict: dict):
@@ -236,6 +246,7 @@ class UtilitiesMixin:
             (NodeRole.ACTOR, False): self.train_actor,
             (NodeRole.CRITIC, True): self.compute_value,
             (NodeRole.CRITIC, False): self.train_critic,
+            (NodeRole.POSTPROCESS_SAMPLING, False): self.postprocess_sampling,
         }
         for node in self.taskgraph.nodes.values():
             if node.node_role in [NodeRole.REWARD, NodeRole.ADVANTAGE]:
@@ -360,8 +371,8 @@ class UtilitiesMixin:
         try:
             self.global_steps = int(os.path.basename(global_step_folder).split("global_step_")[-1])
             logger.info(f"Rank {self._rank}: Resuming from checkpoint. Setting global_steps to {self.global_steps}.")
-        except (ValueError, IndexError):
-            raise ValueError(f"Could not parse global step from checkpoint path: {global_step_folder}")
+        except (ValueError, IndexError) as e:
+            raise ValueError(f"Could not parse global step from checkpoint path: {global_step_folder}") from e
 
         # Load sharded model states for all agents.
         loaded_worker_keys = set()
@@ -404,9 +415,7 @@ class UtilitiesMixin:
         log_parts.extend([f"{k}:{v:.4f}" if isinstance(v, float) else f"{k}:{v}" for k, v in ordered_metrics])
         logger.info(" | ".join(log_parts))
 
-    def _reduce_and_broadcast_metrics(
-        self, local_metrics: Dict[str, Union[float, List[float], torch.Tensor]], group: dist.ProcessGroup
-    ) -> Dict[str, float]:
+    def _reduce_and_broadcast_metrics(self, local_metrics: Dict[str, Union[float, List[float], torch.Tensor]], group: Optional[dist.ProcessGroup]) -> Dict[str, float]:
         """
         Aggregates metrics in a distributed environment using a dedicated helper class.
 
@@ -428,9 +437,9 @@ class UtilitiesMixin:
             final_metrics = {}
             for op_type, data in aggregator.op_buckets.items():
                 for key, value in data:
-                    if op_type == _ReduceOp.SUM: # value is a (sum, count) tuple
+                    if op_type == _ReduceOp.SUM:  # value is a (sum, count) tuple
                         final_metrics[key] = value[0] / value[1] if value[1] > 0 else 0.0
-                    else: # value is a float
+                    else:  # value is a float
                         final_metrics[key] = float(value)
             return final_metrics
 
@@ -466,7 +475,6 @@ class UtilitiesMixin:
         # Components for prompt clip ratio
         prompt_attn_mask = batch.batch["attention_mask"][:, :-max_response_length]
         max_prompt_length = prompt_attn_mask.size(-1)
-
 
         # Prepare a dictionary to hold all local raw values
         local_data = {
@@ -537,7 +545,7 @@ class UtilitiesMixin:
         representative_actor_node = next((n for n in self.taskgraph.nodes.values() if n.node_role == NodeRole.ACTOR), self.first_rollout_node)
         _, _, tp_rank_in_group, _ = self._get_node_dp_info(representative_actor_node)
         local_token_sum = sum(batch.meta_info.get("global_token_num", [0])) if tp_rank_in_group == 0 else 0
-        metrics_to_aggregate["perf/total_num_tokens/mean"] = float(local_token_sum) # Use mean to get a sum
+        metrics_to_aggregate["perf/total_num_tokens/mean"] = torch.tensor(float(local_token_sum))  # Use mean to get a sum
 
         # --- 3. Perform the aggregated, distributed reduction ---
         with self._timer("metrics_aggregation", timing_raw):
@@ -546,27 +554,30 @@ class UtilitiesMixin:
         # Post-process keys and values for the final output
         for key, value in aggregated_metrics.items():
             if "_max" in key and "mem" not in key:
-                 final_metrics[key.replace("_max", "/max")] = value
+                final_metrics[key.replace("_max", "/max")] = value
             elif "_min" in key:
-                 final_metrics[key.replace("_min", "/min")] = value
+                final_metrics[key.replace("_min", "/min")] = value
             else:
-                 final_metrics[key] = value
+                final_metrics[key] = value
 
         # Fix the sum from mean
         if "perf/total_num_tokens/mean" in final_metrics:
-            final_metrics["perf/total_num_tokens"] = final_metrics.pop("perf/total_num_tokens/mean") * dist.get_world_size(self._gather_group)
+            world_size = dist.get_world_size(self._gather_group) if self._gather_group is not None else 1
+            final_metrics["perf/total_num_tokens"] = final_metrics.pop("perf/total_num_tokens/mean") * world_size
 
         # --- 4. Handle special cases like Explained Variance ---
         if use_critic:
             # These components only need to be summed. We can do a direct all_reduce.
             components_to_sum = {k: v for k, v in local_data.items() if k.endswith("_comp")}
             for tensor in components_to_sum.values():
-                 dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=self._gather_group)
+                if self._gather_group is not None:
+                    dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=self._gather_group)
 
             # Now all ranks have the global sums and can compute the final value.
             N = local_data["returns"].numel()
             total_N_tensor = torch.tensor([N], dtype=torch.int64, device=local_data["returns"].device)
-            dist.all_reduce(total_N_tensor, op=dist.ReduceOp.SUM, group=self._gather_group)
+            if self._gather_group is not None:
+                dist.all_reduce(total_N_tensor, op=dist.ReduceOp.SUM, group=self._gather_group)
             global_N = total_N_tensor.item()
 
             if global_N > 0:
@@ -588,13 +599,13 @@ class UtilitiesMixin:
         # --- 5. Add timing and other rank-0-only metrics ---
         # Only rank 0 needs to compute these for logging.
         if self._rank == 0:
-             batch.meta_info["global_token_num"] = [final_metrics.get("perf/total_num_tokens", 0)]
-             final_metrics.update(compute_throughout_metrics(batch, timing_raw, dist.get_world_size()))
-             final_metrics["perf/process_cpu_mem_used_gb"] = psutil.Process(os.getpid()).memory_info().rss / (1024**3)
-             timing_metrics = compute_timing_metrics(batch, timing_raw)
-             for key, value in timing_metrics.items():
-                  if key.startswith("timing_s/"):
-                      final_metrics[key.replace("timing_s/", "perf/delta_time/")] = value
+            batch.meta_info["global_token_num"] = [final_metrics.get("perf/total_num_tokens", 0)]
+            final_metrics.update(compute_throughout_metrics(batch, timing_raw, dist.get_world_size()))
+            final_metrics["perf/process_cpu_mem_used_gb"] = psutil.Process(os.getpid()).memory_info().rss / (1024**3)
+            timing_metrics = compute_timing_metrics(batch, timing_raw)
+            for key, value in timing_metrics.items():
+                if key.startswith("timing_s/"):
+                    final_metrics[key.replace("timing_s/", "perf/delta_time/")] = value
 
         # All ranks return the final metrics. Ranks other than 0 can use them if needed,
         # or just ignore them. This is cleaner than returning an empty dict.
@@ -624,6 +635,10 @@ class UtilitiesMixin:
             if key in self.internal_data_cache:
                 logger.debug(f"Rank {self._rank}: Found data for key '{key}' in local cache. Bypassing Ray.")
                 return self.internal_data_cache.pop(key)
+
+        # If not in cache, try to get from Ray buffers
+        # This is a placeholder implementation - the actual implementation would be more complex
+        return None
 
         # If not in the local cache, fall back to remote Ray buffers.
         logger.debug(f"Rank {self._rank}: Data for key '{key}' not in local cache. Fetching from remote buffers.")
@@ -796,7 +811,7 @@ class UtilitiesMixin:
 
                 logger.info(f"Common performance metrics for step {self.global_steps} successfully written to {filename}")
 
-            except IOError as e:
+            except OSError as e:
                 logger.error(f"Failed to write performance metrics to CSV file {filename}: {e}")
 
     def _log_core_performance_metrics(self, metrics: Dict[str, Any], step: int):
@@ -820,20 +835,20 @@ class UtilitiesMixin:
         log_str = f"\n\n{'=' * 25} RANK({self._rank}): Core Performance Metrics (Step: {step}) {'=' * 25}\n"
 
         # --- Overall Performance ---
-        log_str += f"\n--- ⏱️  Overall Performance ---\n"
+        log_str += "\n--- ⏱️  Overall Performance ---\n"
         log_str += f"  {'Step Time':<28}: {get_metric('perf/time_per_step', 3)} s\n"
         log_str += f"  {'Throughput (tokens/s)':<28}: {get_metric('perf/throughput', 2)}\n"
         log_str += f"  {'Total Tokens in Step':<28}: {get_metric('perf/total_num_tokens', 0)}\n"
 
         # --- Algorithm-Specific Metrics ---
-        log_str += f"\n--- 📈 Algorithm Metrics ---\n"
+        log_str += "\n--- 📈 Algorithm Metrics ---\n"
         log_str += f"  {'Actor Entropy':<28}: {get_metric('actor/entropy_loss', 4)}\n"
         log_str += f"  {'Critic Rewards (Mean/Min/Max)':<28}: {get_metric('critic/rewards/mean', 3)} / {get_metric('critic/rewards/min', 3)} / {get_metric('critic/rewards/max', 3)}\n"
         log_str += f"  {'Critic Scores (Mean/Min/Max)':<28}: {get_metric('critic/score/mean', 3)} / {get_metric('critic/score/min', 3)} / {get_metric('critic/score/max', 3)}\n"
 
         if self.enable_perf:
             # --- Module-wise Timings (Single Column) ---
-            log_str += f"\n--- ⏳ Module-wise Timings (s) ---\n"
+            log_str += "\n--- ⏳ Module-wise Timings (s) ---\n"
             # Dynamically find all delta_time metrics except the total step time
             timing_keys = sorted([k for k in metrics.keys() if k.startswith("perf/delta_time/") and k != "perf/delta_time/step"])
 
@@ -856,7 +871,7 @@ class UtilitiesMixin:
                 log_str += "  No detailed timing metrics available.\n"
 
         # --- Model Flops Utilization (MFU) ---
-        log_str += f"\n--- 🔥 Model Flops Utilization (MFU) ---\n"
+        log_str += "\n--- 🔥 Model Flops Utilization (MFU) ---\n"
         log_str += f"  {'Mean MFU':<28}: {get_metric('perf/mfu/mean', 3)}\n"
         log_str += f"  {'Actor Training MFU':<28}: {get_metric('perf/mfu/actor', 3)}\n"
         # log_str += f"  {'Rollout MFU':<28}: {get_metric('perf/mfu/rollout', 3)}\n"
@@ -864,13 +879,13 @@ class UtilitiesMixin:
         log_str += f"  {'Actor LogProb MFU':<28}: {get_metric('perf/mfu/actor_log_prob', 3)}\n"
 
         # --- Memory Usage ---
-        log_str += f"\n--- 💾 Memory Usage ---\n"
+        log_str += "\n--- 💾 Memory Usage ---\n"
         log_str += f"  {'Max GPU Memory Allocated':<28}: {get_metric('perf/max_memory_allocated_gb', 2)} GB\n"
         log_str += f"  {'Max GPU Memory Reserved':<28}: {get_metric('perf/max_memory_reserved_gb', 2)} GB\n"
         log_str += f"  {'CPU Memory Used':<28}: {get_metric('perf/cpu_memory_used_gb', 2)} GB\n"
 
         # --- Sequence Lengths ---
-        log_str += f"\n--- 📏 Sequence Lengths ---\n"
+        log_str += "\n--- 📏 Sequence Lengths ---\n"
         log_str += f"  {'Prompt Length (Mean/Max)':<28}: {get_metric('prompt/length/mean', 1)} / {get_metric('prompt/length/max', 0)}\n"
         log_str += f"  {'Response Length (Mean/Max)':<28}: {get_metric('response/length/mean', 1)} / {get_metric('response/length/max', 0)}\n"
         log_str += f"  {'Response Clip Ratio':<28}: {get_metric('response/clip_ratio/mean', 4)}\n"
@@ -892,26 +907,17 @@ class UtilitiesMixin:
             return True
         return False
 
-
-    def _batch_apply_pre_template(self, batch, tokenizer, chat_template = "", key_prefix = ""):
-        self_tokenizer = tokenizer['tokenizer']
-        pad_token_id = self_tokenizer.pad_token_id
-        raw_prompts = batch.non_tensor_batch[key_prefix + 'raw_prompt']
+    def _batch_apply_pre_template(self, batch, tokenizer, chat_template="", key_prefix=""):
+        self_tokenizer = tokenizer["tokenizer"]
+        raw_prompts = batch.non_tensor_batch[key_prefix + "raw_prompt"]
         new_prompts = []
         for idx in range(len(raw_prompts)):
-            token_ids = batch.non_tensor_batch[key_prefix + 'raw_prompt_ids'][idx]
+            token_ids = batch.non_tensor_batch[key_prefix + "raw_prompt_ids"][idx]
             prompt = self_tokenizer.decode(token_ids)
-            new_prompt = chat_template.format(prompt = prompt)
-            raw_prompts[idx][0]['content'] = new_prompt
+            new_prompt = chat_template.format(prompt=prompt)
+            raw_prompts[idx][0]["content"] = new_prompt
             new_prompts.append(new_prompt)
-        encode_data = self_tokenizer(
-            new_prompts,
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=self.config.data.max_prompt_length,
-            padding_side="left"
-        )
+        encode_data = self_tokenizer(new_prompts, return_tensors="pt", padding="max_length", truncation=True, max_length=self.config.data.max_prompt_length, padding_side="left")
         encode_data_origin = self_tokenizer(
             new_prompts,
             return_tensors="np",
@@ -919,83 +925,67 @@ class UtilitiesMixin:
             truncation=True,
             max_length=self.config.data.max_prompt_length,
         )
-        attention_mask = encode_data['attention_mask']
-        position_ids =  (attention_mask.cumsum(dim=1) - 1) * attention_mask
-        batch.batch[key_prefix + 'input_ids'] = encode_data['input_ids']
-        batch.batch[key_prefix + 'position_ids'] = position_ids
-        batch.batch[key_prefix + 'attention_mask'] = attention_mask
-        batch.non_tensor_batch[key_prefix + 'raw_prompt_ids_origin'] = batch.non_tensor_batch[key_prefix + 'raw_prompt_ids'].copy()
-        batch.non_tensor_batch[key_prefix + 'raw_prompt_ids'] = encode_data_origin['input_ids']
+        attention_mask = encode_data["attention_mask"]
+        position_ids = (attention_mask.cumsum(dim=1) - 1) * attention_mask
+        batch.batch[key_prefix + "input_ids"] = encode_data["input_ids"]
+        batch.batch[key_prefix + "position_ids"] = position_ids
+        batch.batch[key_prefix + "attention_mask"] = attention_mask
+        batch.non_tensor_batch[key_prefix + "raw_prompt_ids_origin"] = batch.non_tensor_batch[key_prefix + "raw_prompt_ids"].copy()
+        batch.non_tensor_batch[key_prefix + "raw_prompt_ids"] = encode_data_origin["input_ids"]
 
-
-    def _batch_apply_post_template(self, batch, tokenizer, chat_template = "", key_prefix = ""):
+    def _batch_apply_post_template(self, batch, tokenizer, chat_template="", key_prefix=""):
         # add output template
-        self_tokenizer = tokenizer['tokenizer']
+        self_tokenizer = tokenizer["tokenizer"]
         pad_token_id = self_tokenizer.pad_token_id
         new_responses = []
 
-        # remove right pad and aplly post template
+        # remove right pad and apply post template
         # check if only "responses", "input_ids", "attention_mask", "position_ids" will be use in later compute
-        for idx in range(len(batch.batch[key_prefix + 'responses'])):
+        for idx in range(len(batch.batch[key_prefix + "responses"])):
             ## remove left_pad and right_pad
-            non_pad_index = torch.nonzero(batch.batch[key_prefix + 'responses'][idx] != pad_token_id, as_tuple=False)
+            non_pad_index = torch.nonzero(batch.batch[key_prefix + "responses"][idx] != pad_token_id, as_tuple=False)
             first_idx = non_pad_index[0][0].item()
             last_idx = non_pad_index[-1][0].item()
-            response_id = batch.batch[key_prefix + 'responses'][idx][first_idx:last_idx + 1].tolist()
+            response_id = batch.batch[key_prefix + "responses"][idx][first_idx : last_idx + 1].tolist()
             prompt = self_tokenizer.decode(response_id)
-            new_response = chat_template.format(prompt = prompt)
+            new_response = chat_template.format(prompt=prompt)
             new_responses.append(new_response)
 
-
-
-       # add right pad for response
-        encode_data = self_tokenizer(
-            new_responses,
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=self.config.data.max_response_length,
-            padding_side="right"
-        )
+        # add right pad for response
+        encode_data = self_tokenizer(new_responses, return_tensors="pt", padding="max_length", truncation=True, max_length=self.config.data.max_response_length, padding_side="right")
         # generate new response and input_ids
         response_id = encode_data["input_ids"]
-        batch.batch[key_prefix + 'responses'] = response_id
-        batch.batch[key_prefix + 'input_ids'] = torch.cat([batch.batch[key_prefix + 'prompts'], response_id], dim=1)
+        batch.batch[key_prefix + "responses"] = response_id
+        batch.batch[key_prefix + "input_ids"] = torch.cat([batch.batch[key_prefix + "prompts"], response_id], dim=1)
 
         # generate attention_mask and position_id
-        attention_mask = (batch.batch[key_prefix + 'input_ids'] != pad_token_id).long()
-        position_ids =  (attention_mask.cumsum(dim=1) - 1) * attention_mask
-        batch.batch[key_prefix + 'attention_mask'] = attention_mask
-        batch.batch[key_prefix + 'position_ids'] = position_ids
+        attention_mask = (batch.batch[key_prefix + "input_ids"] != pad_token_id).long()
+        position_ids = (attention_mask.cumsum(dim=1) - 1) * attention_mask
+        batch.batch[key_prefix + "attention_mask"] = attention_mask
+        batch.batch[key_prefix + "position_ids"] = position_ids
 
-
-
-    def _map_rollout_out2input(self, batch: DataProto, tokenizer, next_prefix = "", cur_prefix = "") -> DataProto:
-        self_tokenizer = tokenizer['tokenizer']
+    def _map_rollout_out2input(self, batch: DataProto, tokenizer, next_prefix="", cur_prefix="") -> DataProto:
+        self_tokenizer = tokenizer["tokenizer"]
         next_batch = TensorDict(
             {
-                next_prefix + 'input_ids': batch.batch[cur_prefix + 'input_ids'],
-                next_prefix + 'attention_mask': batch.batch[cur_prefix + 'attention_mask'],
-                next_prefix + 'position_ids': batch.batch[cur_prefix + 'position_ids'],  # here input_ids become the whole sentences
+                next_prefix + "input_ids": batch.batch[cur_prefix + "input_ids"],
+                next_prefix + "attention_mask": batch.batch[cur_prefix + "attention_mask"],
+                next_prefix + "position_ids": batch.batch[cur_prefix + "position_ids"],  # here input_ids become the whole sentences
             },
-            batch_size = batch.batch[cur_prefix + 'input_ids'].size()[0]
+            batch_size=batch.batch[cur_prefix + "input_ids"].size()[0],
         )
-        non_tensor_batch = {
-            next_prefix + 'raw_prompt':batch.non_tensor_batch[cur_prefix + 'raw_prompt'],
-            next_prefix + 'reward_model':batch.non_tensor_batch[cur_prefix + 'reward_model'],
-            next_prefix + 'data_source':batch.non_tensor_batch[cur_prefix + 'data_source']
-        }
+        non_tensor_batch = {next_prefix + "raw_prompt": batch.non_tensor_batch[cur_prefix + "raw_prompt"], next_prefix + "reward_model": batch.non_tensor_batch[cur_prefix + "reward_model"], next_prefix + "data_source": batch.non_tensor_batch[cur_prefix + "data_source"]}
         # get no pad new_raw_prompt_ids
 
-        non_tensor_batch[next_prefix + 'raw_prompt_ids'] = []
-        bs = batch.batch[cur_prefix + 'input_ids'].size()[0]
+        non_tensor_batch[next_prefix + "raw_prompt_ids"] = []
+        bs = batch.batch[cur_prefix + "input_ids"].size()[0]
         for idx in range(bs):
-            pad_id = batch.batch[cur_prefix + 'responses'][idx]
+            pad_id = batch.batch[cur_prefix + "responses"][idx]
             non_pad_index = torch.nonzero(pad_id != self_tokenizer.pad_token_id, as_tuple=False)
             first_idx = non_pad_index[0][0].item()
             last_idx = non_pad_index[-1][0].item()
-            non_pad_id = pad_id[first_idx:last_idx + 1].tolist()
-            non_tensor_batch[next_prefix + 'raw_prompt_ids'].append(batch.non_tensor_batch[cur_prefix + 'raw_prompt_ids_origin'][idx] + non_pad_id)
-        non_tensor_batch[next_prefix + 'raw_prompt_ids'] = np.array(non_tensor_batch[next_prefix + 'raw_prompt_ids'], dtype=object )
-        new_batch = DataProto(batch = next_batch, non_tensor_batch=non_tensor_batch, meta_info = {})
+            non_pad_id = pad_id[first_idx : last_idx + 1].tolist()
+            non_tensor_batch[next_prefix + "raw_prompt_ids"].append(batch.non_tensor_batch[cur_prefix + "raw_prompt_ids_origin"][idx] + non_pad_id)
+        non_tensor_batch[next_prefix + "raw_prompt_ids"] = np.array(non_tensor_batch[next_prefix + "raw_prompt_ids"], dtype=object)
+        new_batch = DataProto(batch=next_batch, non_tensor_batch=non_tensor_batch, meta_info={})
         batch.union(new_batch)
