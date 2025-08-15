@@ -28,7 +28,7 @@ from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
 
 from siirl import DataProto
 from siirl.models.mcore.weight_converter import McoreToHFWeightConverterBase
-from siirl.workers.databuffer import all_gather_data_proto
+from siirl.workers.databuffer.protocol import all_gather_data_proto
 from vllm import LLM
 from vllm.distributed import parallel_state as vllm_ps
 from siirl.utils.debug import GPUMemoryLogger
@@ -37,6 +37,8 @@ from siirl.utils.megatron.megatron_utils import (
     get_model,
     per_tensor_generator,
     unwrap_model,
+    load_megatron_model_to_gpu,
+    offload_megatron_model_to_cpu,
 )
 from siirl.utils.megatron.memory_buffer import (
     build_memory_buffer,
@@ -45,6 +47,7 @@ from siirl.utils.megatron.memory_buffer import (
 )
 from siirl.utils.model_utils.torch_functional import check_device_is_available
 from siirl.utils.model_utils.vllm_utils import patch_vllm_moe_model_weight_loader
+from siirl.utils.memory_utils import aggressive_empty_cache
 
 from siirl.workers.sharding_manager.base import BaseShardingManager
 
@@ -261,7 +264,7 @@ Megatron Hybrid Engine:
 _MICRO_DATA_PARALLEL_GROUP = None
 
 
-class MegatronVLLMShardingManager(BaseShardingManager):
+class MultiAgentMegatronVLLMShardingManager(BaseShardingManager):
     @check_device_is_available()
     def __init__(
         self,
@@ -272,6 +275,7 @@ class MegatronVLLMShardingManager(BaseShardingManager):
         layer_name_mapping,
         weight_converter: McoreToHFWeightConverterBase,
         module: AllGatherPPModel = None,
+        offload_param: bool = False,
     ):
         from megatron.core import parallel_state as mpu
 
@@ -300,9 +304,13 @@ class MegatronVLLMShardingManager(BaseShardingManager):
         self.train_etp_group = mpu.get_expert_tensor_parallel_group()
         self.need_tp_reshard = self.train_tp_size != self.infer_tp_size
         self.train_tp_larger = self.train_tp_size > self.infer_tp_size
+        self.offload_param = offload_param
 
     @GPUMemoryLogger(role="megatron vllm sharding_manager", logger=logger)
     def __enter__(self):
+        aggressive_empty_cache(force_sync=True)
+        if self.offload_param:
+            load_megatron_model_to_gpu(self.actor_module, load_grad=False)
         # vllm > 0.7.2
         if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
             self.inference_engine.wake_up(tags=["weights"])
@@ -321,9 +329,13 @@ class MegatronVLLMShardingManager(BaseShardingManager):
         info = f"vLLM load weights, loaded_params: {len(loaded_params)}"
         logger.info(info)
 
+        if self.offload_param:
+            offload_megatron_model_to_cpu(self.actor_module)
+            aggressive_empty_cache(force_sync=True)
+        
         # (vermouth1992) We move wake up kv cache after we release model weights. Need refactor to make API cleaner
-        # if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
-        #     self.inference_engine.wake_up(tags=["kv_cache"])
+        if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
+            self.inference_engine.wake_up(tags=["kv_cache"])
 
     @GPUMemoryLogger(role="megatron vllm sharding_manager", logger=logger)
     def __exit__(self, exc_type, exc_value, traceback):
@@ -332,18 +344,3 @@ class MegatronVLLMShardingManager(BaseShardingManager):
             model.train()
 
         get_torch_device().empty_cache()
-
-    @GPUMemoryLogger(role="megatron vllm sharding_manager", logger=logger)
-    def preprocess_data(self, data: DataProto) -> DataProto:
-        # DP_COMPUTE_PROTO: all training ranks are dp, the same as fsdp
-        if self.infer_tp_size == 1:
-            return data
-        all_gather_data_proto(data, self.infer_tp_group)
-        return data
-
-    @GPUMemoryLogger(role="megatron vllm sharding_manager", logger=logger)
-    def postprocess_data(self, data: DataProto) -> DataProto:
-        # DP_COMPUTE_PROTO: all training ranks are dp, the same as fsdp
-        if self.infer_tp_size == 1:
-            return data
-        return data.chunk(chunks=self.infer_tp_size)[self.infer_tp_rank]

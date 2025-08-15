@@ -1,4 +1,5 @@
 # Copyright 2024 Bytedance Ltd. and/or its affiliates
+# Copyright 2025, Infrawaves. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +14,7 @@
 # limitations under the License.
 
 from siirl.workers.base_worker.base.worker import DistGlobalInfo, DistRankInfo, Worker
+from siirl.utils.params import ActorRolloutRefArguments
 
 
 class MegatronWorker(Worker):
@@ -51,16 +53,16 @@ class MegatronWorker(Worker):
         from transformers import AutoConfig
 
         from siirl.models.mcore import hf_to_mcore_config
-        from siirl.utils import hf_tokenizer
+        from siirl.models.loader import load_tokenizer
         from siirl.utils.extras.fs import copy_to_local
         from siirl.utils.model_utils.model import update_model_config
 
         # Step 1: initialize the tokenizer
         self.local_path = copy_to_local(model_path)
         if tokenizer_or_path is None:
-            self.tokenizer = hf_tokenizer(self.local_path, trust_remote_code=trust_remote_code)
+            self.tokenizer = load_tokenizer(path=self.local_path)["tokenizer"]
         elif isinstance(tokenizer_or_path, str):
-            self.tokenizer = hf_tokenizer(copy_to_local(tokenizer_or_path), trust_remote_code=trust_remote_code)
+            self.tokenizer = load_tokenizer(path=copy_to_local(tokenizer_or_path))["tokenizer"]
         else:
             self.tokenizer = tokenizer_or_path
 
@@ -83,13 +85,19 @@ class MegatronWorker(Worker):
 
         def add_optimization_config_to_tf_config(tf_config):
             # add optimization config to tf_config, e.g. checkpointing
-            if self.config.model.get("enable_gradient_checkpointing", False):
-                gradient_checkpointing_cfg = dict(self.config.model.get("gradient_checkpointing_kwargs", dict()))
-                tf_config.recompute_method = gradient_checkpointing_cfg.get("activations_checkpoint_method", "full")
-                tf_config.recompute_granularity = gradient_checkpointing_cfg.get("activations_checkpoint_granularity", "full")
-                tf_config.recompute_num_layers = gradient_checkpointing_cfg.get("activations_checkpoint_num_layers", -1)
-            if megatron_config := self.config.get("megatron", {}):
-                if extra := megatron_config.get("extra", {}):
+            if self.config.model.enable_gradient_checkpointing:
+                gradient_checkpointing_cfg = dict(self.config.model.gradient_checkpointing_kwargs)
+                tf_config.recompute_method = gradient_checkpointing_cfg.get("activations_checkpoint_method", "uniform")
+                tf_config.recompute_granularity = gradient_checkpointing_cfg.get("activations_checkpoint_granularity", None)
+                tf_config.recompute_num_layers = gradient_checkpointing_cfg.get("activations_checkpoint_num_layers", 1)
+            
+            if isinstance(self.config, ActorRolloutRefArguments):
+                megatron_config = self.config.actor.megatron
+            else:
+                megatron_config = self.config.megatron
+
+            if megatron_config:
+                if extra := megatron_config.extra:
                     for k, v in extra.items():
                         setattr(tf_config, k, v)
 

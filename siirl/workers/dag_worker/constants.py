@@ -35,6 +35,8 @@ class DAGConstants:
     INTERN_CONFIG: str = "intern_config"
     # Framework strategy names
     FSDP_STRATEGIES: List[str] = ["fsdp", "fsdp2"]
+    MEGATRON_STRATEGYS: List[str] = ["megatron"]
+    # keep this for backward compatibility
     MEGATRON_STRATEGY: str = "megatron"
     # Metric group order
     METRIC_GROUP_ORDER = ["step", "training", "actor", "critic", "perf", "response_length", "response", "prompt_length", "prompt", "global_seqlen", "timing_s", "timing_per_token_ms", "perf/total_num_tokens", "perf/time_per_step", "perf/throughput"]
