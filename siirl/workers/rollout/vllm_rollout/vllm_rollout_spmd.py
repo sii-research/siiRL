@@ -171,7 +171,10 @@ class vLLMRollout(BaseRollout):
             os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
             os.environ["TORCH_CUDA_ARCH_LIST"] = f"{cap[0]}.{cap[1]}+PTX"
 
-        # the rollout's config `free_cache_engine` controls wether 
+        # NOTE: The rollout's config `free_cache_engine` controls if the rollout engine 
+        # should free model weights and KV cache memory after each `generate_sequences` call, which corresponds
+        # to the `enable_sleep_mode` argument of vLLM's `LLM` class.
+        # see: https://docs.vllm.ai/en/latest/features/sleep_mode.html
         self.inference_engine = LLM(
             model=model_path,
             enable_sleep_mode=config.free_cache_engine,
