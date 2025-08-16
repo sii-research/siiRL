@@ -25,7 +25,6 @@ from loguru import logger
 
 from siirl.dataloader import DataLoaderNode
 from siirl.models.loader import load_tokenizer
-from siirl.models.mcore import get_mcore_weight_converter
 from siirl.workers.base_worker import Worker
 from siirl.scheduler.reward import create_reward_manager
 from siirl.workers.dag.node import NodeRole, NodeType
@@ -523,6 +522,8 @@ class InitializationMixin:
         }
 
         # Use lazy import and defer execution.
+        import siirl.models
+        
         sharding_manager_map = {
             ("fsdp", "vllm"): (
                 "siirl.workers.sharding_manager.fsdp_vllm.MultiAgentFSDPVLLMShardingManager",
@@ -563,7 +564,7 @@ class InitializationMixin:
                     "model_config": actor_worker.actor_model_config,
                     "transformer_config": actor_worker.tf_config,
                     "layer_name_mapping": layer_name_mapping,
-                    "weight_converter": get_mcore_weight_converter(actor_worker.actor_model_config, actor_worker.dtype),
+                    "weight_converter": siirl.models.mcore.get_mcore_weight_converter(actor_worker.actor_model_config, actor_worker.dtype),
                     "offload_param": actor_worker._is_offload_param,
                 },
             ),
@@ -576,7 +577,7 @@ class InitializationMixin:
                     "model_config": actor_worker.actor_model_config,
                     "rollout_config": rollout_worker.config.rollout,
                     "layer_name_mapping": layer_name_mapping,
-                    "weight_converter": get_mcore_weight_converter(actor_worker.actor_model_config, actor_worker.dtype),
+                    "weight_converter": siirl.models.mcore.get_mcore_weight_converter(actor_worker.actor_model_config, actor_worker.dtype),
                     "multi_stage_wake_up": rollout_worker.config.rollout.multi_stage_wake_up,
                 },
             ),
