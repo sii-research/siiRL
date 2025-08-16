@@ -117,7 +117,8 @@ class vLLMRollout(BaseRollout):
         assert tensor_parallel_size <= torch.distributed.get_world_size(), "tensor parallel size should be less than or equal to the world size"
         max_num_batched_tokens = self.config.max_num_batched_tokens
 
-        if kwargs.get("train_tp") is not None:
+        use_megatron_backend: bool = kwargs.get("train_tp") is not None
+        if use_megatron_backend:
             # deployed with megatron
             os.environ["CUDA_TIMER_STREAM_KAFKA_ENABLE"] = "0"
             os.environ["MEGATRON_IMPORT_TIMERS"] = "0"
@@ -177,7 +178,7 @@ class vLLMRollout(BaseRollout):
         # see: https://docs.vllm.ai/en/latest/features/sleep_mode.html
         self.inference_engine = LLM(
             model=model_path,
-            enable_sleep_mode=config.free_cache_engine,
+            enable_sleep_mode=config.free_cache_engine if use_megatron_backend else True,
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="external_launcher",
             dtype=config.dtype,
