@@ -31,10 +31,6 @@ def set_basic_config():
     logger.level("CRITICAL", color="<bold white on red>")
     # logger.level("ERROR", color="<red><bold>")
     # logger.level("WARNING", color="<yellow>")
-    
-    # Get log level from environment variable, default to INFO
-    console_log_level = os.getenv("SIIRL_LOG_VERBOSITY", "INFO").upper()
-    
     logger.add(
         sys.stderr,
         format=(
@@ -47,7 +43,7 @@ def set_basic_config():
         ),
         enqueue=True,
         colorize=True,
-        level=console_log_level,
+        level="INFO",
     )
     os.makedirs(SIIRL_LOG_DIRCTORY, exist_ok=True)
 

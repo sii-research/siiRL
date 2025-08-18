@@ -1,5 +1,4 @@
 # Copyright 2025, Shanghai Innovation Institute. All rights reserved.
-# Copyright 2025, Infrawaves. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -88,61 +87,19 @@ class DistributedMetricAggregator:
             self.device = "cpu"
         self.op_buckets = self._bucket_local_metrics(local_metrics)
 
-    def _bucket_local_metrics(self, metrics: Dict, expected_keys: set = None) -> defaultdict:
+    def _bucket_local_metrics(self, metrics: Dict) -> defaultdict:
         """
         Parses local metrics and groups them by the required reduction operation.
         This step also performs local pre-aggregation on lists and tensors.
         This version correctly handles multi-element tensors as input.
-        
-        For Pipeline Parallel (PP), different stages may have different metrics.
-        This method ensures all ranks have the same set of keys by adding missing
-        metrics with default values (0.0) to avoid tensor shape mismatch in all_reduce.
 
-        Args:
-            metrics: Local metrics dictionary
-            expected_keys: Optional set of all expected metric keys across all ranks
-            
         Returns:
             A defaultdict containing keys and pre-aggregated values,
             grouped by reduction operation type (_ReduceOp).
         """
         buckets = defaultdict(list)
-        
-        # If expected_keys is provided, ensure all ranks have the same metrics
-        if expected_keys:
-            # define metrics that should be excluded from non-computing ranks
-            # these are training-specific metrics that only the last PP stage should contribute
-            training_metrics = {
-                'actor/pg_loss', 'actor/kl_loss', 'actor/entropy_loss', 'actor/ppo_kl',
-                'actor/pg_clipfrac', 'actor/pg_clipfrac_lower', 'actor/kl_coef',
-                'critic/vf_loss', 'critic/clipfrac'
-            }
-
-            # Token counting metrics should only be contributed by PP rank 0 to avoid double counting
-            token_counting_metrics = {
-                'perf/total_num_tokens/mean'
-            }
-            
-            for key in expected_keys:
-                if key not in metrics:
-                    # for training metrics: use None to indicate this rank shouldn't contribute
-                    # for other metrics: use 0.0 as default
-                    if any(key.startswith(prefix) for prefix in training_metrics) or key in token_counting_metrics:
-                        # mark as None - will be handled specially in aggregation
-                        metrics[key] = None
-                    else:
-                        # performance metrics get default value 0.0
-                        metrics[key] = 0.0
-        
         for key in sorted(metrics.keys()):
             value = metrics[key]
-            
-            # Skip None values (training metrics from non-contributing ranks)
-            if value is None:
-                # for training metrics that this rank (those ranks that are not the last PP stage) shouldn't contribute to,
-                # add with count=0 so it doesn't affect the average
-                buckets[_ReduceOp.SUM].append((key, (0.0, 0)))
-                continue
 
             # Determine if the value is a list or a tensor that needs aggregation
             is_list = isinstance(value, list)
@@ -326,13 +283,13 @@ class UtilitiesMixin:
                 saved_worker_keys.add(node_worker_key)
 
         # In each DP group, only TP rank 0 saves the DataLoader state to avoid redundancy.
-        _, dp_rank, tp_rank, _, pp_rank, _ = self._get_node_dp_info(self.first_rollout_node)
-        if tp_rank == 0 and pp_rank == 0:
+        _, dp_rank, tp_rank, _ = self._get_node_dp_info(self.first_rollout_node)
+        if tp_rank == 0:
             # The filename is based on the DP rank to distinguish different data partitions.
             dataloader_path = os.path.join(step_dir, f"data_dp_rank_{dp_rank}.pt")
             dataloader_state = self.dataloader.state_dict()
             torch.save(dataloader_state, dataloader_path)
-            logger.debug(f"Rank {self._rank} (DP_Rank {dp_rank}, TP_Rank {tp_rank}, PP_Rank {pp_rank}): Saved dataloader state.")
+            logger.debug(f"Rank {self._rank} (DP_Rank {dp_rank}, TP_Rank {tp_rank}): Saved dataloader state.")
 
         # --- 2. All ranks wait for I/O to complete ---
         # This barrier ensures all data is written BEFORE committing the checkpoint via the tracker file.
@@ -427,7 +384,7 @@ class UtilitiesMixin:
                     logger.warning(f"Rank {self._rank}: Checkpoint for agent {node.agent_group}'s {node.node_role.name} not found at {checkpoint_path}. Weights will be from initialization.")
 
         # Load dataloader state. All ranks in a DP group load from the same file.
-        _, dp_rank, _, _, _, _ = self._get_node_dp_info(self.first_rollout_node)
+        _, dp_rank, _, _ = self._get_node_dp_info(self.first_rollout_node)
         dataloader_path = os.path.join(global_step_folder, f"data_dp_rank_{dp_rank}.pt")
         if os.path.exists(dataloader_path):
             dataloader_state = torch.load(dataloader_path, map_location="cpu")
@@ -452,8 +409,6 @@ class UtilitiesMixin:
     ) -> Dict[str, float]:
         """
         Aggregates metrics in a distributed environment using a dedicated helper class.
-        For Pipeline Parallel setups, ensures all ranks have the same metric keys to avoid
-        tensor shape mismatch during all_reduce operations.
 
         Args:
             local_metrics: A dictionary of metrics on each rank.
@@ -479,21 +434,8 @@ class UtilitiesMixin:
                         final_metrics[key] = float(value)
             return final_metrics
 
-        # In Megatron with Pipeline Parallel:
-        # 1. First gather all metric keys from all ranks to ensure consistency
-        local_keys = set(local_metrics.keys())
-        all_keys_list = [None] * world_size
-        dist.all_gather_object(all_keys_list, local_keys, group=group)
-        
-        # 2. Union all keys to get the complete set of expected metrics
-        all_expected_keys = set()
-        for keys_set in all_keys_list:
-            all_expected_keys.update(keys_set)
-        
-        # 3. Use the aggregator with unified keys to perform communication
+        # In a distributed setting, use the aggregator to perform communication.
         aggregator = DistributedMetricAggregator(local_metrics, group)
-        # NOTE(Ping Zhang): Ensure all ranks have the same metrics by adding missing ones with default values
-        aggregator.op_buckets = aggregator._bucket_local_metrics(local_metrics, all_expected_keys)
         return aggregator.aggregate_and_get_results()
 
     def _prepare_local_batch_metrics(self, batch: DataProto, use_critic: bool = True) -> Dict[str, torch.Tensor]:
@@ -593,14 +535,9 @@ class UtilitiesMixin:
                 metrics_to_aggregate[f"{prefix}/mean"] = local_data[key]
 
         representative_actor_node = next((n for n in self.taskgraph.nodes.values() if n.node_role == NodeRole.ACTOR), self.first_rollout_node)
-        _, _, _, _, pp_rank_in_group, _ = self._get_node_dp_info(representative_actor_node)
-        # (1) For TP: we have already taken TP into account when we set global_token_num in compute_reward.
-        # see: siirl/workers/dag_worker/mixins/node_executors_mixin.py:compute_reward
-        # (2) For PP: only PP rank 0 contributes to avoid double counting within PP groups
-        # The aggregation will average across DP groups and multiply by world size to get global estimate
-        if pp_rank_in_group == 0:
-            local_token_sum = sum(batch.meta_info.get("global_token_num", [0]))
-            metrics_to_aggregate["perf/total_num_tokens/mean"] = float(local_token_sum)
+        _, _, tp_rank_in_group, _ = self._get_node_dp_info(representative_actor_node)
+        local_token_sum = sum(batch.meta_info.get("global_token_num", [0])) if tp_rank_in_group == 0 else 0
+        metrics_to_aggregate["perf/total_num_tokens/mean"] = float(local_token_sum) # Use mean to get a sum
 
         # --- 3. Perform the aggregated, distributed reduction ---
         with self._timer("metrics_aggregation", timing_raw):
@@ -663,104 +600,52 @@ class UtilitiesMixin:
         # or just ignore them. This is cleaner than returning an empty dict.
         return final_metrics
 
-    # TODO(Ping Zhang): revisit this for Megatron PP
     def put_data_to_buffers(self, key: str, data: DataProto, source_dp_size: int, dest_dp_size: int, timing_raw: Dict[str, float]):
         """Puts data into shared Ray plasma store for consumption by downstream nodes."""
-        try:
-            logger.debug(f"Rank {self._rank}: Starting put_data_to_buffers for key '{key}', source_dp_size={source_dp_size}, dest_dp_size={dest_dp_size}")
-            
-            data.meta_info["padding_values"] = {"input_ids": self.validate_tokenizer.pad_token_id, "responses": self.validate_tokenizer.pad_token_id, "labels": -100, "attention_mask": 0, "response_mask": 0}
-            data.meta_info["padding_side"] = self.validate_tokenizer.padding_side
+        data.meta_info["padding_values"] = {"input_ids": self.validate_tokenizer.pad_token_id, "responses": self.validate_tokenizer.pad_token_id, "labels": -100, "attention_mask": 0, "response_mask": 0}
+        data.meta_info["padding_side"] = self.validate_tokenizer.padding_side
 
-            if source_dp_size == dest_dp_size:
-                with self._timer(f"put_intern_data_{key}", timing_raw):
-                    logger.debug(f"Rank {self._rank}: DP size match ({source_dp_size}). Storing data for key '{key}' in local cache.")
-                    self.internal_data_cache[key] = data
-                    logger.debug(f"Rank {self._rank}: Successfully stored data for key '{key}' in local cache.")
-            else:
-                logger.debug(f"Rank {self._rank}: DP size mismatch (source={source_dp_size}, dest={dest_dp_size}). Using Ray buffers for key '{key}'.")
-                try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    logger.debug(f"Rank {self._rank}: Creating new event loop for key '{key}'")
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
+        if source_dp_size == dest_dp_size:
+            with self._timer(f"put_intern_data_{key}", timing_raw):
+                logger.debug(f"Rank {self._rank}: DP size match. Storing data for key '{key}' in local cache.")
+                self.internal_data_cache[key] = data
+        else:
+            loop = asyncio.get_event_loop()
+            with self._timer(f"put_ray_proto_data_{key}", timing_raw):
+                chunks = data.chunk(chunks=len(self.data_buffers))
+                put_futures = [buf.put.remote(key, chunk) for buf, chunk in zip(self.data_buffers, chunks)]
+            with self._timer(f"put_proto_data_{key}", timing_raw):
+                loop.run_until_complete(asyncio.gather(*put_futures))
 
-                with self._timer(f"put_ray_proto_data_{key}", timing_raw):
-                    chunks = data.chunk(chunks=len(self.data_buffers))
-                    logger.debug(f"Rank {self._rank}: Created {len(chunks)} chunks for key '{key}'")
-                    put_futures = [buf.put.remote(key, chunk) for buf, chunk in zip(self.data_buffers, chunks)]
-                
-                with self._timer(f"put_proto_data_{key}", timing_raw):
-                    try:
-                        loop.run_until_complete(asyncio.gather(*put_futures))
-                        logger.debug(f"Rank {self._rank}: Successfully stored all chunks for key '{key}' in Ray buffers")
-                    except Exception as e:
-                        logger.error(f"Rank {self._rank}: Failed to store chunks for key '{key}' in Ray buffers: {e}")
-                        raise
-        except Exception as e:
-            logger.error(f"Rank {self._rank}: Unexpected error in put_data_to_buffers for key '{key}': {e}")
-            raise  # Re-raise the exception to maintain the original behavior
-
-    # TODO(Ping Zhang): revisit this for Megatron PP
     def get_data_from_buffers(self, key: str, my_current_dp_rank: int, my_current_dp_size: int, timing_raw: Dict[str, float]) -> Optional[DataProto]:
         """Gets data from shared buffers that was produced by an upstream node."""
-        try:
-            # First, check the high-speed internal cache.
-            with self._timer(f"get_intern_data_{key}", timing_raw):
-                if key in self.internal_data_cache:
-                    logger.debug(f"Rank {self._rank}: Found data for key '{key}' in local cache. Bypassing Ray.")
-                    return self.internal_data_cache.pop(key)
+        # First, check the high-speed internal cache.
+        with self._timer(f"get_intern_data_{key}", timing_raw):
+            if key in self.internal_data_cache:
+                logger.debug(f"Rank {self._rank}: Found data for key '{key}' in local cache. Bypassing Ray.")
+                return self.internal_data_cache.pop(key)
 
-            # If not in the local cache, fall back to remote Ray buffers.
-            logger.debug(f"Rank {self._rank}: Data for key '{key}' not in local cache. Fetching from remote buffers.")
-            if not self.data_buffers:
-                logger.error(f"Rank {self._rank}: data_buffers is None, cannot get data for key '{key}'")
-                return None
-
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                logger.debug(f"Rank {self._rank}: Creating new event loop for key '{key}'")
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-
-            try:
-                logger.debug(f"Rank {self._rank}: Attempting Ray remote call for key '{key}'")
-                first_item = loop.run_until_complete(self.data_buffers[0].get.remote(key, my_current_dp_rank, my_current_dp_size))
-                logger.debug(f"Rank {self._rank}: Completed Ray remote call for key '{key}', got result type: {type(first_item)}")
-            except Exception as e:
-                logger.error(f"Rank {self._rank}: Error getting data from Ray buffer for key '{key}': {e}")
-                return None
-
-            if first_item is None:
-                logger.error(f"Rank {self._rank}: first_item is None for key '{key}'")
-                return None
-
-            if isinstance(first_item, ray.ObjectRef):
-                with self._timer(f"get_ref_data_{key}", timing_raw):
-                    try:
-                        return loop.run_until_complete(first_item)
-                    except Exception as e:
-                        logger.error(f"Rank {self._rank}: Error resolving Ray ObjectRef for key '{key}': {e}")
-                        return None
-            elif isinstance(first_item, DataProto):
-                try:
-                    # If data was chunked, retrieve all chunks and concatenate
-                    with self._timer(f"get_proto_data_{key}", timing_raw):
-                        other_chunks_futures = [b.get.remote(key, my_current_dp_rank, my_current_dp_size) for b in self.data_buffers[1:]]
-                        other_chunks = loop.run_until_complete(asyncio.gather(*other_chunks_futures))
-                    with self._timer(f"get_proto_data_concat_chunks_{key}", timing_raw):
-                        return DataProto.concat([first_item] + other_chunks)
-                except Exception as e:
-                    logger.error(f"Rank {self._rank}: Error concatenating chunks for key '{key}': {e}")
-                    return None
-            logger.error(f"Rank {self._rank}: first_item type {type(first_item)} is neither ray.ObjectRef nor DataProto for key '{key}'")
+        # If not in the local cache, fall back to remote Ray buffers.
+        logger.debug(f"Rank {self._rank}: Data for key '{key}' not in local cache. Fetching from remote buffers.")
+        if not self.data_buffers:
             return None
 
-        except Exception as e:
-            logger.error(f"Rank {self._rank}: Unexpected error in get_data_from_buffers for key '{key}': {e}")
+        loop = asyncio.get_event_loop()
+        first_item = loop.run_until_complete(self.data_buffers[0].get.remote(key, my_current_dp_rank, my_current_dp_size))
+        if first_item is None:
             return None
+
+        if isinstance(first_item, ray.ObjectRef):
+            with self._timer(f"get_ref_data_{key}", timing_raw):
+                return loop.run_until_complete(first_item)
+        elif isinstance(first_item, DataProto):
+            # If data was chunked, retrieve all chunks and concatenate
+            with self._timer(f"get_proto_data_{key}", timing_raw):
+                other_chunks_futures = [b.get.remote(key, my_current_dp_rank, my_current_dp_size) for b in self.data_buffers[1:]]
+                other_chunks = loop.run_until_complete(asyncio.gather(*other_chunks_futures))
+            with self._timer(f"get_proto_data_concat_chunks_{key}", timing_raw):
+                return DataProto.concat([first_item] + other_chunks)
+        return None
 
     def reset_data_buffer(self, all_keys: List[str]):
         """
@@ -998,26 +883,14 @@ class UtilitiesMixin:
         logger.info(log_str)
 
     def _whether_put_data(self, cur_tp_rank, next_dp_size, cur_dp_size, cur_node, next_node) -> bool:
-        # Determine whether to put data into buffer based on node configuration
-        result = False
-        reason = "No condition met"
-        
+        # Only TP rank 0 or next nodes is COMPUTE node or multi-agent rollout, puts data to avoid duplication
         if cur_tp_rank == 0:
-            result = True
-            reason = "Current TP rank is 0"
-        elif next_dp_size == cur_dp_size:
-            if next_node.node_type in [NodeType.COMPUTE, NodeType.MODEL_TRAIN]:
-                result = True
-                reason = f"DP sizes match and next node is {next_node.node_type}"
-        elif cur_node.node_role == next_node.node_role and cur_node.node_role == NodeRole.ROLLOUT:
-            result = True
-            reason = "Both nodes are ROLLOUT"
-            
-        logger.debug(f"Rank {self._rank}: _whether_put_data decision for {cur_node.node_id}->{next_node.node_id}: {result} ({reason}). "
-                    f"cur_tp_rank={cur_tp_rank}, next_dp_size={next_dp_size}, cur_dp_size={cur_dp_size}, "
-                    f"cur_node_type={cur_node.node_type}, next_node_type={next_node.node_type}, "
-                    f"cur_node_role={cur_node.node_role}, next_node_role={next_node.node_role}")
-        return result
+            return True
+        if next_dp_size == cur_dp_size and next_node.node_type == NodeType.COMPUTE:
+            return True
+        if cur_node.node_role == next_node.node_role and cur_node.node_role == NodeRole.ROLLOUT:
+            return True
+        return False
 
 
     def _batch_apply_pre_template(self, batch, tokenizer, chat_template = "", key_prefix = ""):

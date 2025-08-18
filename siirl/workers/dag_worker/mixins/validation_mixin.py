@@ -92,13 +92,13 @@ class ValidationMixin:
         self._dump_validation_generations(all_scored_results)
         dist.barrier(self._gather_group)
         
-        _, _, tp_rank, _, pp_rank, _ = self._get_node_dp_info(self.first_rollout_node)
+        _, _, tp_rank, _= self._get_node_dp_info(self.first_rollout_node)
         # Gather all lightweight payloads to rank 0
         with self._timer("gather_payloads", self.timers):
             # Create payloads from the local results before gathering
             payloads_for_metrics = []
-            if tp_rank == 0 and pp_rank == 0:
-                # Only the master rank of the TP group (tp_rank=0) and first PP stage (pp_rank=0) prepares the payload.
+            if tp_rank == 0:
+                # Only the master rank of the TP group (tp_rank=0) prepares the payload.
                 payloads_for_metrics = [
                     ValidationPayload(r.input_text, r.score, r.data_source, r.extra_rewards) for r in all_scored_results
                 ]

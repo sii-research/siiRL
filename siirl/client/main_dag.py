@@ -36,9 +36,8 @@ from siirl.scheduler.enums import AdvantageEstimator
 # --- Constants ---
 RAY_RUNTIME_ENV_VARS = {
     "TOKENIZERS_PARALLELISM": "true",
+    "NCCL_DEBUG": "WARN",
     "VLLM_LOGGING_LEVEL": "WARN",
-    # "RAY_DEBUG": "1",
-    # "RAY_DEBUG_POST_MORTEM": "1",  # this is for distributed debugging
 }
 
 # The main runner is an orchestrator, not a heavy workload.

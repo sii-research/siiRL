@@ -50,7 +50,7 @@ actor_rollout_ref:
     use_fused_kernels: False
     trust_remote_code: False
   actor:
-    strategy: fsdp  # [fsdp, fsdp2, megatron]
+    strategy: fsdp  # [fsdp, fsdp2], This is for backward-compatibility
     ppo_mini_batch_size: 256
     ppo_micro_batch_size: null # will be deprecated, use ppo_micro_batch_size_per_gpu
     ppo_micro_batch_size_per_gpu: null
@@ -93,26 +93,8 @@ actor_rollout_ref:
       offload_policy: False # only for fsdp2, offload param\grad\optimizer during train
       reshard_after_forward: True # only for fsdp2, [True, False, int between 1 and fsdp_size]
       fsdp_size: -1
-    # Megatron-specific configuration
-    megatron:  # Only used when strategy is megatron
-      tensor_model_parallel_size: 2  # Tensor parallelism across GPUs
-      pipeline_model_parallel_size: 2  # Pipeline parallelism across stages
-      virtual_pipeline_model_parallel_size: null  # Optional: virtual pipeline stages
-      sequence_parallel: True  # Enable Megatron's sequence parallelism
-      use_distributed_optimizer: True  # Use Megatron's distributed optimizer (ZeRO-1 style)
-      param_dtype: "bfloat16"  # Parameter data type
-      seed: 1  # Random seed for reproducibility
-      context_parallel_size: 1  # Context parallelism (for very long sequences)
-      expert_model_parallel_size: 1  # Expert parallelism for MoE models
-      expert_tensor_parallel_size: 1  # Expert tensor parallelism for MoE models
-      param_offload: False  # Offload parameters to CPU
-      grad_offload: False   # Offload gradients to CPU 
-      optimizer_offload: False  # Offload optimizer states to CPU
-      override_transformer_config: {}
-      use_dist_checkpointing: False
-      dist_checkpointing_path: ""
   ref:
-    strategy: fsdp  # [fsdp, megatron]
+    strategy: fsdp
     fsdp_config:
       param_offload: False
       reshard_after_forward: True # only for fsdp2, [True, False, int between 1 and fsdp_size]
@@ -126,22 +108,6 @@ actor_rollout_ref:
     log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
     log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
     ulysses_sequence_parallel_size: ${actor_rollout_ref.actor.ulysses_sequence_parallel_size} # sp size
-    # Megatron-specific configuration
-    megatron:  # Only used when strategy is megatron
-      tensor_model_parallel_size: 2  # Reference's tensor parallelism
-      pipeline_model_parallel_size: 2
-      virtual_pipeline_model_parallel_size: null
-      sequence_parallel: True
-      use_distributed_optimizer: False  # Reference doesn't need optimizer
-      use_dist_checkpointing: False
-      dist_checkpointing_path: ""
-      param_dtype: "bfloat16"
-      seed: 1
-      context_parallel_size: 1
-      expert_model_parallel_size: 1
-      expert_tensor_parallel_size: 1
-      param_offload: False
-      override_transformer_config: ${actor_rollout_ref.actor.megatron.override_transformer_config}
   rollout:
     name: vllm
     mode: sync # sync: LLM, async: AsyncLLM
@@ -153,6 +119,7 @@ actor_rollout_ref:
     prompt_length: ${data.max_prompt_length}  # not use for opensource
     response_length: ${data.max_response_length}
     trust_remote_code: True
+    # for vllm rollout
     dtype: bfloat16 # should align with FSDP
     gpu_memory_utilization: 0.5
     ignore_eos: False
@@ -162,7 +129,7 @@ actor_rollout_ref:
     layered_summon: False # for huge model, layered summon can save memory (prevent OOM) but make it slower
     tensor_model_parallel_size: 2
     max_num_batched_tokens: 8192
-    max_model_len: 4096
+    max_model_len: null
     max_num_seqs: 1024
     log_prob_micro_batch_size: null # will be deprecated, use log_prob_micro_batch_size_per_gpu
     log_prob_micro_batch_size_per_gpu: null
@@ -237,7 +204,7 @@ actor_rollout_ref:
 
 critic:
   rollout_n: ${actor_rollout_ref.rollout.n}
-  strategy: fsdp # [fsdp, fsdp2, megatron]
+  strategy: fsdp # [fsdp, fsdp2]
   optim:
     lr: 1e-5
     lr_warmup_steps_ratio: 0.  # the total steps will be injected during runtime
@@ -283,26 +250,10 @@ critic:
   loss_agg_mode: ${actor_rollout_ref.actor.loss_agg_mode}
   checkpoint:
     contents: ['model', 'optimizer', 'extra']  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
-  # Megatron-specific configuration
-  megatron:  # Only used when strategy is megatron
-    tensor_model_parallel_size: 2  # Critic's tensor parallelism
-    pipeline_model_parallel_size: 2
-    virtual_pipeline_model_parallel_size: null
-    sequence_parallel: True
-    use_distributed_optimizer: True
-    param_dtype: "bfloat16"
-    seed: 1
-    context_parallel_size: 1
-    expert_model_parallel_size: 1
-    expert_tensor_parallel_size: 1
-    param_offload: False
-    grad_offload: False
-    optimizer_offload: False
-    override_transformer_config: ${actor_rollout_ref.actor.megatron.override_transformer_config}
 
 reward_model:
   enable: False
-  strategy: fsdp  # [fsdp, megatron]
+  strategy: fsdp
   model:
     input_tokenizer: ${actor_rollout_ref.model.path}  # set this to null if the chat template is identical
     path: ~/models/FsfairX-LLaMA3-RM-v0.1
@@ -328,24 +279,14 @@ reward_model:
   sandbox_fusion:
     url: null # faas url to run code in cloud sandbox
     max_concurrent: 64 # max concurrent requests to sandbox
-  # Megatron-specific configuration
-  megatron:  # Only used when strategy is megatron
-    tensor_model_parallel_size: 2  # Reward model's tensor parallelism
-    pipeline_model_parallel_size: 1  # Reward models typically don't need PP
-    sequence_parallel: False
-    use_distributed_optimizer: False
-    param_dtype: "bfloat16"
-    seed: 1
-    override_transformer_config: {}
 custom_reward_function:
   path: null
   name: compute_score
 
 algorithm:
-  adv_estimator: gae  # GAE for PPO, GRPO for GRPO
-  gamma: 0.99
-  gae_lambda: 0.95
+  gamma: 1.0
   lam: 1.0
+  adv_estimator: gae
   norm_adv_by_std_in_grpo: True
   weight_factor_in_cpgd: STD_weight # for CPGD, ["STD_weight", "clip_filter_like_weight", "naive"]
   use_kl_in_reward: False
@@ -354,23 +295,18 @@ algorithm:
     type: fixed
     kl_coef: 0.001
     horizon: 10000
-    target_kl: 0.01
-    # PID controller parameters (only used when type is pid)
-    controller: pid
-    proportional: 0.1
-    integral: 0.001
-    derivative: 0.0001
+    target_kl: 0.1
   use_pf_ppo: False
   pf_ppo:
     reweight_method: pow  # ["pow", "max_min", "max_random"]
     weight_pow: 2.0
 
 trainer:
-  project_name: siirl_examples
-  experiment_name: gsm8k
   balance_batch: True
   total_epochs: 30
   total_training_steps: null
+  project_name: siirl_examples
+  experiment_name: gsm8k
   logger: [ 'console', 'wandb' ]
   log_val_generations: 0
   rollout_data_dir: null # directory for logging the rollout data, no dump if null
@@ -398,7 +334,7 @@ ray_init:
   timeline_json_file: null
 
 dag:
-  workflow_path: null 
+  workflow_path: null
   env_enable: False
   environment_path: null
   enable_perf: False
