@@ -129,5 +129,3 @@ tensorboard/
 
 # version file
 siirl/_version.py
-
-*.csv

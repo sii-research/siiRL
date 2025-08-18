@@ -1,5 +1,5 @@
 # Copyright 2024 Bytedance Ltd. and/or its affiliates
-# Copyright 2025, Infrawaves. All rights reserved.
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -28,11 +28,8 @@ class Profiler:
         self.rank = torch.distributed.get_rank()
         # we need to validate the config before using the profiler
         self._validate()
-        if self.config.get("use_profile") and self.rank in self.config.get("profile_ranks", []):
+        if config.use_profile and self.rank in self.config.profile_ranks:
             print(f"[Profiler] Profiler init for rank {self.rank}")
-
-            step_start = self.config.get("step_start", 0)
-            step_end = self.config.get("step_end", 1)
 
             self.prof = torch.profiler.profile(
                 activities=[
@@ -40,9 +37,9 @@ class Profiler:
                     torch.profiler.ProfilerActivity.CUDA,
                 ],
                 schedule=torch.profiler.schedule(
-                    wait=max(step_start - 1, 0),
-                    warmup=1 if step_start > 0 else 0,
-                    active=step_end - step_start,
+                    wait=max(self.config.step_start - 1, 0),
+                    warmup=1 if self.config.step_start > 0 else 0,
+                    active=self.config.step_end - self.config.step_start,
                     repeat=1,
                 ),
                 record_shapes=True,
@@ -50,17 +47,13 @@ class Profiler:
             )
 
     def _validate(self):
-        if self.config.get("use_profile"):
-            if self.config.get("profile_ranks") is None:
+        if self.config.use_profile:
+            if self.config.profile_ranks is None:
                 print("[WARNING] Profile ranks is not set, default to rank 0")
-                self.config["profile_ranks"] = [0]
-
-            step_start = self.config.get("step_start", 0)
-            step_end = self.config.get("step_end", 1)
-
-            assert step_start >= 0, "[ERROR] Profile step start must be greater than 0"
-            assert step_end >= 0, "[ERROR] Profile step end must be greater than 0"
-            assert step_start < step_end, "[ERROR] Profile step start must be less than step end"
+                self.config.profile_ranks = [0]
+            assert self.config.step_start >= 0, "[ERROR] Profile step start must be greater than 0"
+            assert self.config.step_end >= 0, "[ERROR] Profile step end must be greater than 0"
+            assert self.config.step_start < self.config.step_end, "[ERROR] Profile step start must be less than step end"
 
     def check(self):
         return self.prof is not None and not self.skip_prof
@@ -81,22 +74,11 @@ class Profiler:
 
     def save(self):
         if self.prof is not None and not self.saved:
-            save_path = self.config.get("save_path")
-            if not save_path:
-                print("[WARNING] Profiler save_path is not set, will not save trace.")
-                self.skip_prof = True
-                return
-
-            if not os.path.exists(save_path):
-                os.makedirs(save_path)
-
-            step_start = self.config.get("step_start", 0)
-            step_end = self.config.get("step_end", 1)
-
-            save_file_name = f"/prof_start_{step_start}_end_{step_end}_rank_{self.rank}.json"
-            full_path = save_path + save_file_name
-            print(f"[Profiler] Saving trace to {full_path}")
-            self.prof.export_chrome_trace(full_path)
+            if not os.path.exists(self.config.save_path):
+                os.makedirs(self.config.save_path)
+            save_file_name = f"/prof_start_{self.config.step_start}_end_{self.config.step_end}_rank_{self.rank}.json"
+            print(f"[Profiler] Saving trace to {self.config.save_path + save_file_name}")
+            self.prof.export_chrome_trace(self.config.save_path + save_file_name)
             self.skip_prof = True
             self.saved = True
 

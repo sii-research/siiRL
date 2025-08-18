@@ -73,9 +73,6 @@ class NodeExecutorsMixin:
 
     def compute_reward(self, batch: DataProto, tp_size: int, **kwargs) -> NodeOutput:
         """Calculates rewards for a batch of generated sequences."""
-        # In current implementation, the reward node implicitly holds the rollout node's parallel settings;
-        # thus, the batch size per rank is actually decided by DP size of rollout, 
-        # and the tp_size used here is the rollout's tensor_model_parallel_size.
         batch.meta_info["global_token_num"] = (torch.sum(batch.batch["attention_mask"], dim=-1) // tp_size).tolist()
         reward_tensor, extra_infos = compute_reward(batch, self.reward_fn)
         batch.batch["token_level_scores"] = reward_tensor

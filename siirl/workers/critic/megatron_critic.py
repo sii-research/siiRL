@@ -18,7 +18,6 @@ Implement a multiprocess PPOCritic
 import itertools
 from functools import partial
 from typing import Iterable
-from loguru import logger
 
 import torch
 import torch.distributed
@@ -31,7 +30,7 @@ from torch import nn
 from siirl import DataProto
 from siirl.workers.dag_worker import core_algos
 from siirl.utils.debug import GPUMemoryLogger
-from siirl.utils.extras.device import get_device_id, get_torch_device
+from siirl.utils.extras.device import get_device_id, get_device_name
 from siirl.utils.megatron.pipeline_parallel import make_batch_generator
 from siirl.utils.extras.py_functional import append_to_dict
 from siirl.utils.model_utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
@@ -77,7 +76,7 @@ class MegatronPPOCritic(BasePPOCritic):
 
     def _validate_config(self, config) -> None:
         """Validate config options not implemented for Megatron backend"""
-        assert config.ulysses_sequence_parallel_size == 1
+        assert config.get("ulysses_sequence_parallel_size", 1) == 1
         if config.shuffle:
             assert config.data_loader_seed is not None, "If shuffle dataloader, seed must be manually set"
         if config.megatron.tensor_model_parallel_size == 1:
@@ -133,7 +132,7 @@ class MegatronPPOCritic(BasePPOCritic):
         return values
 
     def make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
-        select_keys = ["response_mask", "input_ids", "responses", "attention_mask", "position_ids", "values", "returns"]
+        select_keys = ["input_ids", "responses", "attention_mask", "position_ids", "values", "returns"]
         data = data.select(batch_keys=select_keys)
         return data.make_iterator(
             mini_batch_size=self.config.ppo_mini_batch_size,
