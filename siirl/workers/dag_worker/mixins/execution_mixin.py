@@ -18,6 +18,8 @@ import torch.distributed as dist
 from collections import deque
 from pprint import pformat
 
+import os
+import torch
 from loguru import logger
 from tqdm import tqdm
 
@@ -123,7 +125,27 @@ class ExecutionMixin:
             start_epoch = self.global_steps // self.dataloader.num_train_batches
             batches_to_skip = self.global_steps % self.dataloader.num_train_batches
 
+        # # Setup tensorboard trace handler for profiler
+        # def tensorboard_trace_handler(prof):
+        #     log_dir = os.path.join(self.config.trainer.log_dir, "profiler")
+        #     os.makedirs(log_dir, exist_ok=True)
+        #     prof.export_chrome_trace(os.path.join(log_dir, f"profile_rank{self._rank}.json"))
+
+        # Configure profiler
+        # profiler_config = torch.profiler.profile(
+        #     schedule=torch.profiler.schedule(
+        #         wait=1,
+        #         warmup=1,
+        #         active=1,
+        #         repeat=1
+        #     ),
+        #     on_trace_ready=torch.profiler.tensorboard_trace_handler("/workspace/infrawaves/zp/siiRL/torch_profiler/megatron_tensorboard_trace"),
+        #     with_stack=True,
+        #     record_shapes=True
+        # )
+
         for epoch in range(start_epoch, self.config.trainer.total_epochs):
+            # with profiler_config as profiler:
             for batch_idx in range(self.dataloader.num_train_batches):
                 # If resuming, skip batches that have already been completed in the starting epoch.
                 if epoch == start_epoch and batch_idx < batches_to_skip:
@@ -136,6 +158,7 @@ class ExecutionMixin:
                     return
 
                 ordered_metrics = self._run_training_step(epoch, batch_idx)
+                # profiler.step()
 
                 self.global_steps += 1
 

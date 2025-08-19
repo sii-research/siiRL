@@ -4,26 +4,26 @@
 # ===================================================================================
 
 # --- Experiment and Model Definition ---
-export DATASET=deepscaler
+export DATASET=gsm8k
 export ALG=gae
-export MODEL_NAME=qwen3-8b
+export WANDB_API_KEY=local-1bf5a678ba35baf1b0770b5d153e4aafd4686d66
 
-# --- Path Definitions ---
-export HOME={your_home_path}
-export TRAIN_DATA_PATH=$HOME/data/datasets/$DATASET/train.parquet
-export TEST_DATA_PATH=$HOME/data/datasets/$DATASET/test.parquet
-export MODEL_PATH=$HOME/data/models/Qwen3-8B
+# # --- Path Definitions ---
+# export HOME={your_home_path}
+export TRAIN_DATA_PATH=/root/data/gsm8k/train.parquet
+export TEST_DATA_PATH=/root/data/gsm8k/test.parquet
+export MODEL_PATH=/workspace/infrawaves/models/Qwen/Qwen3-8B
 
 # Base output paths
 export BASE_CKPT_PATH=ckpts
 export BASE_TENSORBOARD_PATH=tensorboard
 
 # --- Key Training Hyperparameters ---
-export TRAIN_BATCH_SIZE_PER_NODE=512
-export PPO_MINI_BATCH_SIZE_PER_NODE=256
+export TRAIN_BATCH_SIZE_PER_NODE=128
+export PPO_MINI_BATCH_SIZE_PER_NODE=64
 export PPO_MICRO_BATCH_SIZE_PER_GPU=8
-export MAX_PROMPT_LENGTH=2048
-export MAX_RESPONSE_LENGTH=4096
+export MAX_PROMPT_LENGTH=128
+export MAX_RESPONSE_LENGTH=128
 export ROLLOUT_GPU_MEMORY_UTILIZATION=0.6
 export ROLLOUT_TP=1
 export ROLLOUT_N=1
@@ -44,11 +44,11 @@ export NODE_RANK=${PET_NODE_RANK:-0}
 export MASTER_ADDR=${MASTER_ADDR:-localhost}
 
 # --- Output Paths and Experiment Naming ---
-export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_hybrid_${NNODES}nodes
+export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_megatron_${NNODES}nodes
 export PROJECT_NAME=siirl_${DATASET}_${ALG}
-export EXPERIMENT_NAME=siirl_${MODEL_NAME}_${ALG}_${DATASET}_experiment
-export TENSORBOARD_DIR=${BASE_TENSORBOARD_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_hybrid_tensorboard/dlc_${NNODES}_$timestamp
-export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${ALG}_${DATASET}_hybrid_${NNODES}_$timestamp
+export EXPERIMENT_NAME=siirl_megatron_${MODEL_NAME}_${ALG}_${DATASET}_experiment
+export TENSORBOARD_DIR=${BASE_TENSORBOARD_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_megatron_tensorboard/dlc_${NNODES}_$timestamp
+export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${ALG}_${DATASET}_megatron_${NNODES}_$timestamp
 
 # --- Calculated Global Hyperparameters ---
 export TRAIN_BATCH_SIZE=$(($TRAIN_BATCH_SIZE_PER_NODE * $NNODES))
@@ -102,7 +102,7 @@ TRAINING_CMD=(
     critic.model.fsdp_config.optimizer_offload=False
     algorithm.kl_ctrl.kl_coef=0.001
     trainer.critic_warmup=0
-    trainer.logger=['console','tensorboard']
+    trainer.logger=['console','wandb']
     trainer.project_name=\$PROJECT_NAME
     trainer.experiment_name=\$EXPERIMENT_NAME
     trainer.n_gpus_per_node=\$N_GPUS_PER_NODE
