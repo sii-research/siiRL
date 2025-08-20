@@ -162,10 +162,13 @@ class ValidationMixin:
         logger.info(f"_generate_for_validation gen batch meta_info: {gen_batch.meta_info}")
         
         output = None
-        if self.rollout_mode == 'sync':
-            output = rollout_worker.generate_sequences(gen_batch)
-        elif self._async_rollout_manager:
-            output = self._async_rollout_manager.generate_sequences(gen_batch)
+        if self._multi_agent is False:
+            if self.rollout_mode == 'sync':
+                output = rollout_worker.generate_sequences(gen_batch)
+            elif self._async_rollout_manager:
+                output = self._async_rollout_manager.generate_sequences(gen_batch)
+        else:
+            output = self.multi_agent_loop.generate_sequence(gen_batch)
         if output:
             batch_proto.union(output)
         return batch_proto
@@ -173,6 +176,8 @@ class ValidationMixin:
     def _score_and_package_results(self, generated_proto: DataProto) -> List[ValidationResult]:
         """Scores generated sequences and packages them into ValidationResult objects."""
         if self.rollout_mode == 'async' and self._async_rollout_manager is None:
+            return []
+        if self._multi_agent and 'responses' not in generated_proto.batch:
             return []
         reward_result = self.val_reward_fn(generated_proto, return_dict=True)
         scores = reward_result["reward_tensor"].sum(-1).cpu()

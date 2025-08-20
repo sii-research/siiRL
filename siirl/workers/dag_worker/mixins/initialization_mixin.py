@@ -30,6 +30,9 @@ from siirl.utils.extras.device import get_device_name, get_nccl_backend
 from siirl.workers.base_worker import Worker
 from siirl.workers.dag.node import NodeRole, NodeType
 from siirl.workers.dag_worker.constants import DAGConstants
+from siirl.utils.extras.device import get_device_name, get_nccl_backend
+from siirl.utils.import_string import import_string
+from siirl.workers.multi_agent.multiagent_generate import MultiAgentLoop
 
 device_name = get_device_name()
 
@@ -61,7 +64,7 @@ class InitializationMixin:
     process_groups: Dict[str, ProcessGroup]
     tokenizer_mapping: Dict[str, TokenizerModule]
     logger: Optional[Tracking]
-
+    _multi_agent: bool
     # Attributes initialized within this mixin
     _rank: int
     taskgraph: TaskGraph
@@ -75,6 +78,8 @@ class InitializationMixin:
     role_worker_mapping: Dict[NodeRole, Type[Worker]]
     _profiler: DistProfiler
     postsampling_masters_group: Optional[ProcessGroup] = None
+
+    multi_agent_loop: Any
 
     def _initialize_worker(self):
         """Orchestrates the ordered initialization of all worker components."""
@@ -432,7 +437,9 @@ class InitializationMixin:
                     f"Failed to create worker for node {node.node_id} with class {worker_cls.__name__}.", exc_info=True
                 )
                 raise RuntimeError(f"Worker instantiation failed for node {node.node_id}") from e
-
+        
+        if len(self.agent_group_worker) > 1:
+            self._multi_agent = True
     def _generate_node_worker_key(self, node: Node) -> str:
         """Generates a unique string key for a node's worker instance."""
         return f"{node.agent_group}_{node.node_type.value}_{node.node_role.value}"
@@ -558,7 +565,9 @@ class InitializationMixin:
                     logger.error(f"Failed to set up sharding manager for agent group {agent_group}: {e}", exc_info=True)
                     raise
         logger.info("All models and sharding managers initialized successfully.")
-
+        if self._multi_agent:
+            self.multi_agent_loop =  MultiAgentLoop(self, config = self.config.actor_rollout_ref, node_workers = self.workers, local_dag = self.taskgraph, databuffer = self.data_buffers, placement_mode = 'colocate')
+        
     def _setup_sharding_manager(self, agent_group: int, worker_dict: Dict[NodeRole, Worker]):
         """Configures the sharding manager to sync weights between FSDP and vLLM."""
         actor_worker = worker_dict[NodeRole.ACTOR]

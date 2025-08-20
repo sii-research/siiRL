@@ -390,10 +390,14 @@ class UtilitiesMixin:
                     )
                     loaded_worker_keys.add(node_worker_key)
                 else:
-                    logger.warning(
-                        f"Rank {self._rank}: Checkpoint for agent {node.agent_group}'s {node.node_role.name} not found "
-                        f"at {checkpoint_path}. Weights will be from initialization."
-                    )
+                    if len(self.agent_group_worker) > 1:
+                        # will use other agent critic
+                        pass
+                    else:
+                        logger.warning(
+                            f"Rank {self._rank}: Checkpoint for agent {node.agent_group}'s {node.node_role.name} not found "
+                            f"at {checkpoint_path}. Weights will be from initialization."
+                        )
 
         # Load dataloader state. All ranks in a DP group load from the same file.
         _, dp_rank, _, _ = self._get_node_dp_info(self.first_rollout_node)
@@ -1080,3 +1084,6 @@ class UtilitiesMixin:
         )
         new_batch = DataProto(batch=next_batch, non_tensor_batch=non_tensor_batch, meta_info={})
         batch.union(new_batch)
+
+    def check_spmd_mode(self):
+        return self.rollout_mode == 'sync' and self._multi_agent == False

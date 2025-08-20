@@ -85,6 +85,8 @@ class DAGWorker(InitializationMixin, ExecutionMixin, NodeExecutorsMixin, Validat
         # This is the core state-carrying mechanism for dynamic sampling.
         self.sampling_leftover_cache: Optional[DataProto] = None
 
+        # multi agent
+        self._multi_agent = False
         try:
             self._initialize_worker()
         except (ValueError, TypeError, KeyError, AttributeError, NotImplementedError) as e:

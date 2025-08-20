@@ -14,13 +14,13 @@
 
 import importlib
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Set
-
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from loguru import logger
 
 from siirl.utils.params import log_dict_formatted
-
-
+from siirl.utils.params.model_args import AgentArguments
+from siirl.models.loader import load_tokenizer
+import dacite
 class NodeType(Enum):
     """
     Define the types of nodes in the DAG.
@@ -66,24 +66,97 @@ class NodeStatus(Enum):
     FAILED = "FAILED"  # Execution failed
     SKIPPED = "SKIPPED"  # Skipped
 
-
+class AgentProcess():
+    def __init__(self, agent_options: AgentArguments, node_config):
+        from siirl.workers.dag_worker.constants import DAGConstants
+        intern_config = node_config.get(DAGConstants.INTERN_CONFIG)
+        if intern_config is None:
+            return
+        if agent_options is None:
+            return
+        process_path: str = agent_options.process_path
+        self.pre_process_kwargs: dict = agent_options.pre_process_kwargs
+        self.post_process_kwargs: dict = agent_options.post_process_kwargs
+        self._init_process_handle(process_path)
+        
+        self.env_path = agent_options.env
+        # init tokenizer for each node
+        tokenizer_module = load_tokenizer(model_args=intern_config.model)
+        self.tokenizer = tokenizer_module.get("tokenizer")
+        
+        self.env_handles = None
+            
+            
+    def init_env_handle(self):
+        
+        pass
+        
+        
+    def _init_process_handle(self, process_path):
+        if process_path is not None:
+            try:
+                module_name = f"{hash(process_path) & 0xfffffff}"
+                spec = importlib.util.spec_from_file_location(module_name, process_path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)    
+            except Exception as e:
+                raise RuntimeError(f"Error loading preprocess from '{process_path}': {e}") from e
+            try:
+                pre_func = getattr(module, 'pre_process')
+                self.pre_process = pre_func
+            except Exception as e:
+                raise RuntimeError(f"Error loading preprocess from '{process_path}:pre_process': {e}") from e
+            try:
+                post_func = getattr(module, 'post_process')
+                self.post_process = post_func
+            except Exception as e:
+                raise RuntimeError(f"Error loading preprocess from '{process_path}:post_process': {e}") from e
+    # each agent may have diferent tokenizer
+    # so, we make sure preprocess get str instead of list except get List[int] from dataloader in first agent
+    def apply_pre_process(self, prompt: Optional[Tuple[str, List]]) -> str:
+        templated_prompt = None
+        if isinstance(prompt, str):
+            prompt = self.tokenizer.encode(prompt)
+        if hasattr(self, "pre_process"):
+            templated_prompt = self.pre_process(self.tokenizer, prompt, **self.pre_process_kwargs) 
+        else:
+            templated_prompt = prompt
+        return prompt, templated_prompt
+    # each agent may have diferent tokenizer
+    # so, we make sure postprocess get list[int] and return str
+    def apply_post_process(self, oridinal_prompt , templated_prompt , response) -> Tuple[List[int], List[int]]:
+        if isinstance(response, str):
+            response = self.tokenizer.encode(response)
+        if hasattr(self, "post_process"):
+            oridinal_prompt = self.post_process(self.tokenizer, oridinal_prompt, response, **self.post_process_kwargs)
+        response_mask = [1] * len(response)
+        templated_prompt = templated_prompt + response
+        return self.tokenizer.decode(oridinal_prompt), templated_prompt, response_mask
+    def decode(self, prompt_id):
+        return self.tokenizer.decode(prompt_id)
+    def encode(self, prompt):
+        return self.tokenizer.encode(prompt)
+    def apply_chat_template(self, prompts,
+                        add_generation_prompt,
+                        tokenize
+                    ):
+        return self.tokenizer.apply_chat_template(prompts, add_generation_prompt=add_generation_prompt, tokenize=tokenize)      
 class Node:
     """
     Represents a node (task unit) in the DAG.
     """
-
     def __init__(
-        self,
-        node_id: str,
-        node_type: NodeType,
-        node_role: NodeRole = NodeRole.DEFAULT,
-        only_forward_compute: bool = False,
-        agent_group: int = 0,
-        dependencies: Optional[List[str]] = None,
-        config: Optional[Dict[str, Any]] = None,
-        executable_ref: Optional[str] = None,
-        user_options: Optional[str] = {},
-        retry_limit: int = 0,
+        self, 
+        node_id: str, 
+        node_type: NodeType, 
+        node_role: NodeRole = NodeRole.DEFAULT, 
+        only_forward_compute: bool = False, 
+        agent_group: int = 0, 
+        dependencies: Optional[List[str]] = None, 
+        config: Optional[Dict[str, Any]] = None, 
+        executable_ref: Optional[str] = None, 
+        agent_options: AgentArguments = None, 
+        retry_limit: int = 0
     ):
         """
         Initialize a node.
@@ -124,8 +197,15 @@ class Node:
         self._executable: Optional[Callable] = None
         self.output: Any = None  # Store the result of the node execution
         self.error_info: Optional[str] = None  # Store error information when the node fails
-        self.user_options: Dict = user_options
-        self.config["user_options"] = self.user_options
+        if isinstance(agent_options, Dict):
+                agent_options: AgentArguments = dacite.from_dict(
+                data_class=AgentArguments,
+                data=agent_options,
+                config=dacite.Config(strict=False)    # 允许 YAML 比 dataclass 字段多
+            )
+        self.agent_options = agent_options
+        if self.agent_options is not None:
+            self.agent_process = AgentProcess(agent_options, self.config)
         if self.executable_ref:
             self._resolve_executable()
 
@@ -280,16 +360,16 @@ class Node:
 
     def copy(self) -> "Node":
         new_node = Node(
-            node_id=self.node_id,
-            node_type=self.node_type,
-            node_role=self.node_role,
-            dependencies=list(self.dependencies),
-            config=dict(self.config),
-            executable_ref=self.executable_ref,
-            retry_limit=self.retry_limit,
-            only_forward_compute=self.only_forward_compute,
-            agent_group=self.agent_group,
-            user_options=self.user_options,
+            node_id=self.node_id, 
+            node_type=self.node_type, 
+            node_role=self.node_role, 
+            dependencies=list(self.dependencies), 
+            config=dict(self.config), 
+            executable_ref=self.executable_ref, 
+            retry_limit=self.retry_limit, 
+            only_forward_compute=self.only_forward_compute, 
+            agent_group=self.agent_group, 
+            agent_options=self.agent_options
         )
         new_node.status = self.status
         new_node.retries_done = self.retries_done
