@@ -311,6 +311,11 @@ class AgentArguments:
     custom_async_server: CustomAsyncServer = field(default=None, metadata={"help": "custom async server configs"})
     # Path to the custom async server implementation
 
+    train_cycle: int = field(default=None, metadata={"help": "Train cycle"})
+    process_path: str = field(default=None, metadata={"help": "Path to the pre-process function"})
+    pre_process_kwargs: dict = field(default_factory=dict, metadata={"help": "Pre-process function arguments"})
+    post_process_kwargs: dict = field(default_factory=dict, metadata={"help": "Post-process function arguments"})
+    env: list = field(default_factory=list, metadata={"help": "Env list"})
 
 @dataclass
 class EngineArguments:

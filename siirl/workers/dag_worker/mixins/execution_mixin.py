@@ -26,7 +26,7 @@ from siirl.workers.dag_worker.constants import DAGConstants
 from siirl.workers.dag_worker.dag_utils import add_prefix_to_dataproto, remove_prefix_from_dataproto
 from siirl.workers.dag_worker.data_structures import NodeOutput
 from siirl.workers.databuffer import DataProto
-
+from siirl.workers.multi_agent.multiagent_generate import MultiAgentLoop
 
 class ExecutionMixin:
     """Handles the core DAG execution and training loop logic."""
@@ -56,6 +56,7 @@ class ExecutionMixin:
     enable_perf: bool
     internal_data_cache: Dict[str, DataProto]
     _profiler: DistProfiler
+    _multi_agent: bool
 
     _set_node_executables: Any
     init_model: Any
@@ -81,7 +82,8 @@ class ExecutionMixin:
     _collect_final_metrics: Any
     compute_reward: Any
     compute_advantage: Any
-
+    check_spmd_mode: Any
+    
     def execute_task_graph(self):
         """Main entry point to start the DAG execution pipeline."""
         logger.info(f"Rank {self._rank}: Starting DAG execution pipeline...")
@@ -268,17 +270,15 @@ class ExecutionMixin:
                     if cur_node.node_id != entry_node_id:
                         with self._timer("get_data_from_buffer", timing_raw):
                             batch = self.get_data_from_buffers(key=cur_node.node_id, my_current_dp_rank=cur_dp_rank, my_current_dp_size=cur_dp_size, timing_raw=timing_raw)
-                            if cur_node.node_role == NodeRole.ROLLOUT and cur_node.user_options.get("pre_chat_template", None):
-                                agent_key = self._generate_agent_group_key(cur_node)
-                                self._batch_apply_pre_template(batch, self.tokenizer_mapping[agent_key], cur_node.user_options.get("pre_chat_template", ""), f"agent_group_{cur_node.agent_group}_")
+                            if batch is None:
+                                logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
+                                return None  # Abort the entire step
+
                             batch = remove_prefix_from_dataproto(batch, cur_node)
                             if batch is None:
                                 logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
                                 return None  # Abort the entire step
                             logger.debug(f"current node({cur_node.node_id}) get data from databuffer batch size: {batch.batch.size()}")
-                    elif cur_node.node_role == NodeRole.ROLLOUT and cur_node.user_options.get("pre_chat_template", None):
-                        agent_key = self._generate_agent_group_key(cur_node)
-                        self._batch_apply_pre_template(batch, self.tokenizer_mapping[agent_key], cur_node.user_options.get("pre_chat_template", ""), "")
                     if self.enable_perf:
                         with self._timer("get_data_from_buffer_barrier", timing_raw):
                             dist.barrier(self._gather_group)
@@ -289,31 +289,41 @@ class ExecutionMixin:
                         node_name_timer = "actor_log_prob"
                     with self._timer(node_name_timer, timing_raw):
                         if cur_node.node_role == NodeRole.REWARD:
-                            if self.rollout_mode == "sync" or cur_tp_rank == 0:
+                            if self.check_spmd_mode():
+                                node_output = self.compute_reward(batch, cur_tp_size)
+                            elif cur_tp_rank == 0:
                                 node_output = self.compute_reward(batch, cur_tp_size)
                         elif cur_node.node_role == NodeRole.ADVANTAGE:
-                            if self.rollout_mode == "sync" or cur_tp_rank == 0:
-                                node_output = self.compute_advantage(batch, cur_node=cur_node)
+                            if self.check_spmd_mode():
+                                node_output = self.compute_advantage(batch, cur_node = cur_node)
+                            elif cur_tp_rank == 0:
+                                node_output = self.compute_advantage(batch, cur_node = cur_node)
                         elif cur_node.executable:
-                            if cur_node.user_options.get("train_cycle", None):
-                                cycle_round = (epoch - 1) // cur_node.user_options.get("train_cycle", 1)
+                            if cur_node.agent_options and cur_node.agent_options.train_cycle:
+                                cycle_round = (epoch - 1) // cur_node.agent_options.train_cycle
                                 # only support 2 agent now, more than 2 agent may put into different device because of device_mem
                                 if cycle_round % 2 == 0:
                                     if cur_node.node_role == NodeRole.ACTOR and cur_node.agent_group != 0:
-                                        continue
+                                        node_output = NodeOutput(batch=batch)
                                 elif cycle_round % 2 == 1:
                                     if cur_node.node_role == NodeRole.ACTOR and cur_node.agent_group != 1:
-                                        continue
+                                        node_output = NodeOutput(batch=batch)
                                 else:
-                                    raise AssertionError("should not happen")
-                            node_output = cur_node.run(batch=batch, worker_group_index=cur_node.agent_group, siirl_args=self.config)
+                                    assert False, "should not happen"
+                            else:
+                                node_output = cur_node.run(batch=batch, worker_group_index=cur_node.agent_group)
                         else:  # Passthrough node
                             logger.warning(f"Node {cur_node.node_id} has no executable. Passing data through.")
                             node_output = NodeOutput(batch=batch)
                     if self.enable_perf:
                         with self._timer(f"{node_name_timer}_barrier", timing_raw):
                             dist.barrier(self._gather_group)
-
+                    if cur_node.node_role == NodeRole.ROLLOUT and self._multi_agent:
+                        next_nodes = self.taskgraph.get_downstream_nodes(cur_node.node_id)
+                        while next_nodes[0].node_role == NodeRole.ROLLOUT:
+                            cur_node = next_nodes[0]
+                            next_nodes = self.taskgraph.get_downstream_nodes(cur_node.node_id)
+                            
                     # --- 5. Process Output & Pass to Children ---
                     with self._timer("graph_output_handling", timing_raw):
                         if cur_node.node_role == NodeRole.POSTPROCESS_SAMPLING:
@@ -326,21 +336,11 @@ class ExecutionMixin:
 
                         if self._rank == 0 and node_output.metrics:
                             ordered_metrics.extend(sorted(node_output.metrics.items()))
-
                         if next_nodes := self.taskgraph.get_downstream_nodes(cur_node.node_id):
                             # Currently supports single downstream node, can be extended to a loop.
                             next_node = next_nodes[0]
                             next_dp_size, _, _, _ = self._get_node_dp_info(next_node)
                             node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node)
-                            if cur_node.node_role == NodeRole.ROLLOUT and cur_node.user_options.get("post_chat_template", None):
-                                agent_key = self._generate_agent_group_key(cur_node)
-                                self._batch_apply_post_template(node_output.batch, self.tokenizer_mapping[agent_key], cur_node.user_options.get("post_chat_template", ""), f"agent_group_{cur_node.agent_group}_")
-
-                            if next_node.node_role == cur_node.node_role and cur_node.node_id in next_node.dependencies:
-                                if next_node.node_role == NodeRole.ROLLOUT:
-                                    agent_key = self._generate_agent_group_key(next_node)
-                                    self._map_rollout_out2input(batch=node_output.batch, tokenizer=self.tokenizer_mapping[agent_key], next_prefix=f"agent_group_{next_node.agent_group}_", cur_prefix=f"agent_group_{cur_node.agent_group}_")
-
                             if self._whether_put_data(cur_tp_rank, next_dp_size, cur_dp_size, cur_node, next_node):
                                 with self._timer("put_data_to_buffer", timing_raw):
                                     self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch, source_dp_size=cur_dp_size, dest_dp_size=next_dp_size, timing_raw=timing_raw)
