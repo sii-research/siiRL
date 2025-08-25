@@ -220,17 +220,17 @@ class NodeExecutorsMixin:
         """
         current_node = self.taskgraph.get_node(current_node_id)
         if not current_node:
-            logger.error(f"Rank {self._rank}: Could not find node '{current_node_id}' in the task graph.")
+            logger.debug(f"Rank {self._rank}: Could not find node '{current_node_id}' in the task graph.")
             return None
 
         reference_node = current_node
         if current_node.node_type == NodeType.COMPUTE:
             ancestor = self._find_first_non_compute_ancestor(current_node.node_id)
             if ancestor:
-                logger.error(f"Rank {self._rank}: Node '{current_node.node_id}' is a COMPUTE node. Using context from its ancestor '{ancestor.node_id}'.")
+                logger.debug(f"Rank {self._rank}: Node '{current_node.node_id}' is a COMPUTE node. Using context from its ancestor '{ancestor.node_id}'.")
                 reference_node = ancestor
             else:
-                logger.error(f"Rank {self._rank}: Could not find a non-COMPUTE ancestor for COMPUTE node '{current_node.node_id}'. Cannot determine distributed context.")
+                logger.debug(f"Rank {self._rank}: Could not find a non-COMPUTE ancestor for COMPUTE node '{current_node.node_id}'. Cannot determine distributed context.")
                 return None
 
         try:
@@ -268,7 +268,6 @@ class NodeExecutorsMixin:
         Creates a deterministic data migration plan based on the complete global state,
         considering the total data (new + cached) on each rank.
         """
-        # BUG FIX: Use the total count (new + cached) for each rank to determine the current data distribution.
         current_counts = [state["new_count"] + state["cached_count"] for state in global_state]
 
         base_items = target_batch_size // dp_world_size
@@ -354,12 +353,8 @@ class NodeExecutorsMixin:
         The core decision-making logic, executed by all master ranks (tp_rank=0).
         It now makes a consistent decision based on the true global state.
         """
-        logger.error(f"Rank {self._rank} (Master): Entering _master_rebalance_logic.")
         local_new_count = len(set(batch.non_tensor_batch.get("uid", [])))
 
-        # --- [CORE MODIFICATION] ---
-        # Instead of calling _gather_global_state which causes a deadlock,
-        # we perform the collective communication directly here using the safe, dedicated group.
         if self.postsampling_masters_group is None:
             raise RuntimeError("The dedicated 'postsampling_masters_group' has not been initialized. This group is required for rebalancing logic to prevent deadlocks. Please call 'init_postsampling_process_group' after 'dist.init_process_group' and set the returned group on this class instance.")
 
@@ -380,9 +375,8 @@ class NodeExecutorsMixin:
         global_state_list = [None] * num_masters
         dist.all_gather_object(global_state_list, my_state, group=self.postsampling_masters_group)
         global_state = sorted(global_state_list, key=lambda x: x["dp_rank"])
-        # --- [END OF MODIFICATION] ---
 
-        logger.error(f"Rank {self._rank} (Master): Gathered global state: {global_state}.")
+        logger.debug(f"Rank {self._rank} (Master): Gathered global state: {global_state}.")
 
         total_new = sum(s["new_count"] for s in global_state)
         total_cached = sum(s["cached_count"] for s in global_state)
@@ -390,20 +384,20 @@ class NodeExecutorsMixin:
         cache_was_used = total_cached > 0
 
         target_batch_size = self.config.data.train_batch_size
-        logger.error(f"Rank {self._rank} (Master): Total prompts (new={total_new}, cached={total_cached}, total={total_prompts}). Target: {target_batch_size}.")
+        logger.debug(f"Rank {self._rank} (Master): Total prompts (new={total_new}, cached={total_cached}, total={total_prompts}). Target: {target_batch_size}.")
 
         if total_prompts < target_batch_size:
             decision = {"action": "cache", "status": "INSUFFICIENT_DATA", "cache_was_used": cache_was_used}
-            logger.error(f"Rank {self._rank} (Master): Data insufficient. Decision: {decision}")
+            logger.debug(f"Rank {self._rank} (Master): Data insufficient. Decision: {decision}")
             return decision
         else:
-            logger.error(f"Rank {self._rank} (Master): Data sufficient. Proceeding to rebalance.")
+            logger.debug(f"Rank {self._rank} (Master): Data sufficient. Proceeding to rebalance.")
             working_batch = batch
             if self.sampling_leftover_cache:
                 working_batch = DataProto.concat([self.sampling_leftover_cache, batch])
 
             plan, targets = self._create_migration_plan(global_state, target_batch_size, context["dp_size"])
-            logger.error(f"Rank {self._rank} (Master): Migration plan: {plan}. Targets: {targets}.")
+            logger.debug(f"Rank {self._rank} (Master): Migration plan: {plan}. Targets: {targets}.")
 
             # The P2P migration still correctly uses the original `context` to resolve global ranks.
             received_shards = self._execute_p2p_migration(plan, working_batch, sorted(list(set(working_batch.non_tensor_batch.get("uid", [])))), context)
@@ -418,7 +412,7 @@ class NodeExecutorsMixin:
                 "cache_was_used": decision.get("local_filter_info", {}).get("cache_was_used"),
                 "received_shards": len(decision.get("incremental_data", [])),
             }
-            logger.error(f"Rank {self._rank} (Master): Rebalance complete. Decision summary: {decision_summary}")
+            logger.debug(f"Rank {self._rank} (Master): Rebalance complete. Decision summary: {decision_summary}")
             return decision
 
     def _synchronize_decision_to_peers(self, decision_package: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
@@ -451,10 +445,6 @@ class NodeExecutorsMixin:
         device = get_device_name() if get_device_name() == "cpu" else f"{get_device_name()}:{get_device_id()}"
 
         if tp_rank == 0:
-            # ========================================================================
-            # SENDER LOGIC (MASTER: tp_rank == 0)
-            # ========================================================================
-
             # Ensure we have a valid object to send.
             if decision_package is None:
                 logger.warning("Decision package is None on master, creating a default error package.")
@@ -487,9 +477,6 @@ class NodeExecutorsMixin:
             return decision_package
 
         else:
-            # ========================================================================
-            # RECEIVER LOGIC (PEER: tp_rank != 0)
-            # ========================================================================
             master_global_rank = pg_ranks[dp_rank * tp_size]
 
             # --- Phase 1: Synchronously receive the size. ---
@@ -517,7 +504,6 @@ class NodeExecutorsMixin:
         This method is the single source of truth for updating `self.sampling_leftover_cache`.
         """
         action = decision.get("action")
-        logger.error(f"Rank {self._rank}: Reconstructing batch with action: '{action}'.")
         if action == "cache":
             if decision.get("cache_was_used") and self.sampling_leftover_cache:
                 working_batch = DataProto.concat([self.sampling_leftover_cache, batch])
@@ -525,7 +511,7 @@ class NodeExecutorsMixin:
                 working_batch = batch
             self.sampling_leftover_cache = working_batch
             if "uid" in self.sampling_leftover_cache.non_tensor_batch:
-                logger.error(f"Rank {self._rank}: Cache updated. New unique cache size: {len(set(self.sampling_leftover_cache.non_tensor_batch['uid']))}. Returning empty DataProto.")
+                logger.debug(f"Rank {self._rank}: Cache updated. New unique cache size: {len(set(self.sampling_leftover_cache.non_tensor_batch['uid']))}. Returning empty DataProto.")
             return DataProto()
         elif action == "rebalance":
             working_batch = batch
@@ -541,7 +527,7 @@ class NodeExecutorsMixin:
 
             final_batch = DataProto.concat([local_filtered_batch] + incremental_data) if incremental_data else local_filtered_batch
             final_uid_count = len(set(final_batch.non_tensor_batch.get("uid", [])))
-            logger.error(f"Rank {self._rank}: Rebalance complete. Final batch unique UIDs: {final_uid_count}.")
+            logger.debug(f"Rank {self._rank}: Rebalance complete. Final batch unique UIDs: {final_uid_count}.")
             return final_batch
 
         logger.error(f"Rank {self._rank}: Received unknown or error action '{action}' in sync package.")
@@ -554,10 +540,10 @@ class NodeExecutorsMixin:
         It makes a globally consistent decision on whether to cache or rebalance.
         """
         node_id = kwargs.get("node_config", {}).get("_node_id_", "Unknown")
-        logger.error(f"Rank {self._rank}: --- Starting postprocess_sampling for node '{node_id}' ---")
+        logger.debug(f"Rank {self._rank}: --- Starting postprocess_sampling for node '{node_id}' ---")
         context = self._get_rebalancing_context(node_id)
         if context is None:
-            logger.error(f"Rank {self._rank}: Node is not distributed. Passing data through.")
+            logger.debug(f"Rank {self._rank}: Node is not distributed. Passing data through.")
             return NodeOutput(batch=batch, metrics={"postprocess_status": "OK_SINGLE_NODE"})
 
         decision_package = None
@@ -569,5 +555,5 @@ class NodeExecutorsMixin:
         status = final_decision.get("status", "UNKNOWN")
 
         final_uid_count = len(set(final_batch.non_tensor_batch.get("uid", []))) if final_batch else 0
-        logger.error(f"Rank {self._rank}: --- Finished postprocess_sampling for node '{node_id}'. Final unique UIDs: {final_uid_count}, Status: {status} ---")
+        logger.debug(f"Rank {self._rank}: --- Finished postprocess_sampling for node '{node_id}'. Final unique UIDs: {final_uid_count}, Status: {status} ---")
         return NodeOutput(batch=final_batch, metrics={"postprocess_status": status})
