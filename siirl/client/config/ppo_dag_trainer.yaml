@@ -357,3 +357,20 @@ hydra:
   run:
     dir: /tmp/siirl
   output_subdir: null
+
+profiler:
+  enable: False
+  save_path: "./prof_data"  # Storage path for collected data.
+  level: "level1"  # Collection level, optional values: level_none, level0, level1, level2.
+  with_memory: False  # Whether to enable memory analysis.
+  record_shapes: False  # Whether to record tensor shape.
+  with_npu: True  # Whether to record Device-side performance data.
+  with_cpu: False  # Whether to record Host-side performance data.
+  with_module: False  # Whether to record Python call stack information.
+  with_stack: False  # Whether to record operator call stack information.
+  analysis: True  # Whether to automatically parse the data.
+  discrete: False  # True for each task has its own database, False for all tasks in one training step share one database.
+  roles: ['generate', 'compute_reward']  # used for discrete mode, optional values: generate, compute_reward, compute_old_log_prob, compute_ref_log_porb, compute_value, compute_advantage, train_critic, train_actor
+  all_ranks: False  # Whether to profile all ranks.
+  ranks: [0]  # The ranks that will be profiled. [] or [0,1,...]
+  profile_steps: [0]  # The steps that will be profiled.

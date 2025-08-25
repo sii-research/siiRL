@@ -23,6 +23,8 @@ from unittest.mock import patch
 from loguru import logger
 
 from siirl.workers.dag import DAGConfigLoader, Node, NodeRole, NodeType, TaskGraph
+from siirl.utils.params import parse_config, ProfilerArguments
+from siirl.utils.debug import DistProfiler
 
 
 @contextmanager
@@ -523,6 +525,62 @@ class TestDAGConfigLoader(unittest.TestCase):
             self.assertIn("Graph 'manual_invalid_graph' is invalid. Unable to generate image:", "\n".join(logs))
         self.assertIsNone(result)
         mock_digraph.assert_not_called()
+    
+    def test_load_profiler_yaml_config(self):
+        """Test loading a valid profiler configuration."""
+        yaml_context="""
+        data: null
+        actor_rollout_ref: null
+        critic: null
+        reward_model: null
+        custom_reward_function: null
+        algorithm: null
+        trainer: null
+        dag: null
+        profiler:
+          enable: True
+          save_path: './prof_data'
+          level: 'level1'
+          with_memory: False
+          record_shapes: False
+          with_npu: True
+          with_cpu: False
+          with_module: False
+          with_stack: False
+          analysis: True
+          discrete: False
+          roles: ['generate', 'compute_reward']
+          all_ranks: False
+          ranks: [0]
+          profile_steps: [0]
+        """
+        file_path = self._create_config_file(yaml_context, "yaml")
+        from omegaconf import OmegaConf
+        yaml_dict = OmegaConf.load(file_path)
+        profiler = parse_config(yaml_dict).profiler
+        self.assertIsInstance(profiler, ProfilerArguments)
+        self.assertTrue(profiler.enable)
+        self.assertEqual(profiler.level, "level1")
+        self.assertFalse(profiler.with_memory)
+        self.assertTrue(profiler.with_npu)
+
+        def is_subset(subset, superset):
+            set_subset = set(subset)
+            set_superset = set(superset)
+            return set_subset.issubset(set_superset)
+        self.assertTrue(is_subset(profiler.roles, ["generate", "compute_reward", "compute_old_log_prob", 
+                        "compute_ref_log_porb", "compute_value", "compute_advantage", "train_critic", "train_actor"]))
+
+    def test_profiler_npu_environment(self):
+        """Test npu environment for profiler."""
+        config = ProfilerArguments(enable=True)
+        profiler = DistProfiler(rank=0, config=config)
+        from siirl.utils.extras.device import is_npu_available
+        if not is_npu_available:
+            self.assertFalse(profiler.config.enable)
+        else:
+            self.assertTrue(profiler.config.enable)
+
 
 
 if __name__ == "__main__":

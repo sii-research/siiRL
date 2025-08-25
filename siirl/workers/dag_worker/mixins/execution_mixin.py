@@ -20,6 +20,7 @@ import torch.distributed as dist
 from loguru import logger
 from tqdm import tqdm
 
+from siirl.utils.debug import DistProfiler
 from siirl.workers.dag.node import Node, NodeType
 from siirl.workers.dag_worker.constants import DAGConstants
 from siirl.workers.dag_worker.dag_utils import add_prefix_to_dataproto, remove_prefix_from_dataproto
@@ -54,6 +55,7 @@ class ExecutionMixin:
     _gather_group: Optional[dist.ProcessGroup]
     enable_perf: bool
     internal_data_cache: Dict[str, DataProto]
+    _profiler: DistProfiler
 
     _set_node_executables: Any
     init_model: Any
@@ -135,8 +137,11 @@ class ExecutionMixin:
                     if self._rank == 0 and last_val_metrics:
                         logger.info(f"Final validation metrics:\n{pformat(last_val_metrics)}")
                     return
-
+                if self.global_steps in self.config.profiler.profile_steps:
+                    self._profiler.start(role="e2e", profile_step=self.global_steps)
                 ordered_metrics = self._run_training_step(epoch, batch_idx)
+                if self.global_steps in self.config.profiler.profile_steps:
+                    self._profiler.stop()
 
                 if ordered_metrics is None:
                     if self.progress_bar:

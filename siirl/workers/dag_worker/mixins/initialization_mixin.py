@@ -24,6 +24,7 @@ from loguru import logger
 from siirl.dataloader import DataLoaderNode
 from siirl.models.loader import load_tokenizer
 from siirl.scheduler.reward import create_reward_manager
+from siirl.utils.debug import DistProfiler
 from siirl.utils.extras.device import get_device_name, get_nccl_backend
 from siirl.workers.base_worker import Worker
 from siirl.workers.dag.node import NodeRole, NodeType
@@ -71,6 +72,7 @@ class InitializationMixin:
     kl_ctrl_in_reward: Optional[Any]
     validate_tokenizer: Any
     role_worker_mapping: Dict[NodeRole, Type[Worker]]
+    _profiler: DistProfiler
     postsampling_masters_group: Optional[ProcessGroup] = None
 
     def _initialize_worker(self):
@@ -80,6 +82,7 @@ class InitializationMixin:
         self._setup_distributed_environment()
         self._initialize_core_components()
         self._initialize_node_workers()
+        self._profiler = DistProfiler(rank=self._rank, config=self.config.profiler)
 
         if self._rank == 0:
             logger.info("Rank 0: Initializing tracking logger...")

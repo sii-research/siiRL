@@ -13,9 +13,14 @@
 # limitations under the License.
 
 import os
+from typing import Callable, Optional
 
 import torch
 import torch.distributed
+
+from siirl.utils.params import ProfilerArguments
+from siirl.utils.extras.import_utils import is_nvtx_available
+from loguru import logger
 
 
 class Profiler:
@@ -91,3 +96,81 @@ class Profiler:
         if self.check():
             print(f"[Profiler] Trace stopped for rank {self.rank}")
             self.skip_prof = True
+
+
+def mark_start_range(
+    message: Optional[str] = None,
+    color: Optional[str] = None,
+    domain: Optional[str] = None,
+    category: Optional[str] = None,
+) -> None:
+    """Start a profiling range marker (no-op implementation).
+
+    Args:
+        message (Optional[str]): Message to associate with the range marker.
+        color (Optional[str]): Color for the marker visualization.
+        domain (Optional[str]): Domain for the marker.
+        category (Optional[str]): Category for the marker.
+    """
+    pass
+
+
+def mark_end_range(range_id: str) -> None:
+    """End a profiling range marker (no-op implementation).
+
+    Args:
+        range_id (str): Identifier of the range to end.
+    """
+    pass
+
+
+def mark_annotate(
+    message: Optional[str] = None,
+    color: Optional[str] = None,
+    domain: Optional[str] = None,
+    category: Optional[str] = None,
+) -> Callable:
+    """Decorator to annotate a function with profiling markers (no-op implementation).
+
+    Args:
+        message (Optional[str]): Message to associate with the annotation.
+        color (Optional[str]): Color for the marker visualization.
+        domain (Optional[str]): Domain for the marker.
+        category (Optional[str]): Category for the marker.
+
+    Returns:
+        Callable: Decorator function that returns the original function unchanged.
+    """
+
+    def decorator(func):
+        return func
+
+    return decorator
+
+
+class DistProfiler:
+
+    def __init__(self, rank: int, config: ProfilerArguments, **kwargs):
+        self.config = config
+        if self.config.enable and is_nvtx_available():
+            self.config.enable = False
+            logger.error("!!!!!!!!!!!!!!!Currently only support NPU profiling.!!!!!!!!!!!!!!!")
+
+    def start(self, **kwargs):
+        pass
+
+    def stop(self):
+        pass
+
+    @staticmethod
+    def annotate(
+        message: Optional[str] = None,
+        color: Optional[str] = None,
+        domain: Optional[str] = None,
+        category: Optional[str] = None,
+        **kwargs,
+    ) -> Callable:
+        def decorator(func):
+            return func
+
+        return decorator
