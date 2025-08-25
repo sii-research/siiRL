@@ -22,6 +22,7 @@ from siirl.utils.params.model_args import (
     AlgorithmArguments,
 )
 from siirl.utils.params.dag_args import DagArguments
+from siirl.utils.params.profiler_args import ProfilerArguments
 
 
 @dataclass
@@ -95,6 +96,7 @@ class SiiRLArguments:
     trainer: TrainingArguments = field(default_factory=TrainingArguments)
     custom_reward_function: CustomRewardArguments = field(default_factory=CustomRewardArguments)
     dag: DagArguments = field(default_factory=DataArguments)
+    profiler: ProfilerArguments = field(default_factory=ProfilerArguments)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

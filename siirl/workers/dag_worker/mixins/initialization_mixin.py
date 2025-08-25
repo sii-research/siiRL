@@ -29,6 +29,7 @@ from siirl.scheduler.reward import create_reward_manager
 from siirl.workers.dag.node import NodeRole, NodeType
 from siirl.workers.dag_worker.constants import DAGConstants
 from siirl.utils.extras.device import get_device_name, get_nccl_backend
+from siirl.utils.debug import DistProfiler
 device_name = get_device_name()
 
 class InitializationMixin:
@@ -68,6 +69,7 @@ class InitializationMixin:
     kl_ctrl_in_reward: Optional[Any]
     validate_tokenizer: Any
     role_worker_mapping: Dict[NodeRole, Type[Worker]]
+    _profiler: DistProfiler
 
     def _initialize_worker(self):
         """Orchestrates the ordered initialization of all worker components."""
@@ -76,6 +78,7 @@ class InitializationMixin:
         self._setup_distributed_environment()
         self._initialize_core_components()
         self._initialize_node_workers()
+        self._profiler = DistProfiler(rank=self._rank, config=self.config.profiler)
 
         if self._rank == 0:
             logger.info("Rank 0: Initializing tracking logger...")
