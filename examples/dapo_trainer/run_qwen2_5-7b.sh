@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # ===================================================================================
 # ===                       USER CONFIGURATION SECTION                            ===
-# ===                    DAPO (Data-Aware Policy Optimization)                    ===
+# ===                    DAPO                                                                             ===
 # ===================================================================================
 
 # --- Experiment and Model Definition ---
-export DATASET=deepscaler
+export DATASET=dapo-math-17k
 export ALG=grpo  # DAPO uses GRPO (Group Relative Policy Optimization) as the base algorithm
 export MODEL_NAME=qwen2.5-7b
 
 # --- Path Definitions ---
-export HOME=/inspire/hdd/global_user/liuliming-liuliming
+export HOME={your_home_path}
 export TRAIN_DATA_PATH=$HOME/data/datasets/DAPO-Math-17k/dapo-math-17k.parquet
 export TEST_DATA_PATH=$HOME/data/datasets/$DATASET/test.parquet
 export MODEL_PATH=$HOME/data/models/Qwen2.5-7B-Instruct
@@ -59,7 +59,6 @@ export PPO_MINI_BATCH_SIZE=$(($PPO_MINI_BATCH_SIZE_PER_NODE * $NNODES))
 export MAX_NUM_TOKEN_PER_GPU=$(($MAX_PROMPT_LENGTH + $MAX_RESPONSE_LENGTH))
 
 # --- DAPO-specific Hyperparameters ---
-# DAPO (Data-Aware Policy Optimization) specific configurations
 # Filter groups: Enable dynamic sampling based on trajectory variance
 export ENABLE_FILTER_GROUPS=True
 export FILTER_GROUPS_METRIC=acc  # Metric used for filtering (accuracy)
@@ -86,9 +85,6 @@ export OVERLONG_PENALTY_FACTOR=1.0
 export TEMPERATURE=1.0           # Sampling temperature
 export TOP_P=1.0                 # Top-p sampling
 export TOP_K=-1                  # Top-k sampling (-1 for disabled)
-
-export WANDB_BASE_URL=https://wandb1.sii.edu.cn/
-export WANDB_API_KEY=local-6a4cc4c8b917355ce21530f9c9be52014cc55ee2
 
 # --- Define the Training Command and its Arguments ---
 TRAINING_CMD=(
@@ -132,6 +128,8 @@ TRAINING_CMD=(
     actor_rollout_ref.rollout.enable_chunked_prefill=True
     actor_rollout_ref.rollout.enforce_eager=False
     actor_rollout_ref.rollout.free_cache_engine=False
+    actor_rollout_ref.rollout.max_num_batched_tokens=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
+    actor_rollout_ref.rollout.max_model_len=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
     actor_rollout_ref.rollout.n=\$ROLLOUT_N
     actor_rollout_ref.rollout.temperature=\$TEMPERATURE
     actor_rollout_ref.rollout.top_p=\$TOP_P
@@ -154,7 +152,7 @@ TRAINING_CMD=(
     reward_model.overlong_buffer.len=\$OVERLONG_BUFFER_LEN
     reward_model.overlong_buffer.penalty_factor=\$OVERLONG_PENALTY_FACTOR
     trainer.critic_warmup=0
-    trainer.logger=["console","tensorboard","wandb"]
+    trainer.logger=["console","tensorboard"]
     trainer.project_name=\$PROJECT_NAME
     trainer.experiment_name=\$EXPERIMENT_NAME
     trainer.n_gpus_per_node=\$N_GPUS_PER_NODE
