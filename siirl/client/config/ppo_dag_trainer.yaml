@@ -354,12 +354,7 @@ algorithm:
     type: fixed
     kl_coef: 0.001
     horizon: 10000
-    target_kl: 0.01
-    # PID controller parameters (only used when type is pid)
-    controller: pid
-    proportional: 0.1
-    integral: 0.001
-    derivative: 0.0001
+    target_kl: 0.1
   use_pf_ppo: False
   pf_ppo:
     reweight_method: pow  # ["pow", "max_min", "max_random"]

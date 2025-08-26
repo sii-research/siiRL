@@ -29,7 +29,7 @@ from siirl.workers.dag_worker.data_structures import NodeOutput
 from siirl.workers.dag_worker.dag_utils import remove_prefix_from_dataproto, add_prefix_to_dataproto
 from siirl.workers.databuffer import DataProto
 
-from pyinstrument import Profiler
+# from pyinstrument import Profiler
 
 
 class ExecutionMixin:
