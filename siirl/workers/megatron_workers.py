@@ -1077,12 +1077,10 @@ class ActorWorker(MegatronWorker):
             offload_megatron_optimizer(self.actor_optimizer)
             log_gpu_memory_usage("After offload actor optimizer during update_actor", logger=logger)
 
-        get_torch_device().empty_cache()
         return data
 
     @GPUMemoryLogger(role="compute_log_prob", logger=logger)
     def compute_log_prob(self, data: DataProto):
-        get_torch_device().empty_cache()
         torch.cuda.synchronize()
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module, load_grad=False)
@@ -1114,7 +1112,6 @@ class ActorWorker(MegatronWorker):
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_module)
             log_gpu_memory_usage("After offload actor params and grad during compute_log_prob", logger=logger)
-        get_torch_device().empty_cache()
         return data
 
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=True):
@@ -1232,7 +1229,7 @@ class RolloutWorker(MegatronWorker):
 
     @GPUMemoryLogger(role="generate_sequences", logger=logger)
     def generate_sequences(self, prompts: DataProto):
-        prompts.batch = prompts.batch.to(get_device_name())
+        prompts = prompts.to(get_device_id())
         meta_info = {
             "eos_token_id": self.generation_config.eos_token_id if self.generation_config is not None else self.tokenizer.eos_token_id,
             "pad_token_id": self.generation_config.pad_token_id if self.generation_config is not None else self.tokenizer.pad_token_id,
@@ -1342,7 +1339,6 @@ class ReferenceWorker(MegatronWorker):
 
     @GPUMemoryLogger(role="compute_ref_log_prob", logger=logger)
     def compute_ref_log_prob(self, data: DataProto):
-        torch.cuda.empty_cache()
         if self._ref_is_offload_param:
             load_megatron_model_to_gpu(self.ref_module, load_grad=False)
             log_gpu_memory_usage("After load ref params and grad during compute_ref_log_prob", logger=logger)
@@ -1369,7 +1365,6 @@ class ReferenceWorker(MegatronWorker):
         if self._ref_is_offload_param:
             offload_megatron_model_to_cpu(self.ref_module)
             log_gpu_memory_usage("After offload ref params and grad during compute_ref_log_prob", logger=logger)
-        get_torch_device().empty_cache()
         return data
 
 

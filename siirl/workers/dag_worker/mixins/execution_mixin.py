@@ -29,6 +29,8 @@ from siirl.workers.dag_worker.data_structures import NodeOutput
 from siirl.workers.dag_worker.dag_utils import remove_prefix_from_dataproto, add_prefix_to_dataproto
 from siirl.workers.databuffer import DataProto
 
+from pyinstrument import Profiler
+
 
 class ExecutionMixin:
     """Handles the core DAG execution and training loop logic."""
@@ -157,9 +159,17 @@ class ExecutionMixin:
                         logger.info(f"Final validation metrics:\n{pformat(last_val_metrics)}")
                     return
 
+                # if self.global_steps == 10:
+                #     profiler = Profiler()
+                #     profiler.start()
                 ordered_metrics = self._run_training_step(epoch, batch_idx)
-                # profiler.step()
+                # if self.global_steps == 10:
+                #     profiler.stop()
+                #     profiler.write_html(f"/workspace/infrawaves/zp/siiRL/pyinstrument/megatron_dp8_vllm_8layers_{self._rank}_one_step.html")
 
+                # if self.global_steps == 12:
+                #     return
+                
                 self.global_steps += 1
 
                 if ordered_metrics is not None:

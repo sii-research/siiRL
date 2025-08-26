@@ -308,7 +308,6 @@ class MultiAgentMegatronVLLMShardingManager(BaseShardingManager):
 
     @GPUMemoryLogger(role="megatron vllm sharding_manager", logger=logger)
     def __enter__(self):
-        aggressive_empty_cache(force_sync=True)
         if self.offload_param:
             load_megatron_model_to_gpu(self.actor_module, load_grad=False)
         # vllm > 0.7.2
