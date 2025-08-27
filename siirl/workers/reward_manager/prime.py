@@ -16,7 +16,7 @@ import asyncio
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from typing import Callable, Optional
-import os
+
 import psutil
 import torch
 from transformers import PreTrainedTokenizer
@@ -93,13 +93,7 @@ class PrimeRewardManager:
     The Reward Manager used in https://github.com/PRIME-RL/PRIME
     """
 
-    def __init__(
-        self,
-        tokenizer: PreTrainedTokenizer,
-        num_examine: int,
-        compute_score: Optional[Callable] = None,
-        reward_fn_key: str = "data_source",
-    ) -> None:
+    def __init__(self, tokenizer: PreTrainedTokenizer, num_examine: int, compute_score: Optional[Callable] = None, reward_fn_key: str = "data_source", **reward_kwargs) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.compute_score = compute_score or default_compute_score
@@ -152,9 +146,9 @@ class PrimeRewardManager:
         prompt_ids = data.batch["prompts"]
         prompt_length = prompt_ids.shape[-1]
 
-        response_ids = data.batch["responses"]
+        # response_ids = data.batch["responses"]
         valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=-1)
-        sequences_str = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
+        # sequences_str = self.tokenizer.batch_decode(response_ids, skip_special_tokens=True)
         data_sources = data.non_tensor_batch["data_source"]
 
         scores = self.verify(data)
