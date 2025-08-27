@@ -231,7 +231,7 @@ class ActorArguments:
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
     use_remove_padding: bool = field(default=False, metadata={"help": "Padding removal optimization"})
     use_fused_kernels: bool = field(default=False, metadata={"help": "Kernels fuse optimization"})
-    use_torch_compile: bool = field(default=True, metadata={"help": "Whether or not use torch complie"})
+    use_torch_compile: bool = field(default=True, metadata={"help": "Whether or not use torch compile"})
     checkpoint: CheckpointArguments = field(default_factory=CheckpointArguments, metadata={"help": "Checkpoint configuration"})
     param_offload: bool = field(default=False, metadata={"help": "Enable param offload or not"})
     grad_offload: bool = field(default=False, metadata={"help": "Enable grad offload or not"})
@@ -266,10 +266,10 @@ class LayerNameMapArguments:
 
 @dataclass
 class MultiTurnArguments:
-    enable : bool = field(default=False, metadata={"help": "should set rollout.name to sglang_async if True"})
-    max_assistant_turns : Optional[int] = field(default=None, metadata={"help": "null for no limit (default max_length // 3)"})
-    tool_config_path : Optional[str] = field(default=None, metadata={"help": "null for no tool"})
-    format : str = field(default="hermes", metadata={"help": "Format of the multi-turn interaction. Options: hermes, llama3_json, ..."})
+    enable: bool = field(default=False, metadata={"help": "should set rollout.name to sglang_async if True"})
+    max_assistant_turns: Optional[int] = field(default=None, metadata={"help": "null for no limit (default max_length // 3)"})
+    tool_config_path: Optional[str] = field(default=None, metadata={"help": "null for no tool"})
+    format: str = field(default="hermes", metadata={"help": "Format of the multi-turn interaction. Options: hermes, llama3_json, ..."})
     tool_config_path: Optional[str] = field(default=None, metadata={"help": " null for no tool"})
     max_user_turns: Optional[int] = field(default=None, metadata={"help": "null for no limit (default max_length // 3)"})
     max_parallel_calls: int = field(default=1, metadata={"help": "max parallel call for tools in single turn"})
@@ -277,29 +277,38 @@ class MultiTurnArguments:
     tool_response_truncate_side: str = field(default="middle", metadata={"help": "truncate side of tool response: left, middle, right"})
     interaction_config_path: Optional[str] = field(default=None, metadata={"help": "null for no interaction"})
     completion_callback: Optional[str] = field(default=None, metadata={"help": "null for default callback"})
-    use_inference_chat_template: bool = field(default=False, metadata={"help": "- When set to True, the model's default chat template is used for multi-turn rollout, which typically matches production behavior. \n \
+    use_inference_chat_template: bool = field(
+        default=False,
+        metadata={
+            "help": "- When set to True, the model's default chat template is used for multi-turn rollout, which typically matches production behavior. \n \
     - When set to False, the token ids recorded for training are used instead; unlike the default chat template, these always include the model's full output, \n \
-      which may contain additional content such as reasoning content. This maintains the consistency between training and rollout, but it will lead to longer prompts." \
-    })
-    tokenization_sanity_check_mode: str = field(default='strict', metadata={"help": "- disable: disable tokenization sanity check \n \
+      which may contain additional content such as reasoning content. This maintains the consistency between training and rollout, but it will lead to longer prompts."
+        },
+    )
+    tokenization_sanity_check_mode: str = field(
+        default="strict",
+        metadata={
+            "help": "- disable: disable tokenization sanity check \n \
     - strict: enable strict tokenization sanity check (default) \n \
-    - ignore_strippable: ignore strippable tokens when checking tokenization sanity" \
-    })
-    
-    
-    
+    - ignore_strippable: ignore strippable tokens when checking tokenization sanity"
+        },
+    )
+
+
 @dataclass
 class CustomAsyncServer:
     path: None
     # Path to the custom async server implementation
     name: None
     # Class name of the custom async server class (e.g. AsyncvLLMServer)
+
+
 @dataclass
 class AgentArguments:
-    agent_name: str = field(default='single_turn_agent', metadata={"help": "choose which agent tool"})
-    num_workers: int =  field(default=1, metadata={"help": "custom async server configs"})
+    agent_name: str = field(default="single_turn_agent", metadata={"help": "choose which agent tool"})
+    num_workers: int = field(default=1, metadata={"help": "custom async server configs"})
     # custom async server configs
-    custom_async_server:CustomAsyncServer = field(default=None, metadata={"help": "custom async server configs"})
+    custom_async_server: CustomAsyncServer = field(default=None, metadata={"help": "custom async server configs"})
     # Path to the custom async server implementation
 
 
@@ -307,6 +316,7 @@ class AgentArguments:
 class EngineArguments:
     vllm: Dict[str, Any] = field(default_factory=lambda: {})
     sglang: Dict[str, Any] = field(default_factory=lambda: {})
+
 
 @dataclass
 class RolloutArguments:
@@ -341,8 +351,8 @@ class RolloutArguments:
     layer_name_map: LayerNameMapArguments = field(default_factory=LayerNameMapArguments)
     seed: int = field(default=0, metadata={"help": "The random seed"})
     mode: str = field(default="sync", metadata={"help": "sync: LLM, async: AsyncLLM"})
-    multi_turn : MultiTurnArguments = field(default_factory=MultiTurnArguments)
-    micro_batch_size : Optional[int] = field(default=None, metadata={"help": "Inference micro-batch size"})
+    multi_turn: MultiTurnArguments = field(default_factory=MultiTurnArguments)
+    micro_batch_size: Optional[int] = field(default=None, metadata={"help": "Inference micro-batch size"})
     engine_kwargs: EngineArguments = field(default_factory=EngineArguments)
     calculate_log_probs: bool = field(default=False, metadata={"help": "support logging rollout prob for debugging purpose"})
     agent: AgentArguments = field(default_factory=AgentArguments)
@@ -364,7 +374,7 @@ class RefArguments:
     ulysses_sequence_parallel_size: int = field(default=1, metadata={"help": "Sequence parallel size"})
     use_remove_padding: bool = field(default=False, metadata={"help": "Padding removal optimization"})
     use_fused_kernels: bool = field(default=False, metadata={"help": "Kernels fuse optimization"})
-    use_torch_compile: bool = field(default=True, metadata={"help": "Whether or not use torch complie"})
+    use_torch_compile: bool = field(default=True, metadata={"help": "Whether or not use torch compile"})
     ppo_micro_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Micro-batch size"})
     ppo_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU micro-batch size"})
     param_offload: bool = field(default=False, metadata={"help": "Enable param offload or not"})
@@ -410,14 +420,27 @@ class CriticArguments:
     grad_clip: float = field(default=1.0, metadata={"help": "Gradient clipping"})
     cliprange_value: float = field(default=0.5, metadata={"help": "Value clipping range"})
     ulysses_sequence_parallel_size: int = field(default=1, metadata={"help": "Sequence parallel size"})
-    forward_micro_batch_size_per_gpu: int = field(default=None, metadata={"help": "Forwad micro batch size per gpu"})
-    forward_micro_batch_size: int = field(default=None, metadata={"help": "Forwad micro batch size"})
+    forward_micro_batch_size_per_gpu: int = field(default=None, metadata={"help": "Forward micro batch size per gpu"})
+    forward_micro_batch_size: int = field(default=None, metadata={"help": "Forward micro batch size"})
     forward_max_token_len_per_gpu: int = field(default=32768, metadata={"help": "Forward max token length in per gpu"})
     load_weight: bool = field(default=True)
     rollout_n: int = field(default=5, metadata={"help": "rollout n"})
     checkpoint: CheckpointArguments = field(default_factory=CheckpointArguments, metadata={"help": "Checkpoint configuration"})
     ppo_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU"})
     loss_agg_mode: str = field(default="token-mean", metadata={"help": "token-mean, seq-mean-token-sum, seq-mean-token-mean"})
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class OverlongBufferArguments:
+    """DAPO-specific overlong buffer configuration for handling sequences longer than max length."""
+
+    enable: bool = field(default=False, metadata={"help": "Enable overlong sequence buffer"})
+    len: int = field(default=512, metadata={"help": "Buffer length for overlong sequences"})
+    penalty_factor: float = field(default=1.0, metadata={"help": "Penalty factor for overlong sequences"})
+    log: bool = field(default=False, metadata={"help": "Enable logging of overlong buffer rewards and penalties"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -442,13 +465,14 @@ class RewardModelArguments:
     ulysses_sequence_parallel_size: int = field(default=1, metadata={"help": "Sequence parallel size"})
     use_dynamic_bsz: bool = field(default=False, metadata={"help": "Dynamic batch size"})
     reward_manager: str = field(default="batch", metadata={"help": "Reward management strategy"})
-    forward_micro_batch_size_per_gpu: int = field(default=None, metadata={"help": "Forwad micro batch size per gpu"})
-    forward_micro_batch_size: int = field(default=None, metadata={"help": "Forwad micro batch size"})
+    forward_micro_batch_size_per_gpu: int = field(default=None, metadata={"help": "Forward micro batch size per gpu"})
+    forward_micro_batch_size: int = field(default=None, metadata={"help": "Forward micro batch size"})
     forward_max_token_len_per_gpu: int = field(default=32768, metadata={"help": "Forward max token length in per gpu"})
     load_weight: bool = field(default=True)
     launch_reward_fn_async: bool = field(default=False, metadata={"help": "custom reward function executed async on CPU, during log_prob"})
     reward_kwargs: Dict[str, Any] = field(default_factory=lambda: {})
     sandbox_fusion: Optional[Dict[str, Any]] = field(default=None)
+    overlong_buffer: OverlongBufferArguments = field(default_factory=OverlongBufferArguments, metadata={"help": "DAPO overlong buffer configuration"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -463,6 +487,18 @@ class KLCtrlArguments:
 
 
 @dataclass
+class FilterGroupsArguments:
+    """DAPO-specific filter groups configuration for dynamic sampling."""
+
+    enable: bool = field(default=False, metadata={"help": "Enable trajectory filtering based on variance"})
+    metric: str = field(default="acc", metadata={"help": "Metric used for filtering (acc, seq_final_reward, seq_reward)"})
+    max_num_gen_batches: int = field(default=10, metadata={"help": "Maximum generation batches before giving up"})
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class AlgorithmArguments:
     gamma: float = field(default=1.0, metadata={"help": "Discount factor"})
     lam: float = field(default=1.0, metadata={"help": "GAE lambda"})
@@ -472,6 +508,8 @@ class AlgorithmArguments:
     use_kl_in_reward: bool = field(default=True, metadata={"help": "Use KL In-Reward"})
     norm_adv_by_std_in_grpo: bool = field(default=True, metadata={"help": "Whether to scale the GRPO advantage"})
     weight_factor_in_cpgd: str = field(default="STD_weight", metadata={"help": "The weighting methods for advantage {STD_weight, clip_filter_like_weight, naive}"})
+    algorithm_name: str = field(default="grpo", metadata={"help": "Algorithm name, e.g., grpo, ppo, dapo"})
+    filter_groups: FilterGroupsArguments = field(default_factory=FilterGroupsArguments, metadata={"help": "DAPO filter groups configuration"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

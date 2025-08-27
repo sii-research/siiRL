@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from typing import Dict, List
+
 from siirl.workers.dag.node import NodeRole
 
 
@@ -37,4 +38,4 @@ class DAGConstants:
     FSDP_STRATEGIES: List[str] = ["fsdp", "fsdp2"]
     MEGATRON_STRATEGY: str = "megatron"
     # Metric group order
-    METRIC_GROUP_ORDER = ["step", "training", "actor", "critic", "perf", "response_length", "response", "prompt_length", "prompt", "global_seqlen", "timing_s", "timing_per_token_ms", "perf/total_num_tokens", "perf/time_per_step", "perf/throughput"]
+    METRIC_GROUP_ORDER = ["step", "training", "actor", "critic", "perf", "response_length", "response", "prompt_length", "prompt", "dapo_sampling", "global_seqlen", "timing_s", "timing_per_token_ms", "perf/total_num_tokens", "perf/time_per_step", "perf/throughput"]

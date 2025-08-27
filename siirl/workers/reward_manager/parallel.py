@@ -12,19 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from siirl import DataProto
-from siirl.utils.reward_score import _default_compute_score
-from siirl.models.transformers.internvl import IMG_CONTEXT_TOKEN
-import torch
-import os
 import multiprocessing as mp
+import os
 from functools import partial
+
+import torch
+
+from siirl import DataProto
+from siirl.models.transformers.internvl import IMG_CONTEXT_TOKEN
+from siirl.utils.reward_score import _default_compute_score
 
 
 class ParallelRewardManager:
     """The reward manager."""
 
-    def __init__(self, tokenizer, num_examine, compute_score=None) -> None:
+    def __init__(self, tokenizer, num_examine, compute_score=None, **reward_kwargs) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.compute_score = compute_score or _default_compute_score

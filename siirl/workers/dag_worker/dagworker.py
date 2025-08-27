@@ -21,10 +21,11 @@ from loguru import logger
 from torch.distributed import ProcessGroup
 
 from siirl.models.loader import TokenizerModule
-from siirl.workers.base_worker import Worker
 from siirl.scheduler.process_group_manager import ProcessGroupManager
 from siirl.utils.params import SiiRLArguments
+from siirl.workers.base_worker import Worker
 from siirl.workers.dag import TaskGraph
+from siirl.workers.dag.node import NodeRole
 from siirl.workers.databuffer import DataProto
 
 from .constants import DAGInitializationError
@@ -61,8 +62,8 @@ class DAGWorker(InitializationMixin, ExecutionMixin, NodeExecutorsMixin, Validat
         self.global_steps = 0
         self.total_training_steps = 0
         self.workers: Dict[str, Any] = {}
-        self.agent_group_worker: Dict[int, Dict["NodeRole", Any]] = defaultdict(dict)
-        self.agent_group_process_group: Dict[int, Dict["NodeRole", Any]] = defaultdict(dict)
+        self.agent_group_worker: Dict[int, Dict[NodeRole, Any]] = defaultdict(dict)
+        self.agent_group_process_group: Dict[int, Dict[NodeRole, Any]] = defaultdict(dict)
         self.process_groups: Dict[str, ProcessGroup] = {}
         self.tokenizer_mapping: Dict[str, TokenizerModule] = {}
         self.kl_ctrl_in_reward = None
@@ -76,9 +77,13 @@ class DAGWorker(InitializationMixin, ExecutionMixin, NodeExecutorsMixin, Validat
         self.taskgraph_execute_finished = False
 
         # async rollout
-        self.rollout_mode = 'sync'
+        self.rollout_mode = "sync"
         self._async_rollout_manager = None
-        self.zmq_address = None # used for async_vllmrollout
+        self.zmq_address = None  # used for async_vllmrollout
+
+        # Add a cache to hold data from an insufficient batch for the next training step.
+        # This is the core state-carrying mechanism for dynamic sampling.
+        self.sampling_leftover_cache: Optional[DataProto] = None
 
         try:
             self._initialize_worker()
