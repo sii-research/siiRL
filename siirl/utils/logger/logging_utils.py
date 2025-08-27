@@ -43,7 +43,6 @@ def set_basic_config():
         ),
         enqueue=True,
         colorize=True,
-        level="INFO",
     )
     os.makedirs(SIIRL_LOG_DIRCTORY, exist_ok=True)
 
@@ -54,6 +53,5 @@ def set_basic_config():
         format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level} | {module}:{function}:{line} >> {message}",
         compression="zip",
         encoding="utf-8",
-        level="DEBUG",
         enqueue=True,
     )
