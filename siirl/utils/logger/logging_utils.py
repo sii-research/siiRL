@@ -27,12 +27,16 @@ def set_basic_config():
     """
     This function sets the global logging format and level. It will be called when import siirl
     """
+
+    log_level = os.environ.get("LOGURU_LEVEL", "INFO")
+
     logger.remove()
     logger.level("CRITICAL", color="<bold white on red>")
     # logger.level("ERROR", color="<red><bold>")
     # logger.level("WARNING", color="<yellow>")
     logger.add(
         sys.stderr,
+        level=log_level,
         format=(
             "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
             "<level>{level.icon}</level> "
@@ -48,6 +52,7 @@ def set_basic_config():
 
     logger.add(
         sink=os.path.join(SIIRL_LOG_DIRCTORY, SIIRL_LOGGING_FILENAME + "{time:YYYY-MM-DD-HH}.log"),
+        level=log_level,
         rotation="500 MB",
         retention="30 days",
         format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level} | {module}:{function}:{line} >> {message}",
