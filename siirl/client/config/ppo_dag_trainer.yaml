@@ -111,6 +111,7 @@ actor_rollout_ref:
       override_transformer_config: {}
       use_dist_checkpointing: False
       dist_checkpointing_path: ""
+      use_mbridge: False
   ref:
     strategy: fsdp  # [fsdp, megatron]
     fsdp_config:
@@ -142,6 +143,7 @@ actor_rollout_ref:
       expert_tensor_parallel_size: 1
       param_offload: False
       override_transformer_config: ${actor_rollout_ref.actor.megatron.override_transformer_config}
+      use_mbridge: ${actor_rollout_ref.actor.megatron.use_mbridge}
   rollout:
     name: vllm
     mode: sync # sync: LLM, async: AsyncLLM
@@ -299,6 +301,7 @@ critic:
     grad_offload: False
     optimizer_offload: False
     override_transformer_config: ${actor_rollout_ref.actor.megatron.override_transformer_config}
+    use_mbridge: ${actor_rollout_ref.actor.megatron.use_mbridge}
 
 reward_model:
   enable: False
@@ -336,7 +339,8 @@ reward_model:
     use_distributed_optimizer: False
     param_dtype: "bfloat16"
     seed: 1
-    override_transformer_config: {}
+    override_transformer_config: ${actor_rollout_ref.actor.megatron.override_transformer_config}
+    use_mbridge: ${actor_rollout_ref.actor.megatron.use_mbridge}
 custom_reward_function:
   path: null
   name: compute_score
