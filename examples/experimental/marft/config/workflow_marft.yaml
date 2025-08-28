@@ -35,9 +35,13 @@ nodes:
     config: *actor1_config
     agent_group: 0
     dependencies: []
-    user_options:
-      train_cycle: 15
-      pre_chat_template: "<|im_start|>system: Two LLM agents (Reasoner -> Actor) collaborate step-by-step to solve math problems. You are the **Reasoner**: Analyze the original problem, historical actions, and reflection data (if provided) to determine the critical next step. Guide the Actor by providing concise reasoning for the optimal operation.<|im_end|>\n <|im_start|> problem: {prompt} <|im_end|>\n <|im_start|> reasoner:  "
+    agent_options:
+      process_path: examples/experimental/marft/config/process.py
+      pre_process_kwargs: 
+        pre_chat_template: "<|im_start|>system: Two LLM agents (Reasoner -> Actor) collaborate step-by-step to solve math problems. You are the **Reasoner**: Analyze the original problem, historical actions, and reflection data (if provided) to determine the critical next step. Guide the Actor by providing concise reasoning for the optimal operation.<|im_end|>\n <|im_start|> problem: {prompt} <|im_end|>\n <|im_start|> reasoner:  "
+      post_process_kwargs:
+        post_chat_template: " <|im_start|> reasoner: "
+      env: []
 
   - node_id: "rollout_actor"
     node_type: "MODEL_INFERENCE"
@@ -46,10 +50,13 @@ nodes:
     agent_group: 1
     dependencies: 
      - "rollout_reasoner"
-    user_options:
-      train_cycle: 15
-      pre_chat_template: "<|im_start|>system: Two LLM agents (Reasoner -> Actor) collaborate step-by-step. You are the **Actor**: Execute operations using original problem, action history, and Reasoner's guidance. Give the final answer after '####'.<|im_end|>\n {prompt} <|im_start|> actor: "
-
+    agent_options:
+      process_path: examples/experimental/marft/config/process.py
+      pre_process_kwargs: 
+        pre_chat_template: "<|im_start|>system: Two LLM agents (Reasoner -> Actor) collaborate step-by-step. You are the **Actor**: Execute operations using original problem, action history, and Reasoner's guidance. Give the final answer after '####'.<|im_end|>\n {prompt} <|im_start|> actor: "
+      post_process_kwargs:
+        post_chat_template: " <|im_start|> actor: "
+      env: []
   - node_id: "function_reward"
     node_type: "COMPUTE"
     node_role: "REWARD"
@@ -110,6 +117,8 @@ nodes:
     node_role: "ACTOR"
     agent_group: 0
     config: *actor1_config
+    agent_options:
+      train_cycle: 15
     dependencies:
       - "critic_2_train"
 
@@ -118,6 +127,8 @@ nodes:
     node_role: "ACTOR"
     agent_group: 1
     config: *actor2_config
+    agent_options:
+      train_cycle: 15
     dependencies:
       - "actor_1_train"
 

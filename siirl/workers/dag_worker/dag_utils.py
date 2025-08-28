@@ -27,27 +27,27 @@ def add_prefix_to_dataproto(data_proto: DataProto, node: Node):
                 new_batch[key] = value
         data_proto.batch = TensorDict(new_batch, batch_size=data_proto.batch.batch_size)
 
-    # Process non_tensor_batch
-    if data_proto.non_tensor_batch is not None:
-        new_non_tensor = {}
-        for key, value in data_proto.non_tensor_batch.items():
-            if not key.startswith(prefix_agent_group):
-                new_key = prefix + key
-                new_non_tensor[new_key] = value
-            else:
-                new_non_tensor[key] = value
-        data_proto.non_tensor_batch = new_non_tensor
+    # # Process non_tensor_batch
+    # if data_proto.non_tensor_batch is not None:
+    #     new_non_tensor = {}
+    #     for key, value in data_proto.non_tensor_batch.items():
+    #         if not key.startswith(prefix_agent_group):
+    #             new_key = prefix + key
+    #             new_non_tensor[new_key] = value
+    #         else:
+    #             new_non_tensor[key] = value
+    #     data_proto.non_tensor_batch = new_non_tensor
 
-    # Process meta_info
-    if data_proto.meta_info is not None:
-        new_meta = {}
-        for key, value in data_proto.meta_info.items():
-            if not key.startswith(prefix_agent_group):
-                new_key = prefix + key
-                new_meta[new_key] = value
-            else:
-                new_meta[key] = value
-        data_proto.meta_info = new_meta
+    # # Process meta_info
+    # if data_proto.meta_info is not None:
+    #     new_meta = {}
+    #     for key, value in data_proto.meta_info.items():
+    #         if not key.startswith(prefix_agent_group):
+    #             new_key = prefix + key
+    #             new_meta[new_key] = value
+    #         else:
+    #             new_meta[key] = value
+    #     data_proto.meta_info = new_meta
     return data_proto
 
 
@@ -75,25 +75,25 @@ def remove_prefix_from_dataproto(data_proto, node: Node):
         data_proto.batch = TensorDict(new_batch, batch_size=data_proto.batch.batch_size)
 
     # Process non_tensor_batch
-    if data_proto.non_tensor_batch is not None:
-        new_non_tensor = {}
-        for key, value in data_proto.non_tensor_batch.items():
-            if key.startswith(prefix):
-                new_key = key[prefix_len:]
-                new_non_tensor[new_key] = value
-            else:
-                new_non_tensor[key] = value
-        data_proto.non_tensor_batch = new_non_tensor
+    # if data_proto.non_tensor_batch is not None:
+    #     new_non_tensor = {}
+    #     for key, value in data_proto.non_tensor_batch.items():
+    #         if key.startswith(prefix):
+    #             new_key = key[prefix_len:]
+    #             new_non_tensor[new_key] = value
+    #         else:
+    #             new_non_tensor[key] = value
+    #     data_proto.non_tensor_batch = new_non_tensor
 
-    # Process meta_info
-    if data_proto.meta_info is not None:
-        new_meta = {}
-        for key, value in data_proto.meta_info.items():
-            if key.startswith(prefix):
-                new_key = key[prefix_len:]
-                new_meta[new_key] = value
-            else:
-                new_meta[key] = value
-        data_proto.meta_info = new_meta
+    # # Process meta_info
+    # if data_proto.meta_info is not None:
+    #     new_meta = {}
+    #     for key, value in data_proto.meta_info.items():
+    #         if key.startswith(prefix):
+    #             new_key = key[prefix_len:]
+    #             new_meta[new_key] = value
+    #         else:
+    #             new_meta[key] = value
+    #     data_proto.meta_info = new_meta
 
     return data_proto

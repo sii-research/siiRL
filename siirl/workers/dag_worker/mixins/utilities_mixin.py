@@ -382,8 +382,12 @@ class UtilitiesMixin:
                     worker.load_checkpoint(local_path=checkpoint_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
                     loaded_worker_keys.add(node_worker_key)
                 else:
-                    logger.warning(f"Rank {self._rank}: Checkpoint for agent {node.agent_group}'s {node.node_role.name} not found at {checkpoint_path}. Weights will be from initialization.")
-
+                    if len(self.agent_group_worker) > 1:
+                        # will use other agent critic
+                        pass
+                    else:
+                        logger.warning(f"Rank {self._rank}: Checkpoint for agent {node.agent_group}'s {node.node_role.name} not found at {checkpoint_path}. Weights will be from initialization.")
+                        
         # Load dataloader state. All ranks in a DP group load from the same file.
         _, dp_rank, _, _ = self._get_node_dp_info(self.first_rollout_node)
         dataloader_path = os.path.join(global_step_folder, f"data_dp_rank_{dp_rank}.pt")
@@ -893,85 +897,5 @@ class UtilitiesMixin:
             return True
         return False
 
-    def _batch_apply_pre_template(self, batch, tokenizer, chat_template="", key_prefix=""):
-        self_tokenizer = tokenizer["tokenizer"]
-        raw_prompts = batch.non_tensor_batch[key_prefix + "raw_prompt"]
-        new_prompts = []
-        for idx in range(len(raw_prompts)):
-            token_ids = batch.non_tensor_batch[key_prefix + "raw_prompt_ids"][idx]
-            prompt = self_tokenizer.decode(token_ids)
-            new_prompt = chat_template.format(prompt=prompt)
-            raw_prompts[idx][0]["content"] = new_prompt
-            new_prompts.append(new_prompt)
-        encode_data = self_tokenizer(new_prompts, return_tensors="pt", padding="max_length", truncation=True, max_length=self.config.data.max_prompt_length, padding_side="left")
-        encode_data_origin = self_tokenizer(
-            new_prompts,
-            return_tensors="np",
-            padding=False,
-            truncation=True,
-            max_length=self.config.data.max_prompt_length,
-        )
-        attention_mask = encode_data["attention_mask"]
-        position_ids = (attention_mask.cumsum(dim=1) - 1) * attention_mask
-        batch.batch[key_prefix + "input_ids"] = encode_data["input_ids"]
-        batch.batch[key_prefix + "position_ids"] = position_ids
-        batch.batch[key_prefix + "attention_mask"] = attention_mask
-        batch.non_tensor_batch[key_prefix + "raw_prompt_ids_origin"] = batch.non_tensor_batch[key_prefix + "raw_prompt_ids"].copy()
-        batch.non_tensor_batch[key_prefix + "raw_prompt_ids"] = encode_data_origin["input_ids"]
-
-    def _batch_apply_post_template(self, batch, tokenizer, chat_template="", key_prefix=""):
-        # add output template
-        self_tokenizer = tokenizer["tokenizer"]
-        pad_token_id = self_tokenizer.pad_token_id
-        new_responses = []
-
-        # remove right pad and apply post template
-        # check if only "responses", "input_ids", "attention_mask", "position_ids" will be use in later compute
-        for idx in range(len(batch.batch[key_prefix + "responses"])):
-            ## remove left_pad and right_pad
-            non_pad_index = torch.nonzero(batch.batch[key_prefix + "responses"][idx] != pad_token_id, as_tuple=False)
-            first_idx = non_pad_index[0][0].item()
-            last_idx = non_pad_index[-1][0].item()
-            response_id = batch.batch[key_prefix + "responses"][idx][first_idx : last_idx + 1].tolist()
-            prompt = self_tokenizer.decode(response_id)
-            new_response = chat_template.format(prompt=prompt)
-            new_responses.append(new_response)
-
-        # add right pad for response
-        encode_data = self_tokenizer(new_responses, return_tensors="pt", padding="max_length", truncation=True, max_length=self.config.data.max_response_length, padding_side="right")
-        # generate new response and input_ids
-        response_id = encode_data["input_ids"]
-        batch.batch[key_prefix + "responses"] = response_id
-        batch.batch[key_prefix + "input_ids"] = torch.cat([batch.batch[key_prefix + "prompts"], response_id], dim=1)
-
-        # generate attention_mask and position_id
-        attention_mask = (batch.batch[key_prefix + "input_ids"] != pad_token_id).long()
-        position_ids = (attention_mask.cumsum(dim=1) - 1) * attention_mask
-        batch.batch[key_prefix + "attention_mask"] = attention_mask
-        batch.batch[key_prefix + "position_ids"] = position_ids
-
-    def _map_rollout_out2input(self, batch: DataProto, tokenizer, next_prefix="", cur_prefix="") -> DataProto:
-        self_tokenizer = tokenizer["tokenizer"]
-        next_batch = TensorDict(
-            {
-                next_prefix + "input_ids": batch.batch[cur_prefix + "input_ids"],
-                next_prefix + "attention_mask": batch.batch[cur_prefix + "attention_mask"],
-                next_prefix + "position_ids": batch.batch[cur_prefix + "position_ids"],  # here input_ids become the whole sentences
-            },
-            batch_size=batch.batch[cur_prefix + "input_ids"].size()[0],
-        )
-        non_tensor_batch = {next_prefix + "raw_prompt": batch.non_tensor_batch[cur_prefix + "raw_prompt"], next_prefix + "reward_model": batch.non_tensor_batch[cur_prefix + "reward_model"], next_prefix + "data_source": batch.non_tensor_batch[cur_prefix + "data_source"]}
-        # get no pad new_raw_prompt_ids
-
-        non_tensor_batch[next_prefix + "raw_prompt_ids"] = []
-        bs = batch.batch[cur_prefix + "input_ids"].size()[0]
-        for idx in range(bs):
-            pad_id = batch.batch[cur_prefix + "responses"][idx]
-            non_pad_index = torch.nonzero(pad_id != self_tokenizer.pad_token_id, as_tuple=False)
-            first_idx = non_pad_index[0][0].item()
-            last_idx = non_pad_index[-1][0].item()
-            non_pad_id = pad_id[first_idx : last_idx + 1].tolist()
-            non_tensor_batch[next_prefix + "raw_prompt_ids"].append(batch.non_tensor_batch[cur_prefix + "raw_prompt_ids_origin"][idx] + non_pad_id)
-        non_tensor_batch[next_prefix + "raw_prompt_ids"] = np.array(non_tensor_batch[next_prefix + "raw_prompt_ids"], dtype=object)
-        new_batch = DataProto(batch=next_batch, non_tensor_batch=non_tensor_batch, meta_info={})
-        batch.union(new_batch)
+    def check_spmd_mode(self):
+        return self.rollout_mode == 'sync' and self._multi_agent == False
