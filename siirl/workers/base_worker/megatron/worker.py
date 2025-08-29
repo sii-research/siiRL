@@ -41,6 +41,7 @@ class MegatronWorker(Worker):
         info = DistRankInfo(tp_rank=tp_rank, dp_rank=dp_rank, pp_rank=pp_rank, cp_rank=cp_rank)
         return info
 
+    # TODO(Ping Zhang): Seperate this function for rollout
     def _init_hf_config_and_tf_config(
         self,
         model_path,
@@ -49,6 +50,7 @@ class MegatronWorker(Worker):
         override_model_config,
         override_transformer_config,
         trust_remote_code=False,
+        use_mbridge=False,
     ):
         from transformers import AutoConfig
 
@@ -60,11 +62,16 @@ class MegatronWorker(Worker):
         # Step 1: initialize the tokenizer
         self.local_path = copy_to_local(model_path)
         if tokenizer_or_path is None:
-            self.tokenizer = load_tokenizer(path=self.local_path)["tokenizer"]
+            tokenizer_processor = load_tokenizer(path=self.local_path)
+            self.tokenizer = tokenizer_processor["tokenizer"]
+            self.processor = tokenizer_processor["processor"]
         elif isinstance(tokenizer_or_path, str):
-            self.tokenizer = load_tokenizer(path=copy_to_local(tokenizer_or_path))["tokenizer"]
+            tokenizer_processor = load_tokenizer(path=copy_to_local(tokenizer_or_path))
+            self.tokenizer = tokenizer_processor["tokenizer"]
+            self.processor = tokenizer_processor["processor"]
         else:
             self.tokenizer = tokenizer_or_path
+            self.processor = tokenizer_or_path
 
         # Step 2: get the hf
         hf_config = AutoConfig.from_pretrained(self.local_path, trust_remote_code=trust_remote_code)
@@ -102,6 +109,16 @@ class MegatronWorker(Worker):
                         setattr(tf_config, k, v)
 
         add_optimization_config_to_tf_config(tf_config)
+
+        if use_mbridge:
+            from siirl.models.mcore.mbridge import AutoBridge
+
+            bridge = AutoBridge.from_config(hf_config)
+            bridge.set_extra_args(**override_transformer_config)
+            tf_config = bridge.config
+            self.bridge = bridge
+        else:
+            self.bridge = None
 
         print(f"TF config: {tf_config}")
         self.hf_config = hf_config

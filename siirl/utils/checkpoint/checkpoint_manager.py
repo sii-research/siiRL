@@ -23,9 +23,10 @@ import torch.distributed
 from filelock import FileLock
 from transformers import PreTrainedTokenizer, ProcessorMixin
 from loguru import logger
+from omegaconf import DictConfig
 
 from siirl.utils.extras.device import is_cuda_available, is_npu_available
-
+from siirl.utils.params.model_args import CheckpointArguments
 
 class BaseCheckpointManager:
     """
@@ -49,9 +50,24 @@ class BaseCheckpointManager:
         lr_scheduler: torch.optim.lr_scheduler.LRScheduler = None,
         processing_class: Union[PreTrainedTokenizer, ProcessorMixin] = None,
         checkpoint_contents: Optional[list] = None,
+        checkpoint_config: DictConfig | CheckpointArguments = None,
     ):
+        self.checkpoint_config = checkpoint_config
+        if checkpoint_config:
+            checkpoint_load_contents = checkpoint_config.load_contents
+            checkpoint_save_contents = checkpoint_config.save_contents
+        else:
+            checkpoint_load_contents = None
+            checkpoint_save_contents = None
+        
+        if checkpoint_load_contents is None:
+            checkpoint_load_contents = ["model", "optimizer", "extra"]
+        if checkpoint_save_contents is None:
+            checkpoint_save_contents = ["model", "optimizer", "extra"]
+        
         if checkpoint_contents is None:
             checkpoint_contents = ["model", "optimizer", "extra"]
+
         self.previous_global_step = None
         self.previous_saved_paths = []
 
@@ -60,10 +76,62 @@ class BaseCheckpointManager:
         self.lr_scheduler = lr_scheduler
         self.processing_class = processing_class
         self.checkpoint_contents = checkpoint_contents
+        self.checkpoint_load_contents = checkpoint_load_contents
+        self.checkpoint_save_contents = checkpoint_save_contents
 
         self.rank = torch.distributed.get_rank()
         self.world_size = torch.distributed.get_world_size()
 
+    @property
+    def should_save_model(self) -> bool:
+        """
+        Returns True if 'model' is in checkpoint_save_contents, indicating the model state should be saved.
+        """
+        return "model" in self.checkpoint_save_contents
+
+    @property
+    def should_save_optimizer(self) -> bool:
+        """
+        Returns True if 'optimizer' is in checkpoint_save_contents, indicating the optimizer state should be saved.
+        """
+        return "optimizer" in self.checkpoint_save_contents
+
+    @property
+    def should_save_extra(self) -> bool:
+        """
+        Returns True if 'extra' is in checkpoint_save_contents, indicating the extra state should be saved.
+        """
+        return "extra" in self.checkpoint_save_contents
+
+    @property
+    def should_save_hf_model(self) -> bool:
+        """
+        Returns True if 'hf_model' is in checkpoint_save_contents, indicating the model should be converted to hf
+        model and saved.
+        """
+        return "hf_model" in self.checkpoint_save_contents
+
+    @property
+    def should_load_model(self) -> bool:
+        """
+        Returns True if 'model' is in checkpoint_load_contents, indicating the model state should be loaded.
+        """
+        return "model" in self.checkpoint_load_contents
+
+    @property
+    def should_load_optimizer(self) -> bool:
+        """
+        Returns True if 'optimizer' is in checkpoint_load_contents, indicating the optimizer state should be loaded.
+        """
+        return "optimizer" in self.checkpoint_load_contents
+
+    @property
+    def should_load_extra(self) -> bool:
+        """
+        Returns True if 'extra' is in checkpoint_load_contents, indicating the extra state should be loaded.
+        """
+        return "extra" in self.checkpoint_load_contents
+    
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load: bool = False):
         raise NotImplementedError
 

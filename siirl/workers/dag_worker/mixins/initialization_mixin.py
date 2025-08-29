@@ -561,10 +561,13 @@ class InitializationMixin:
                     "actor_module": actor_worker.actor_module,
                     "inference_engine": rollout_worker.rollout.inference_engine,
                     "model_config": actor_worker.actor_model_config,
+                    "rollout_config": rollout_worker.config.rollout,
                     "transformer_config": actor_worker.tf_config,
                     "layer_name_mapping": layer_name_mapping,
                     "weight_converter": get_mcore_weight_converter(actor_worker.actor_model_config, actor_worker.dtype),
+                    "device_mesh": rollout_worker.device_mesh,
                     "offload_param": actor_worker._is_offload_param,
+                    "bridge": actor_worker.bridge,
                 },
             ),
             # TODO(Ping Zhang): update for SGLang later
