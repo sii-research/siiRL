@@ -132,7 +132,7 @@ sglang = [
 # Tool: Ruff (Linting)
 # -------------------------------
 [tool.ruff]
-line-length = 300 # TODO: Reduce this to a more reasonable value
+line-length = 120 # TODO: Reduce this to a more reasonable value
 
 [tool.ruff.lint]
 isort = {known-first-party = ["siirl"]}
