@@ -74,8 +74,3 @@ def gptmodel_forward(
     if value_model and post_process:
         output = output[..., 0]
     return output
-
-
-def gptmodel_forward_qwen2_5_vl(*args, **kwargs):
-    """Forward pass for Qwen2.5 VL model (not implemented)."""
-    raise NotImplementedError("VLM is not supported yet")

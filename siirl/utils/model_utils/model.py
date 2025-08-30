@@ -18,6 +18,7 @@ Utilities to create common models from huggingface
 import os
 import warnings
 from typing import Dict, Optional, Type
+from dataclasses import dataclass
 import re
 import numpy as np
 import torch
@@ -30,7 +31,7 @@ from transformers import (
     PretrainedConfig,
     PreTrainedModel,
 )
-
+from transformers.modeling_outputs import CausalLMOutputWithPast
 from siirl.models.registry import ModelRegistry
 from loguru import logger
 
@@ -480,3 +481,8 @@ def convert_weight_keys(state_dict: Dict[str, torch.Tensor], model: PreTrainedMo
         original_weights[key] = value
 
     return original_weights
+
+@dataclass
+class CausalLMOutputForPPO(CausalLMOutputWithPast):
+    log_probs: Optional[torch.FloatTensor] = None
+    entropy: Optional[torch.FloatTensor] = None
