@@ -118,14 +118,14 @@ class MegatronPPOActor(BasePPOActor):
         self.tf_config = tf_config
         self.actor_module = actor_module
         self.actor_optimizer: DistributedOptimizer = actor_optimizer
-        self.use_torch_profiler = self.config.profiler.get("tool") == "torch"
+        self.use_torch_profiler = self.config.profile.get("tool") == "torch"
         if self.use_torch_profiler:
             self.prof = Profiler(
-                self.config.profiler, tool_config=self.config.profiler.get("tool_config", {}).get("torch", {})
+                self.config.profile, tool_config=self.config.profile.get("tool_config", {}).get("torch", {})
             )
         else:
             self.prof = None
-        self.use_fused_kernels = self.config.get("use_fused_kernels", False)
+        self.use_fused_kernels = self.config.use_fused_kernels
         if self.use_fused_kernels:
             from siirl.models.mcore.model_forward_fused import patch_fused_forward
 
@@ -138,8 +138,8 @@ class MegatronPPOActor(BasePPOActor):
 
     def _validate_config(self, config) -> None:
         """Validate config options not implemented for Megatron backend"""
-        assert config.get("ulysses_sequence_parallel_size", 1) == 1
-        if config.get("shuffle", False):
+        assert config.ulysses_sequence_parallel_size == 1
+        if config.shuffle:
             assert config.data_loader_seed is not None, "If shuffle dataloader, seed must be manually set"
         if config.megatron.tensor_model_parallel_size == 1:
             print("[Warining] Because actor tp size == 1, set sp to False")
@@ -469,7 +469,7 @@ class MegatronPPOActor(BasePPOActor):
             label_mask[:, : -response_length - 1] = False
             label_mask[:, -1] = False
 
-            from verl.models.mcore import get_mcore_forward_fn, get_mcore_forward_fused_fn
+            from siirl.models.mcore import get_mcore_forward_fn, get_mcore_forward_fused_fn
 
             if self.use_fused_kernels:
                 forward_fn = get_mcore_forward_fused_fn(self.hf_config)
