@@ -233,6 +233,16 @@ class CheckpointArguments:
 
 
 @dataclass
+class PolicyLossArguments:
+    loss_mode: str = field(default="vanilla", metadata={"help": "Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg'."})
+    clip_cov_ratio: float = field(default=0.0002, metadata={"help": "Ratio of tokens to be clipped for clip-cov loss."})
+    clip_cov_lb: float = field(default=1.0, metadata={"help": "Lower bound for clip-cov loss."})
+    clip_cov_ub: float = field(default=5.0, metadata={"help": "Upper bound for clip-cov loss."})
+    kl_cov_ratio: float = field(default=0.0002, metadata={"help": "Ratio of tokens to be applied KL penalty for kl-cov loss."})
+    ppo_kl_coef: float = field(default=0.1, metadata={"help": "KL divergence penalty coefficient."})
+
+
+@dataclass
 class ActorArguments:
     strategy: str = field(default="fsdp", metadata={"help": "Parallel strategy"})
     ppo_mini_batch_size: int = field(default=256, metadata={"help": "PPO mini-batch size"})
@@ -252,6 +262,8 @@ class ActorArguments:
     ppo_epochs: int = field(default=1, metadata={"help": "PPO epochs"})
     shuffle: bool = field(default=False, metadata={"help": "Data shuffling"})
     ulysses_sequence_parallel_size: int = field(default=1, metadata={"help": "Sequence parallel size"})
+    policy_loss: PolicyLossArguments = field(default_factory=PolicyLossArguments, metadata={"help": "Policy loss settings"})
+    tis_imp_ratio_cap: float = field(default=-1, metadata={"help": "Truncated importance sampling ratio cap"})
     optim: OptimizerArguments = field(default_factory=OptimizerArguments, metadata={"help": "Optimizer settings"})
     fsdp_config: FSDPArguments = field(default_factory=FSDPArguments, metadata={"help": "FSDP settings"})
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
@@ -500,6 +512,13 @@ class KLCtrlArguments:
 
 
 @dataclass
+class FilterGroupsArguments:
+    enable: bool = field(default=False, metadata={"help": "Whether to enable filter groups."})
+    metric: Optional[str] = field(default=None, metadata={"help": "Metric to use for filtering: 'acc', 'score', 'seq_reward', 'seq_final_reward', etc."})
+    max_num_gen_batches: int = field(default=0, metadata={"help": "Non-positive values mean no upper limit."})
+
+
+@dataclass
 class AlgorithmArguments:
     gamma: float = field(default=1.0, metadata={"help": "Discount factor"})
     lam: float = field(default=1.0, metadata={"help": "GAE lambda"})
@@ -509,6 +528,9 @@ class AlgorithmArguments:
     use_kl_in_reward: bool = field(default=True, metadata={"help": "Use KL In-Reward"})
     norm_adv_by_std_in_grpo: bool = field(default=True, metadata={"help": "Whether to scale the GRPO advantage"})
     weight_factor_in_cpgd: str = field(default="STD_weight", metadata={"help": "The weighting methods for advantage {STD_weight, clip_filter_like_weight, naive}"})
+    use_pf_ppo: bool = field(default=False, metadata={"help": "Whether to enable preference feedback PPO."})
+    pf_ppo: dict[str, Any] = field(default_factory=dict, metadata={"help": " Preference feedback PPO settings."})
+    filter_groups: Optional[FilterGroupsArguments] = field(default=None, metadata={"help": "Filter groups settings"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

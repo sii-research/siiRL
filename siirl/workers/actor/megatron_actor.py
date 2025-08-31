@@ -311,7 +311,7 @@ class MegatronPPOActor(BasePPOActor):
 
         loss_agg_mode = self.config.loss_agg_mode
 
-        loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
+        loss_mode = self.config.policy_loss.loss_mode
 
         policy_loss_fn = get_policy_loss_fn(loss_mode)
         pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(

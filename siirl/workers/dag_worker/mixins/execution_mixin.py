@@ -343,7 +343,8 @@ class ExecutionMixin:
                                     agent_key = self._generate_agent_group_key(next_node)
                                     self._map_rollout_out2input(batch = node_output.batch, tokenizer=self.tokenizer_mapping[agent_key] ,next_prefix = f"agent_group_{next_node.agent_group}_", cur_prefix = f"agent_group_{cur_node.agent_group}_")
                             
-                            if self._whether_put_data(cur_tp_rank, next_dp_size, cur_dp_size, cur_node, next_node):
+                            is_current_last_pp_tp_rank0 = (cur_pp_rank == cur_pp_size - 1 and cur_tp_rank == 0)
+                            if self._whether_put_data(is_current_last_pp_tp_rank0, next_dp_size, cur_dp_size, cur_node, next_node):
                                 with self._timer("put_data_to_buffer", timing_raw):
                                     logger.debug(f"node {cur_node.node_id} puts data to DataBuffer for its next node {next_node.node_id}")
                                     self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch, source_dp_size=cur_dp_size, dest_dp_size=next_dp_size, timing_raw=timing_raw)

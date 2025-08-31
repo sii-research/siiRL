@@ -997,14 +997,14 @@ class UtilitiesMixin:
 
         logger.info(log_str)
 
-    def _whether_put_data(self, cur_tp_rank, next_dp_size, cur_dp_size, cur_node, next_node) -> bool:
+    def _whether_put_data(self, is_current_last_pp_tp_rank0, next_dp_size, cur_dp_size, cur_node, next_node) -> bool:
         # Determine whether to put data into buffer based on node configuration
         result = False
         reason = "No condition met"
         
-        if cur_tp_rank == 0:
+        if is_current_last_pp_tp_rank0:
             result = True
-            reason = "Current TP rank is 0"
+            reason = "Current last PP rank's TP rank 0"
         elif next_dp_size == cur_dp_size:
             if next_node.node_type in [NodeType.COMPUTE, NodeType.MODEL_TRAIN]:
                 result = True
@@ -1014,7 +1014,7 @@ class UtilitiesMixin:
             reason = "Both nodes are ROLLOUT"
             
         logger.debug(f"Rank {self._rank}: _whether_put_data decision for {cur_node.node_id}->{next_node.node_id}: {result} ({reason}). "
-                    f"cur_tp_rank={cur_tp_rank}, next_dp_size={next_dp_size}, cur_dp_size={cur_dp_size}, "
+                    f"is_current_last_pp_tp_rank0={is_current_last_pp_tp_rank0}, next_dp_size={next_dp_size}, cur_dp_size={cur_dp_size}, "
                     f"cur_node_type={cur_node.node_type}, next_node_type={next_node.node_type}, "
                     f"cur_node_role={cur_node.node_role}, next_node_role={next_node.node_role}")
         return result

@@ -29,7 +29,7 @@ import torch
 from omegaconf import DictConfig
 
 import siirl.utils.model_utils.torch_functional as siirl_F
-
+from siirl.utils.params.model_args import AlgorithmArguments, ActorArguments
 
 PolicyLossFn = Callable[
     [
@@ -38,7 +38,8 @@ PolicyLossFn = Callable[
         torch.Tensor,  # advantages
         torch.Tensor,  # response_mask
         str,  # loss_agg_mode
-        Optional[DictConfig],  # config
+        Optional[DictConfig | AlgorithmArguments],  # config
+        torch.Tensor | None,  # rollout_log_probs
     ],
     tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
 ]
@@ -203,6 +204,7 @@ def get_kl_controller(kl_ctrl):
         raise NotImplementedError
 
 
+@register_adv_est(AdvantageEstimator.GAE)  # or simply: @register_adv_est("gae")
 def compute_gae_advantage_return(
     token_level_rewards: torch.Tensor,
     values: torch.Tensor,
@@ -254,13 +256,14 @@ def compute_gae_advantage_return(
 
 
 # NOTE(sgm): this implementation only consider outcome supervision, where the reward is a scalar.
+@register_adv_est(AdvantageEstimator.GRPO)  # or simply: @register_adv_est("grpo")
 def compute_grpo_outcome_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: bool = True,
-    config: Optional[DictConfig] = None,
+    config: Optional[AlgorithmArguments] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantage for GRPO, operating only on Outcome reward
@@ -277,7 +280,7 @@ def compute_grpo_outcome_advantage(
             small value to avoid division by zero
         norm_adv_by_std_in_grpo: `(bool)`
             whether to scale the GRPO advantage
-        config: `(Optional[DictConfig])`
+        config: `(Optional[AlgorithmArguments])`
             algorithm configuration object
 
     Note:
@@ -320,13 +323,14 @@ def compute_grpo_outcome_advantage(
     return scores, scores
 
 
+@register_adv_est(AdvantageEstimator.GRPO_PASSK)  # or simply: @register_adv_est("grpo_passk")
 def compute_grpo_passk_outcome_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: bool = True,
-    config: Optional[DictConfig] = None,
+    config: Optional[AlgorithmArguments] = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -340,7 +344,7 @@ def compute_grpo_passk_outcome_advantage(
         response_mask: (bs, response_length)
         index: (bs,) → group ID per sample
         epsilon: float for numerical stability
-        config: (DictConfig) algorithm settings, which contains "norm_adv_by_std_in_grpo"
+        config: (AlgorithmArguments) algorithm settings, which contains "norm_adv_by_std_in_grpo"
 
     Returns:
         advantages: (bs, response_length)
@@ -348,7 +352,7 @@ def compute_grpo_passk_outcome_advantage(
     """
     assert config is not None
     # if True, normalize advantage by std within group
-    norm_adv_by_std_in_grpo = config.get("norm_adv_by_std_in_grpo", True)
+    norm_adv_by_std_in_grpo = config.norm_adv_by_std_in_grpo
     scores = token_level_rewards.sum(dim=-1)  # (bs,)
     advantages = torch.zeros_like(scores)
 
@@ -381,12 +385,15 @@ def compute_grpo_passk_outcome_advantage(
     return advantages, advantages
 
 
+@register_adv_est(
+    AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE
+)  # or simply: @register_adv_est("reinforce_plus_plus_baseline")
 def compute_reinforce_plus_plus_baseline_outcome_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: torch.Tensor,
     epsilon: float = 1e-6,
-    config: Optional[DictConfig] = None,
+    config: Optional[AlgorithmArguments] = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -398,7 +405,7 @@ def compute_reinforce_plus_plus_baseline_outcome_advantage(
             shape: (bs, response_length)
         response_mask: `(torch.Tensor)`
             shape: (bs, response_length)
-        config: (DictConfig) algorithm config
+        config: (AlgorithmArguments) algorithm config
 
     Returns:
         advantages: `(torch.Tensor)`
@@ -432,12 +439,13 @@ def compute_reinforce_plus_plus_baseline_outcome_advantage(
     return scores, scores
 
 
+@register_adv_est(AdvantageEstimator.RLOO)  # or simply: @register_adv_est("rloo")
 def compute_rloo_outcome_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
     epsilon: float = 1e-6,
-    config: Optional[DictConfig] = None,
+    config: Optional[AlgorithmArguments] = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -448,7 +456,7 @@ def compute_rloo_outcome_advantage(
             shape: (bs, response_length)
         response_mask: `(torch.Tensor)`
             shape: (bs, response_length)
-        config: (DictConfig) algorithm config
+        config: (AlgorithmArguments) algorithm config
 
     Returns:
         advantages: `(torch.Tensor)`
@@ -483,12 +491,13 @@ def compute_rloo_outcome_advantage(
     return scores, scores
 
 
+@register_adv_est(AdvantageEstimator.OPO)  # or simply: @register_adv_est("opo")
 def compute_opo_outcome_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
     epsilon: float = 1e-6,
-    config: Optional[DictConfig] = None,
+    config: Optional[AlgorithmArguments] = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -499,7 +508,7 @@ def compute_opo_outcome_advantage(
             shape: (bs, response_length)
         response_mask: `(torch.Tensor)`
             shape: (bs, response_length)
-        config: (DictConfig) algorithm config
+        config: (AlgorithmArguments) algorithm config
 
     Returns:
         advantages: `(torch.Tensor)`
@@ -536,8 +545,9 @@ def compute_opo_outcome_advantage(
     return scores, scores
 
 
+@register_adv_est(AdvantageEstimator.REINFORCE_PLUS_PLUS)  # or simply: @register_adv_est("reinforce_plus_plus")
 def compute_reinforce_plus_plus_outcome_advantage(
-    token_level_rewards: torch.Tensor, response_mask: torch.Tensor, config: Optional[DictConfig] = None, **kwargs
+    token_level_rewards: torch.Tensor, response_mask: torch.Tensor, config: Optional[AlgorithmArguments] = None, **kwargs
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantage for REINFORCE++.
@@ -548,7 +558,7 @@ def compute_reinforce_plus_plus_outcome_advantage(
             shape: (bs, response_length)
         response_mask: `(torch.Tensor)`
             shape: (bs, response_length)
-        config: (DictConfig) algorithm config
+        config: (AlgorithmArguments) algorithm config
 
     Returns:
         advantages: `(torch.Tensor)`
@@ -574,11 +584,12 @@ def compute_reinforce_plus_plus_outcome_advantage(
     return advantages, returns
 
 
+@register_adv_est(AdvantageEstimator.REMAX)  # or simply: @register_adv_est("remax")
 def compute_remax_outcome_advantage(
     token_level_rewards: torch.Tensor,
     reward_baselines: torch.Tensor,
     response_mask: torch.Tensor,
-    config: Optional[DictConfig] = None,
+    config: Optional[AlgorithmArguments] = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -593,7 +604,7 @@ def compute_remax_outcome_advantage(
             shape: (bs,)
         response_mask: `(torch.Tensor)`
             shape: (bs, response_length)
-        config: (DictConfig) algorithm config
+        config: (AlgorithmArguments) algorithm config
 
     Returns:
         advantages: `(torch.Tensor)`
@@ -609,6 +620,7 @@ def compute_remax_outcome_advantage(
     return advantages, returns
 
 
+@register_adv_est(AdvantageEstimator.GPG)  # or simply: @register_adv_est("gpg")
 def compute_gpg_outcome_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
@@ -798,14 +810,15 @@ def compute_policy_loss(
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 
 
+@register_policy_loss("vanilla")
 def compute_policy_loss_vanilla(
     old_log_prob: torch.Tensor,
     log_prob: torch.Tensor,
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
-    config: Optional[DictConfig | DictConfig] = None,
-    rollout_log_probs=None,
+    config: Optional[DictConfig | AlgorithmArguments] = None,
+    rollout_log_probs: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the clipped policy objective and related metrics for PPO.
@@ -824,19 +837,18 @@ def compute_policy_loss_vanilla(
             Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
         loss_agg_mode (str, optional):
             Aggregation mode for `agg_loss`. Defaults to "token-mean".
-        config: `(DictConfig)`:
+        config: `(verl.trainer.config.ActorArguments)`:
             config for the actor.
         rollout_log_probs: `(torch.Tensor)`:
             log probabilities of actions under the rollout policy, shape (batch_size, response_length).
     """
 
     assert config is not None
+    assert not isinstance(config, AlgorithmArguments)
     clip_ratio = config.clip_ratio  # Clipping parameter ε for standard PPO. See https://arxiv.org/abs/1707.06347.
     clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else clip_ratio
     clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else clip_ratio
-    clip_ratio_c = config.get(  # Lower bound of the ratio for dual-clip PPO. See https://arxiv.org/pdf/1912.09729.
-        "clip_ratio_c", 3.0
-    )
+    clip_ratio_c = config.clip_ratio_c if config.clip_ratio_c is not None else 3.0  # Lower bound of the ratio for dual-clip PPO. See https://arxiv.org/pdf/1912.09729.
 
     cliprange = clip_ratio
     cliprange_low = clip_ratio_low
@@ -885,13 +897,15 @@ def compute_policy_loss_vanilla(
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 
 
+@register_policy_loss("gspo")
 def compute_policy_loss_gspo(
     old_log_prob: torch.Tensor,
     log_prob: torch.Tensor,
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "seq-mean-token-mean",
-    config: Optional[DictConfig] = None,
+    config: Optional[DictConfig | ActorArguments] = None,
+    rollout_log_probs: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the clipped policy objective and related metrics for GSPO.
@@ -912,6 +926,7 @@ def compute_policy_loss_gspo(
     """
 
     assert config is not None
+    assert isinstance(config, ActorArguments)
     clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else config.clip_ratio
     clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else config.clip_ratio
 
@@ -948,7 +963,16 @@ def compute_policy_loss_gspo(
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 
 
-def compute_policy_loss_gpg(old_log_prob, log_prob, advantages, response_mask, loss_agg_mode="token-mean", config=None):
+@register_policy_loss("gpg")
+def compute_policy_loss_gpg(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[DictConfig | AlgorithmArguments] = None,
+    rollout_log_probs: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Adapted from
     https://github.com/AMAP-ML/GPG/blob/main/VisualThinker-R1-Zero/src/open-r1-multimodal/src/open_r1/trainer/grpo_trainer.py#L495
     Args:
@@ -968,13 +992,15 @@ def compute_policy_loss_gpg(old_log_prob, log_prob, advantages, response_mask, l
     return pg_loss, torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0)
 
 
+@register_policy_loss("clip_cov")
 def compute_policy_loss_clip_cov(
     old_log_prob: torch.Tensor,
     log_prob: torch.Tensor,
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
-    config: Optional[DictConfig | DictConfig] = None,
+    config: Optional[DictConfig | AlgorithmArguments] = None,
+    rollout_log_probs: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the clipped policy objective and related metrics for Clip-Cov.
@@ -1008,7 +1034,7 @@ def compute_policy_loss_clip_cov(
             Upper bound for clipping covariance. Defaults to 5.0.
     """
     assert config is not None
-    assert not isinstance(config, DictConfig), "passing DictConfig not supported yet"
+    assert not isinstance(config, AlgorithmArguments), "passing AlgorithmArguments not supported yet"
     assert config.policy_loss is not None
 
     clip_cov_ratio = config.policy_loss.clip_cov_ratio if config.policy_loss.clip_cov_ratio is not None else 0.0002
@@ -1061,13 +1087,15 @@ def compute_policy_loss_clip_cov(
     return pg_loss, pg_clipfrac, ppo_kl, torch.tensor(0.0)
 
 
+@register_policy_loss("kl_cov")
 def compute_policy_loss_kl_cov(
     old_log_prob: torch.Tensor,
     log_prob: torch.Tensor,
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
-    config: Optional[DictConfig | DictConfig] = None,
+    config: Optional[DictConfig | AlgorithmArguments] = None,
+    rollout_log_probs: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the clipped policy objective and related metrics for Clip-Cov.
@@ -1092,7 +1120,7 @@ def compute_policy_loss_kl_cov(
             Coefficient for the KL penalty term in the loss. Defaults to 1.
     """
     assert config is not None
-    assert not isinstance(config, DictConfig), "passing DictConfig not supported yet"
+    assert not isinstance(config, AlgorithmArguments), "passing AlgorithmArguments not supported yet"
     assert config.policy_loss is not None
 
     kl_cov_ratio = config.policy_loss.kl_cov_ratio if config.policy_loss.kl_cov_ratio is not None else 0.0002
@@ -1131,13 +1159,15 @@ def compute_policy_loss_kl_cov(
     return pg_loss, torch.tensor(0.0), ppo_kl_abs, torch.tensor(0.0)
 
 
+@register_policy_loss("geo_mean")
 def compute_policy_loss_geo_mean(
     old_log_prob: torch.Tensor,
     log_prob: torch.Tensor,
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
-    config: Optional[DictConfig | DictConfig] = None,
+    config: Optional[DictConfig | AlgorithmArguments] = None,
+    rollout_log_probs: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the clipped policy objective and related metrics for GMPO.
@@ -1159,7 +1189,7 @@ def compute_policy_loss_geo_mean(
     """
 
     assert config is not None
-    assert not isinstance(config, DictConfig)
+    assert not isinstance(config, AlgorithmArguments)
     clip_ratio = config.clip_ratio  # Clipping parameter. See https://arxiv.org/abs/1707.06347.
     clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else clip_ratio
     clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else clip_ratio

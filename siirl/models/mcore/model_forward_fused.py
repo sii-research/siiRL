@@ -27,7 +27,6 @@ from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel
 from torch import Tensor
 
 from .util import preprocess_packed_seqs
-from siirl.utils.kernel.linear_cross_entropy import linear_cross_entropy
 from siirl.utils.megatron.megatron_utils import unwrap_model
 from siirl.utils.model_utils.model import CausalLMOutputForPPO
 
@@ -241,6 +240,8 @@ def _fused_GPTModel_forward(
 
     if self.config.sequence_parallel:
         hidden_states = gather_from_sequence_parallel_region(hidden_states)
+    
+    from siirl.utils.kernel.linear_cross_entropy import linear_cross_entropy
     logprobs, entropy = linear_cross_entropy(
         hidden_states,
         self.output_layer.weight,
