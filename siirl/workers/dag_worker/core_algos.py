@@ -25,6 +25,7 @@ from enum import Enum
 from typing import Any, Callable, Optional
 
 import numpy as np
+import math
 import torch
 from omegaconf import DictConfig
 
@@ -745,6 +746,7 @@ def compute_policy_loss(
     cliprange_high=None,
     clip_ratio_c=3.0,
     loss_agg_mode: str = "token-mean",
+    use_cpgd_loss=False,
 ):
     """
     Compute the clipped policy objective and related metrics for PPO.
@@ -773,36 +775,39 @@ def compute_policy_loss(
             Defaults to 3.0.
         loss_agg_mode (str, optional):
             Aggregation mode for `agg_loss`. Defaults to "token-mean".
+        use_cpgd_loss (bool):
+            whter to use the CPGD loss
     """
-    assert clip_ratio_c > 1.0, (
-        "The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0,"
-        + f" but get the value: {clip_ratio_c}."
-    )
+    assert clip_ratio_c > 1.0, "The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0," + f" but get the value: {clip_ratio_c}."
 
     negative_approx_kl = log_prob - old_log_prob
-    # Clamp negative_approx_kl for stability
-    negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
     ratio = torch.exp(negative_approx_kl)
     ppo_kl = siirl_F.masked_mean(-negative_approx_kl, response_mask)
 
-    pg_losses1 = -advantages * ratio
     if cliprange_low is None:
         cliprange_low = cliprange
     if cliprange_high is None:
         cliprange_high = cliprange
-    pg_losses2 = -advantages * torch.clamp(
-        ratio, 1 - cliprange_low, 1 + cliprange_high
-    )  # - clip(ratio, 1-cliprange, 1+cliprange) * A
-    clip_pg_losses1 = torch.maximum(
-        pg_losses1, pg_losses2
-    )  # max(-ratio * A, -clip(ratio, 1-cliprange, 1+cliprange) * A)
+
+    if use_cpgd_loss:
+        clipped_log_prob = torch.where(advantages > 0, torch.clamp(log_prob, max=math.log(1 + cliprange_high) + old_log_prob), torch.clamp(log_prob, min=math.log(1 - cliprange_low) + old_log_prob))
+        pg_losses = -clipped_log_prob * advantages
+        pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)  # use token-mean
+
+        is_clipped = torch.where(advantages > 0, ratio > 1 + cliprange_high, ratio < 1 - cliprange_low)
+        pg_clipfrac = siirl_F.masked_mean(is_clipped.float(), response_mask).detach()
+        pg_clipfrac_lower = siirl_F.masked_mean((ratio > clip_ratio_c) * (advantages < 0).float(), response_mask).detach()
+
+        return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+
+    pg_losses1 = -advantages * ratio
+    pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)  # - clip(ratio, 1-cliprange, 1+cliprange) * A
+    clip_pg_losses1 = torch.maximum(pg_losses1, pg_losses2)  # max(-ratio * A, -clip(ratio, 1-cliprange, 1+cliprange) * A)
     pg_clipfrac = siirl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
 
     pg_losses3 = -advantages * clip_ratio_c
     clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
-    pg_clipfrac_lower = siirl_F.masked_mean(
-        torch.gt(clip_pg_losses1, pg_losses3) * (advantages < 0).float(), response_mask
-    )
+    pg_clipfrac_lower = siirl_F.masked_mean(torch.gt(clip_pg_losses1, pg_losses3) * (advantages < 0).float(), response_mask)
 
     pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
