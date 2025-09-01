@@ -13,10 +13,11 @@ export ALG=grpo
 export MODEL_NAME=qwen3-235b-a22b
 
 # --- Path Definitions ---
-export TRAIN_DATA_PATH=$HOME/data/datasets/$DATASET/train.parquet
-export TEST_DATA_PATH=$HOME/data/datasets/$DATASET/test.parquet
-export MODEL_PATH=$HOME/data/models/Qwen3-235B-A22B-Instruct-2507
-export DIST_CKPT_PATH=$HOME/data/models/Qwen3-235B-A22B-Instruct-2507-Mcore
+export TRAIN_DATA_PATH=/inspire/hdd/project/qianghuaxuexi/public/datasets/gsm8k/train.parquet
+export TEST_DATA_PATH=/inspire/hdd/project/qianghuaxuexi/public/datasets/gsm8k/test.parquet
+export MODEL_PATH=/dev/shm/Qwen3-235B-A22B/inspire/hdd/project/qianghuaxuexi/public/models/Qwen3-235B-A22B
+# export MODEL_PATH=/inspire/hdd/project/qianghuaxuexi/public/models/Qwen3-235B-A22B
+# export DIST_CKPT_PATH=/inspire/hdd/project/qianghuaxuexi/public/models/Qwen3-235B-A22B-dist-ckpt-128/release
 
 # Base output paths
 export BASE_CKPT_PATH=ckpts
@@ -28,22 +29,26 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export TRAIN_BATCH_SIZE_PER_NODE=32
 export PPO_MINI_BATCH_SIZE_PER_NODE=32
 export PPO_MICRO_BATCH_SIZE_PER_GPU=4
-export MAX_PROMPT_LENGTH=1024
-export MAX_RESPONSE_LENGTH=2048
+# export MAX_PROMPT_LENGTH=$((1024 * 2))
+# export MAX_RESPONSE_LENGTH=$((1024 * 8))
+export MAX_PROMPT_LENGTH=512
+export MAX_RESPONSE_LENGTH=512
 export ROLLOUT_GPU_MEMORY_UTILIZATION=0.6
-export ROLLOUT_TP=4
-export ROLLOUT_N=5
+export ROLLOUT_TP=16
+export ROLLOUT_N=16
 export SAVE_FREQ=30
 export TEST_FREQ=10
 export TOTAL_EPOCHS=15
 export MAX_CKPT_KEEP=5
 
-export ACTOR_REF_PP=2
-export ACTOR_REF_TP=2
-export ACTOR_REF_EP=4
+export ACTOR_REF_PP=8
+# export ACTOR_REF_VPP=1
+export ACTOR_REF_TP=1
+export ACTOR_REF_EP=8
 export ACTOR_REF_CP=1
 export ACTOR_REF_SP=True
 
+export use_dynamic_bsz=False
 # --- Multi-node (Multi-machine) distributed training environments ---
 
 # Uncomment the following line and set the correct network interface if needed for distributed backend
@@ -81,12 +86,16 @@ TRAINING_CMD=(
     actor_rollout_ref.model.path=\$MODEL_PATH
     actor_rollout_ref.actor.optim.lr=1e-6
     actor_rollout_ref.model.use_remove_padding=True
-    actor_rollout_ref.model.use_fused_kernels=False
+    actor_rollout_ref.model.use_fused_kernels=True
     actor_rollout_ref.model.trust_remote_code=True
     actor_rollout_ref.model.enable_gradient_checkpointing=True
     actor_rollout_ref.actor.strategy=megatron
+    actor_rollout_ref.actor.use_dynamic_bsz=\$use_dynamic_bsz
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=\$use_dynamic_bsz
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=\$use_dynamic_bsz
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=\$ACTOR_REF_TP
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=\$ACTOR_REF_PP
+    # actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size=\$ACTOR_REF_VPP
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=\$ACTOR_REF_EP
     actor_rollout_ref.actor.megatron.context_parallel_size=\$ACTOR_REF_CP
     actor_rollout_ref.actor.megatron.sequence_parallel=\$ACTOR_REF_SP
@@ -94,8 +103,11 @@ TRAINING_CMD=(
     actor_rollout_ref.actor.megatron.param_dtype=bfloat16
     actor_rollout_ref.actor.megatron.param_offload=True
     actor_rollout_ref.actor.megatron.optimizer_offload=True
-    actor_rollout_ref.actor.megatron.use_dist_checkpointing=True
-    actor_rollout_ref.actor.megatron.dist_checkpointing_path=\$DIST_CKPT_PATH
+    actor_rollout_ref.actor.megatron.use_dist_checkpointing=False
+    actor_rollout_ref.actor.megatron.use_mbridge=True
+    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
+    +actor_rollout_ref.actor.megatron.override_transformer_config.account_for_embedding_in_pipeline_split=True
+    +actor_rollout_ref.actor.megatron.override_transformer_config.account_for_loss_in_pipeline_split=True
     actor_rollout_ref.actor.policy_drift_coeff=0.001
     actor_rollout_ref.actor.ppo_mini_batch_size=\$PPO_MINI_BATCH_SIZE
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
@@ -116,12 +128,12 @@ TRAINING_CMD=(
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=\$ACTOR_REF_TP
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=\$ACTOR_REF_PP
+    # actor_rollout_ref.ref.megatron.virtual_pipeline_model_parallel_size=\$ACTOR_REF_VPP
     actor_rollout_ref.ref.megatron.expert_model_parallel_size=\$ACTOR_REF_EP
     actor_rollout_ref.ref.megatron.context_parallel_size=\$ACTOR_REF_CP
     actor_rollout_ref.ref.megatron.sequence_parallel=\$ACTOR_REF_SP
     actor_rollout_ref.ref.megatron.param_offload=True
-    actor_rollout_ref.ref.megatron.use_dist_checkpointing=True
-    actor_rollout_ref.ref.megatron.dist_checkpointing_path=\$DIST_CKPT_PATH
+    actor_rollout_ref.ref.megatron.use_dist_checkpointing=False
     algorithm.weight_factor_in_cpgd='STD_weight'
     algorithm.kl_ctrl.kl_coef=0.001
     trainer.critic_warmup=0
