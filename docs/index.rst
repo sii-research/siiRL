@@ -45,3 +45,4 @@ siiRL documentation
    :caption: Hardware Support
 
    ascend_tutorial/ascend_quickstart
+   ascend_tutorial/ascend_profiling_en

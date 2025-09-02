@@ -11,14 +11,14 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver/:$LD_LIBRARY_PATH
 
 export DATASET=deepscaler
 export ALG=grpo
-export MODEL_NAME=qwen2.5-7b
+export MODEL_NAME=qwen2.5-72b
 export VLLM_USE_V1=1
 
 # --- Path Definitions ---
 export HOME={your_home_path}
 export TRAIN_DATA_PATH=$HOME/data/datasets/$DATASET/train.parquet
 export TEST_DATA_PATH=$HOME/data/datasets/$DATASET/test.parquet
-export MODEL_PATH=$HOME/data/models/Qwen2.5-7B-Instruct
+export MODEL_PATH=$HOME/data/models/Qwen2.5-32B-Instruct
 
 # Base output paths
 export BASE_CKPT_PATH=ckpts
@@ -33,14 +33,14 @@ export HCCL_CONNECT_TIMEOUT=7200
 export GLOO_LOG_LEVEL=INFO
 
 # --- Key Training Hyperparameters ---
-export TRAIN_BATCH_SIZE_PER_NODE=1024
-export PPO_MINI_BATCH_SIZE_PER_NODE=256
-export PPO_MICRO_BATCH_SIZE_PER_GPU=4
+export TRAIN_BATCH_SIZE_PER_NODE=512
+export PPO_MINI_BATCH_SIZE_PER_NODE=32
+export PPO_MICRO_BATCH_SIZE_PER_GPU=2
 export MAX_PROMPT_LENGTH=2048
 export MAX_RESPONSE_LENGTH=2048
 export ROLLOUT_GPU_MEMORY_UTILIZATION=0.5
-export ROLLOUT_TP=4
-export ROLLOUT_N=5
+export ROLLOUT_TP=8
+export ROLLOUT_N=6
 export SAVE_FREQ=-1
 export TEST_FREQ=5
 export TOTAL_EPOCHS=300
@@ -54,8 +54,8 @@ export MASTER_ADDR=${MASTER_ADDR:-localhost}
 
 # --- Output Paths and Experiment Naming ---
 export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_hybrid_${NNODES}nodes
-export PROJECT_NAME=siirl_${DATASET}_${ALG}
-export EXPERIMENT_NAME=siirl_${MODEL_NAME}_${ALG}_${DATASET}_experiment
+export PROJECT_NAME=yangdian_npu_scale_up
+export EXPERIMENT_NAME=npu_siirl_${MODEL_NAME}_${NNODES}_nodes_${ALG}_${DATASET}_experiment_$(date +%Y%m%d_%H%M%S)
 export TENSORBOARD_DIR=${BASE_TENSORBOARD_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_hybrid_tensorboard/dlc_${NNODES}_$timestamp
 export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${ALG}_${DATASET}_hybrid_${NNODES}_$timestamp
 
@@ -89,7 +89,7 @@ TRAINING_CMD=(
     actor_rollout_ref.model.enable_gradient_checkpointing=True
     actor_rollout_ref.actor.fsdp_config.param_offload=True
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
-    actor_rollout_ref.actor.fsdp_config.fsdp_size=16
+    actor_rollout_ref.actor.fsdp_config.fsdp_size=64
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.rollout.tensor_model_parallel_size=\$ROLLOUT_TP
     actor_rollout_ref.rollout.name=vllm
@@ -146,7 +146,7 @@ start_ray_cluster() {
             export RAY_ADDRESS="$RAY_MASTER_ADDR:$RAY_MASTER_PORT"
             ray start --head --port="$RAY_MASTER_PORT" --dashboard-port="$RAY_DASHBOARD_PORT" "${ray_start_common_opts[@]}" --system-config='{"gcs_server_request_timeout_seconds": 60, "gcs_rpc_server_reconnect_timeout_s": 60}'
             local start_time=$(date +%s)
-            while ! ray health-check --address "$RAY_ADDRESS" &>/dev/null; do
+            while ! ray health-check --address "$RAY_ADDRESS" ; do
                 if [ "$(( $(date +%s) - start_time ))" -ge "$RAY_HEAD_WAIT_TIMEOUT" ]; then echo "ERROR: Timed out waiting for head node. Exiting." >&2; ray stop --force; exit 1; fi
                 echo "Head node not healthy yet. Retrying in 5s..."
                 sleep 5
@@ -156,7 +156,7 @@ start_ray_cluster() {
             local head_node_address="$MASTER_ADDR:$RAY_MASTER_PORT"
             echo "INFO: Worker node $(hostname) waiting for head at $head_node_address..."
             local start_time=$(date +%s)
-            while ! ray health-check --address "$head_node_address" &>/dev/null; do
+            while ! ray health-check --address "$head_node_address" ; do
                 if [ "$(( $(date +%s) - start_time ))" -ge "$RAY_HEAD_WAIT_TIMEOUT" ]; then echo "ERROR: Timed out waiting for head. Exiting." >&2; exit 1; fi
                 echo "Head not healthy yet. Retrying in 5s..."
                 sleep 5
@@ -173,6 +173,7 @@ start_ray_cluster() {
 # --- Main Execution Function ---
 main() {
     local timestamp=$(date +"%Y%m%d_%H%M%S")
+
     ray stop --force
     echo "Cleaning up residual distributed processes..."
     pkill -f ray || true

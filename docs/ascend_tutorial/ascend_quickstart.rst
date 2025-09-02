@@ -38,10 +38,13 @@ Compiling vLLM and vllm-ascend [Optional]
 
 Proper integration of vLLM within siiRL requires compiling both `vllm` and `vllm-ascend` from source. Follow the steps below, paying close attention to the instructions specific to your hardware.
 
+.. note::
+    We recommend using the latest version of vllm v0.9.2 and vllm-ascend v0.9.0rc2, which support setting use_remove_padding=True.
+
 .. code-block:: bash
     
     # vllm
-    git clone -b v0.7.3 --depth 1 https://github.com/vllm-project/vllm.git
+    git clone -b v0.9.2 --depth 1 https://github.com/vllm-project/vllm.git
     cd vllm
     pip install -r requirements-build.txt
 
@@ -51,7 +54,7 @@ Proper integration of vLLM within siiRL requires compiling both `vllm` and `vllm
 .. code-block:: bash
     
     # vllm-ascend
-    git clone -b v0.7.3.post1 --depth 1 https://github.com/vllm-project/vllm-ascend.git
+    git clone -b v0.9.0rc2 --depth 1 https://github.com/vllm-project/vllm-ascend.git
     cd vllm-ascend
     export COMPILE_CUSTOM_KERNELS=1
     python setup.py install
