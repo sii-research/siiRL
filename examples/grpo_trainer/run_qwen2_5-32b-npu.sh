@@ -4,9 +4,15 @@
 # ===================================================================================
 
 # --- Experiment and Model Definition ---
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
+export LD_LIBRARY_PATH=/usr/local/Ascend/driver/:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver/:$LD_LIBRARY_PATH
+
 export DATASET=deepscaler
 export ALG=grpo
 export MODEL_NAME=qwen2.5-32b
+export VLLM_USE_V1=1
 
 # --- Path Definitions ---
 export HOME={your_home_path}
@@ -20,26 +26,28 @@ export BASE_TENSORBOARD_PATH=tensorboard
 
 # --- GLOO Configuration ---
 export GLOO_SOCKET_IFNAME=enp91s0np0
+export HCCL_SOCKET_IFNAME=enp91s0np0
 export GLOO_SOCKET_TIMEOUT=600
 export GLOO_TCP_TIMEOUT=600
-export GLOO_LOG_LEVEL=DEBUG
+export HCCL_CONNECT_TIMEOUT=7200
+export GLOO_LOG_LEVEL=INFO
 
 # --- Key Training Hyperparameters ---
-export TRAIN_BATCH_SIZE_PER_NODE=512
+export TRAIN_BATCH_SIZE_PER_NODE=1024
 export PPO_MINI_BATCH_SIZE_PER_NODE=128
-export PPO_MICRO_BATCH_SIZE_PER_GPU=2
-export MAX_PROMPT_LENGTH=1024
-export MAX_RESPONSE_LENGTH=1024
-export ROLLOUT_GPU_MEMORY_UTILIZATION=0.4
+export PPO_MICRO_BATCH_SIZE_PER_GPU=4
+export MAX_PROMPT_LENGTH=2048
+export MAX_RESPONSE_LENGTH=2048
+export ROLLOUT_GPU_MEMORY_UTILIZATION=0.5
 export ROLLOUT_TP=4
 export ROLLOUT_N=5
-export SAVE_FREQ=30
-export TEST_FREQ=10
-export TOTAL_EPOCHS=30
+export SAVE_FREQ=-1
+export TEST_FREQ=5
+export TOTAL_EPOCHS=300
 export MAX_CKPT_KEEP=5
 
 # --- Distributed Training & Infrastructure ---
-export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-8}
+export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-16}
 export NNODES=${PET_NNODES:-1}
 export NODE_RANK=${PET_NODE_RANK:-0}
 export MASTER_ADDR=${MASTER_ADDR:-localhost}
@@ -66,24 +74,30 @@ TRAINING_CMD=(
     data.max_response_length=\$MAX_RESPONSE_LENGTH
     data.filter_overlong_prompts=True
     data.truncation='error'
+    data.auto_repeat=True
     actor_rollout_ref.model.path=\$MODEL_PATH
     actor_rollout_ref.actor.optim.lr=1e-6
-    actor_rollout_ref.model.use_remove_padding=False
+    actor_rollout_ref.model.use_remove_padding=True
     actor_rollout_ref.actor.ppo_mini_batch_size=\$PPO_MINI_BATCH_SIZE
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.actor.use_kl_loss=True
+    actor_rollout_ref.actor.grad_clip=0.3 
+    actor_rollout_ref.actor.clip_ratio=0.2
     actor_rollout_ref.actor.entropy_coeff=0
-    actor_rollout_ref.actor.kl_loss_coef=0.001
+    actor_rollout_ref.actor.kl_loss_coef=0.01
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
     actor_rollout_ref.model.enable_gradient_checkpointing=True
-    actor_rollout_ref.actor.fsdp_config.param_offload=False
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
+    actor_rollout_ref.actor.fsdp_config.param_offload=True
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
+    actor_rollout_ref.actor.fsdp_config.fsdp_size=64
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.rollout.tensor_model_parallel_size=\$ROLLOUT_TP
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.gpu_memory_utilization=\$ROLLOUT_GPU_MEMORY_UTILIZATION
     actor_rollout_ref.rollout.n=\$ROLLOUT_N
-    actor_rollout_ref.rollout.enable_chunked_prefill=False
+    actor_rollout_ref.rollout.enable_chunked_prefill=True
+    actor_rollout_ref.rollout.enforce_eager=True
+    actor_rollout_ref.rollout.free_cache_engine=True
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.ref.fsdp_config.param_offload=True
     algorithm.use_kl_in_reward=False
@@ -159,9 +173,21 @@ start_ray_cluster() {
 # --- Main Execution Function ---
 main() {
     local timestamp=$(date +"%Y%m%d_%H%M%S")
-    ray stop --force
 
-    
+    ray stop --force
+    echo "Cleaning up residual distributed processes..."
+    pkill -f ray || true
+    pkill -f siirl.client.main_dag || true
+    pkill -f torchrun || true
+    pkill -f vllm || true
+    pkill -f hccl || true
+    for port in ${MASTER_PORT:-29500} ${RAY_MASTER_PORT:-6379}; do
+        for pid in $(lsof -ti :$port); do
+            kill -9 $pid || true
+        done
+    done
+    sleep 3
+    echo "Cleanup finished."
 
     export GLOO_SOCKET_TIMEOUT=600
     export GLOO_TCP_TIMEOUT=600
