@@ -17,7 +17,7 @@ import ray
 import torch
 import asyncio
 import random
-
+import copy
 import numpy as np
 import torch.distributed  as dist
 
@@ -29,7 +29,7 @@ from .utils import AgentOutput, AgentOutputStatus
 from typing import Dict, List, Any, Tuple, Optional, Union
 from codetiming import Timer
 
-
+from loguru import logger
 from siirl.workers.rollout.sglang_rollout.async_sglang_server import AsyncSglangServer
 from siirl.workers.fsdp_workers import ActorRolloutRefWorker
 from siirl.workers.dag import TaskGraph, Node, NodeRole, NodeType
@@ -55,7 +55,7 @@ class MultiAgentLoop(UtilitiesMixin):
         self.finish_generate = False 
         assert placement_mode == 'colocate' #in ['colocate', 'spread']
         if self.rollout_config.multi_turn.max_assistant_turns is None:
-            self.rollout_config.multi_turn.max_assistant_turns = 2
+            self.rollout_config.multi_turn.max_assistant_turns = 1
     
         
     def _parse_graph(self, graph:TaskGraph):
@@ -66,9 +66,6 @@ class MultiAgentLoop(UtilitiesMixin):
             cur_node = node_queue.pop(0)
             if cur_node.node_role != NodeRole.ROLLOUT:
                 break
-            # 先不带 env
-            # if cur_node.agent_options.get('env', None):
-            #     cur_node.env = 
             self.node_queue.append(cur_node)
             next_nodes = graph.get_downstream_nodes(cur_node.node_id)
             for n in next_nodes:
@@ -88,13 +85,19 @@ class MultiAgentLoop(UtilitiesMixin):
 
     def _preprocess(self, batch:DataProto) -> List[str]:
         n = 1 if batch.meta_info.get("validate", False) else self.rollout_config.n
-        raw_prompts = batch.non_tensor_batch["raw_prompt"].repeat(n, axis=0)
+        batch = batch.repeat(n, interleave=True)
+        raw_prompts = batch.non_tensor_batch["raw_prompt"]
+        reward_model = batch.non_tensor_batch['reward_model'] if self.rollout_config.agent.rewards_with_env else None
         raw_prompts = [p.tolist() for p in raw_prompts]
-        return raw_prompts
+        if reward_model is None:
+            ground_truth = [-1] * len(raw_prompts)
+        else:
+            ground_truth = [reward['ground_truth'] for reward in reward_model]
+        return raw_prompts, ground_truth
 
     def _generate_key(self, cur_node: Node, next_node: Node, batch_id: int, global_bs: int = 0) :
-        cur_dp_size, cur_dp_rank, _, _, _, _ = self.dag._get_node_dp_info(cur_node)
-        next_dp_size, next_dp_rank, _, _, _, _ = self.dag._get_node_dp_info(next_node)
+        cur_dp_size, cur_dp_rank, _, _ = self.dag._get_node_dp_info(cur_node)
+        next_dp_size, next_dp_rank, _, _ = self.dag._get_node_dp_info(next_node)
         if cur_dp_size == cur_dp_size:
             return f"{next_node.node_id}_{next_dp_rank}"
         elif cur_dp_size > next_dp_size:
@@ -108,17 +111,34 @@ class MultiAgentLoop(UtilitiesMixin):
             next_rank = batch_id / next_bs_range + cur_dp_rank * next_rank_range
             return f"{next_node.node_id}_{next_rank}"
           
-    async def async_put_data(self, key: str, value: AgentOutput, source_dp_size: int, dest_dp_size: int, timing_raw: Dict[str, float]):
+    async def async_put_data(self, key: str, value: Tuple[AgentOutput, str], source_dp_size: int, dest_dp_size: int, timing_raw: Dict[str, float]):
         # todo(hujr): timing_raw support in multi asyncio task
-        # if  source_dp_size == dest_dp_size:
-        #     if key not in self.internal_data_cache:
-        #         self.internal_data_cache[key] = Queue()
-        #     await self.internal_data_cache[key].put(value)
-        # else:   
+        if  source_dp_size == dest_dp_size:
+            if isinstance(value, AgentOutput):
+                if key not in self.internal_data_cache:
+                    self.internal_data_cache[key] = Queue()
+                await self.internal_data_cache[key].put(value)
+            elif isinstance(value, str):
+                self.internal_data_cache[key] = value
+            else:
+                raise NotImplementedError("This Should not Happen")
+        else:   
             # random save to databuffers
-        buffer = random.choice(self.data_buffers)
-        await buffer.put.remote(key, value)
-
+            buffer = random.choice(self.data_buffers)
+            await buffer.put.remote(key, value)
+            
+    async def async_get_envdata(self, key: str, timing_raw: Dict[str, float]):
+        # todo(hujr): timing_raw support in multi asyncio task    
+        data = None  
+        if key in self.internal_data_cache:
+            data = self.internal_data_cache.pop(key, None)
+        else:
+            tasks = [buffer.pop.remote(key) for buffer in self.data_buffers]
+           
+            temp_data = await asyncio.gather(*tasks)
+            # temp_data = self.data_buffers.get(key) 
+            data = [t for t in temp_data if t is not None]
+        return data[0] if data else None
     
     async def async_get_data(self, key: str, timing_raw: Dict[str, float]):
         # todo(hujr): timing_raw support in multi asyncio task    
@@ -146,7 +166,6 @@ class MultiAgentLoop(UtilitiesMixin):
             if multiturn > max_multiturn:
                 return response, response_mask
             if should_stop:
-                #链式传递 should_stop
                 if node_idx != len(self.node_queue) - 1:
                     next_node = self.node_queue[node_idx + 1] if node_idx < len(self.node_queue) - 1  else self.node_queue[0]
                     next_key = self._generate_key(batch_idx, next_node.dp_rank, next_node.node_id)
@@ -158,7 +177,6 @@ class MultiAgentLoop(UtilitiesMixin):
                 # last agent need to interaction with env
                 tool_response, rewards, should_stop = self.env.execute(prompt)
                 prompt = prompt + tool_response
-                # response mask 计算参考verl tool_agent_loop
             next_node = self.node_queue[node_idx + 1] if node_idx < len(self.node_queue) - 1  else self.node_queue[0]
             next_key = self._generate_key(batch_idx, next_node.dp_rank, next_node.node_id)
             self.databuffer.put(next_key, [prompt, should_stop]) 
@@ -182,63 +200,141 @@ class MultiAgentLoop(UtilitiesMixin):
             barrier()
             node_worker.sleep()
             return res
-    async def colocate_task(self, agent_output:AgentOutput, agent_res:Dict,  cur_node: Node, node_idx: int, sampling_params: Dict[str, Any], global_bs: int,  timing_raw: Dict[str, float]):
-        cur_dp_size, cur_dp_rank, _, _, _, _ = self.dag._get_node_dp_info(cur_node)
+    async def check_colocate_running(self, finished_res: Dict, visited_agentoutputs: Dict):
+        finish = True
+        for node in self.node_queue:
+            if node.node_id in finished_res:
+                if len(finished_res[node.node_id]) == len(visited_agentoutputs):
+                    finish = False
+                elif len(finished_res[node.node_id]) > len(visited_agentoutputs):
+                    assert False, "This should not happen"
+                else:
+                    finish = True
+            else:
+                finish = True
+        return finish
+    
+    async def colocate_task(self, agent_output:AgentOutput, agent_res:Dict,  finished_res: Dict, cur_node: Node, node_idx: int, sampling_params: Dict[str, Any], global_bs: int,  timing_raw: Dict[str, float]):
+        cur_dp_size, cur_dp_rank, _, _ = self.dag._get_node_dp_info(cur_node)
         node_worker:ActorRolloutRefWorker = self.workers[self._generate_node_worker_key(cur_node)]
-        # if agent_output.should_stop:
-        #     return agent_output
-
-        agent_output.original_prompt, agent_output.templated_prompt = cur_node.agent_process.apply_pre_process(prompt=agent_output.original_prompt)
-        agent_output.templated_prompt = agent_output.templated_prompt[:self.rollout_config.prompt_length]
-        if agent_output.status != AgentOutputStatus.LENGTH_FINISH:
-            response = await node_worker.rollout.generate(
-                request_id=agent_output.request_id, prompt_ids=agent_output.templated_prompt, sampling_params=sampling_params
-                )
-        else:
-            response = []
-        agent_output.original_prompt, agent_output.templated_prompt, agent_output.response_mask \
-            = cur_node.agent_process.apply_post_process(oridinal_prompt = agent_output.original_prompt, templated_prompt = agent_output.templated_prompt, response = response)
-        # if cur_node.env
-        #     tool_response, rewards, should_stop = self.env.execute(prompt)
-        #     prompt = prompt + tool_response
-        #     # response mask 计算参考verl tool_agent_loop
-        if len(agent_output.templated_prompt) >= self.max_model_len:
-            agent_output.status = AgentOutputStatus.LENGTH_FINISH
         next_node = self.node_queue[node_idx + 1] if node_idx < len(self.node_queue) - 1  else self.node_queue[0]
         next_key = self._generate_key(cur_node, next_node, agent_output.batch_id, global_bs)
-        next_dp_size, _, _, _, _, _ = self.dag._get_node_dp_info(next_node)
-        if agent_output.turn >= self.rollout_config.multi_turn.max_assistant_turns - 1:
-            agent_output.templated_prompt = agent_output.templated_prompt[: len(agent_output.templated_prompt) - len(agent_output.response_mask)]
-            agent_output.response_mask = agent_output.response_mask[:self.rollout_config.response_length]
-            agent_output.response_id = agent_output.templated_prompt[-len(agent_output.response_mask) :]  
-            if cur_node.node_id not in agent_res:
-                agent_res[cur_node.node_id] = []
-            agent_res[cur_node.node_id].append(agent_output)
+        next_dp_size, _, _, _ = self.dag._get_node_dp_info(next_node)
+        obs = None
+        if agent_output.status !=  AgentOutputStatus.RUNNING:
+            if cur_node.node_id not in finished_res:
+                finished_res[cur_node.node_id] = set()
+            
+            finished_res[cur_node.node_id].add(agent_output.request_id)
+            # pre agent use same rewards with last agent
+            agent_res[cur_node.node_id][agent_output.request_id].rewards = agent_output.rewards
+            agent_res[cur_node.node_id][agent_output.request_id].status = agent_output.status
+            await self.async_put_data(next_key, agent_output, cur_dp_size, next_dp_size, timing_raw)
+            return
+        if cur_node.agent_options and cur_node.agent_options.obs_with_env:
+            obs = await self.async_get_envdata(agent_output.request_id + f'_{cur_node.agent_group}', timing_raw)
+        agent_output.original_prompt, agent_output.templated_prompt = cur_node.agent_process.apply_pre_process(prompt=agent_output.original_prompt, obs = obs)
+        agent_output.templated_prompt = agent_output.templated_prompt[:self.rollout_config.prompt_length]
+
+        response = await node_worker.rollout.generate(
+            request_id=agent_output.request_id, prompt_ids=agent_output.templated_prompt, sampling_params=sampling_params
+            )
+        if len(response) == 0:
+            # if response is None, padding response some prompt for training
+            response = "<|im_end|>"
+        agent_output.original_prompt, agent_output.templated_prompt, agent_output.response_mask \
+            = cur_node.agent_process.apply_post_process(oridinal_prompt = agent_output.original_prompt, templated_prompt = agent_output.templated_prompt, response = response)     
+                   
+        # if have env
+        if cur_node.agent_options and cur_node.agent_options.obs_with_env:
+            if cur_node.agent_process.env:    
+                pre_agent_actions = {}
+                for i in range(cur_node.agent_group):
+                    pre_agent_actions[i] = await self.async_get_envdata(agent_output.request_id + f'_{i}', timing_raw)
+            
+                for env_id, env_manager in enumerate(cur_node.agent_process.env_managers):
+                    # only support one env now
+                    if agent_output.request_id not in env_manager:
+                        env_class = cur_node.agent_process.env[env_id]
+                        env_manager[agent_output.request_id + f'{cur_node.agent_group}'] = env_class()
+                    env_instance = env_manager[agent_output.request_id + f'{cur_node.agent_group}']
+                    
+                    
+                    pre_agent_actions = [data for data in list(pre_agent_actions.values()) if data is not None]
+                    next_obs, rewards, should_stop = env_instance.step(actions = pre_agent_actions + [agent_output.original_prompt], ground_truth = agent_output.ground_truth)
+                    
+                    agent_output.rewards = rewards
+                    agent_output.original_prompt = next_obs[-1]
+                    
+                    if should_stop:
+                        agent_output.status = AgentOutputStatus.ENV_FINISH
+                    # todo: add multienv process
+                if isinstance(next_obs, list) and (isinstance(next_obs[0], list) or isinstance(next_obs[0], str)):
+                    # have multi-agent obs
+                    assert len(next_obs) == len(self.node_queue), f"env return {len(next_node)} obs, should equal agent num {len(self.node_queue)}"
+                    # this data may be get in last node ,force put to databuffer temporarily
+                    for i in range(cur_node.agent_group):
+                        if next_obs[i] is None:
+                            assert False
+                        await self.async_put_data(agent_output.request_id + f'_{i}', next_obs[i], 2, 4, timing_raw)
+            else:
+                # this data will be get in last node ,force put to databuffer temporarily
+                assert isinstance(agent_output.original_prompt, str)
+                if agent_output.original_prompt is None:
+                    assert False
+                await self.async_put_data(agent_output.request_id + f'_{cur_node.agent_group}', agent_output.original_prompt, 2, 4, timing_raw)
+                
+        if len(agent_output.templated_prompt) >= self.max_model_len:
+            agent_output.status = AgentOutputStatus.LENGTH_FINISH
+        input_and_response = agent_output.templated_prompt
+        agent_output.templated_prompt = input_and_response[: len(agent_output.templated_prompt) - len(agent_output.response_mask)]
+        agent_output.response_mask = agent_output.response_mask[:self.rollout_config.response_length]
+        if len(agent_output.response_mask) == 0:
+            # multi-agent may response none
+            agent_output.response_id = []
+        else:
+            agent_output.response_id = input_and_response[-len(agent_output.response_mask) :]
+        if cur_node.node_id not in agent_res:
+            agent_res[cur_node.node_id] = {}
+        agent_res[cur_node.node_id][agent_output.request_id] = copy.deepcopy(agent_output)
         # last node need to add turn
         if node_idx == len(self.node_queue) - 1:
             agent_output.turn = agent_output.turn + 1
+            if agent_output.turn >= self.rollout_config.multi_turn.max_assistant_turns:
+                agent_output.status = AgentOutputStatus.Turn_FINISH
+
+        if agent_output.status !=  AgentOutputStatus.RUNNING:
+            if cur_node.node_id not in finished_res:
+                finished_res[cur_node.node_id] = set()
+            finished_res[cur_node.node_id].add(agent_output.request_id)
+            agent_res[cur_node.node_id][agent_output.request_id].status = agent_output.status
+
+       
         await self.async_put_data(next_key, agent_output, cur_dp_size, next_dp_size, timing_raw)
+        
         return
     
     async def generate_colocate(self, bs, sampling_params: Dict[str, Any], timing_raw: Dict[str, float]):
         agent_res: Dict[str, List[AgentOutput]] = {}
-        agent_num = len(self.node_queue)
-        loop = 0
-        while self.finish_generate == False:
-            loop = loop + 1
+        finished_res: Dict[str, set] = {}
+        agent_num = len(self.node_queue)  
+        global_running = True
+        local_running = True  
+        while global_running:
             for i in range(agent_num):
                 visited_agentoutputs = set()
                 cur_node:Node = self.node_queue[i]  
-                cur_dp_size, cur_dp_rank, cur_tp_rank, cur_tp_size, cur_pp_rank, cur_pp_size = self.dag._get_node_dp_info(cur_node)
+                cur_dp_size, cur_dp_rank, cur_tp_rank, _ = self.dag._get_node_dp_info(cur_node)
                 if i == 0:
                     global_bs = cur_dp_size * bs
                 node_worker :ActorRolloutRefWorker = self.workers[self._generate_node_worker_key(cur_node)]
                 key = f"{cur_node.node_id}_{cur_dp_rank}"
                 workers = []
                 await node_worker.rollout.wake_up()
+                
                 # assert self.tran_bs * self.rollout_config.n % cur_dp_size == 0, f"global batch size is f{self.tran_bs * self.rollout_config.n} can't div by f{cur_dp_size} in node {cur_node.node_id}"
                 
-                if cur_tp_rank == 0:
+                if cur_tp_rank == 0 and local_running:
                     while True:
                         agent_outputs:List[AgentOutput] = await self.async_get_data(key, timing_raw)               
                         if agent_outputs is not None:
@@ -247,6 +343,7 @@ class MultiAgentLoop(UtilitiesMixin):
                                 worker_task = asyncio.create_task(
                                         self.colocate_task(agent_output = agent_output, 
                                                         agent_res = agent_res, 
+                                                        finished_res = finished_res,
                                                         cur_node = cur_node, 
                                                         node_idx = i, 
                                                         sampling_params = sampling_params, 
@@ -258,31 +355,38 @@ class MultiAgentLoop(UtilitiesMixin):
                         if len(visited_agentoutputs) == bs:
                             await asyncio.gather(*workers)
                             break   
+
                 torch.distributed.barrier(node_worker.rollout.get_device_mesh()["tp"].get_group())  
+
+
                 # Note: in async mode, can't global barrier
                 await node_worker.rollout.sleep()        
-                
-                if i == agent_num - 1 :
-                    if cur_node.node_id in agent_res:
-                        if len(agent_res[self.node_queue[agent_num - 1].node_id]) == len(visited_agentoutputs):
-                            self.finish_generate = True
-                        elif len(agent_res[self.node_queue[agent_num - 1].node_id]) > len(visited_agentoutputs):
-                            assert False, "This should not happen"
-                    # tp 0 broadcast to other tp
-                    tp_group = self.tail_device_mesh["tp"].get_group()
-                    tp_local_rank = self.tail_device_mesh["tp"].get_local_rank()
-                    src_local_rank = 0
-                    src_global_rank = self.tail_device_mesh["tp"].mesh.tolist()[src_local_rank]
-                    broadcast_list = [None]
-                    if tp_local_rank == src_local_rank:
-                        broadcast_list[0] = self.finish_generate
+                local_running = await self.check_colocate_running(finished_res, visited_agentoutputs)
+                # tp 0 broadcast to other tp
+                tp_group = self.tail_device_mesh["tp"].get_group()
+                tp_local_rank = self.tail_device_mesh["tp"].get_local_rank()
+                src_local_rank = 0
+                src_global_rank = self.tail_device_mesh["tp"].mesh.tolist()[src_local_rank]
+                broadcast_list = [None]
+                if tp_local_rank == src_local_rank:
+                    broadcast_list[0] = local_running
 
-                    dist.broadcast_object_list(
-                        object_list=broadcast_list,  
-                        src=src_global_rank,    
-                        group=tp_group          
-                    )
-                    self.finish_generate = broadcast_list[0]
+                dist.broadcast_object_list(
+                    object_list=broadcast_list,  
+                    src=src_global_rank,    
+                    group=tp_group          
+                )
+                local_running = broadcast_list[0]
+                        
+                        
+                finish_flag_tensor = torch.tensor(0 if local_running else 1, device="cuda" if torch.cuda.is_available() else "cpu")
+                dist.all_reduce(finish_flag_tensor, op=dist.ReduceOp.SUM)
+                total_finish = finish_flag_tensor.item()
+                if total_finish == dist.get_world_size():
+                    global_running = False
+                else:
+                    global_running = True
+                
         return agent_res   
     def _postprocess(self, agent_outputs: Dict[str, List[AgentOutput]]) -> DataProto:
         # NOTE: consistent with batch version of generate_sequences in vllm_rollout_spmd.py
@@ -294,9 +398,10 @@ class MultiAgentLoop(UtilitiesMixin):
 
         # prompts
         async def _single_postprocess(agent_outputs: List[AgentOutput], node: Node):
-            agent_outputs = sorted(agent_outputs, key=lambda x: x.batch_id)
+            cur_agent_outputs = list(agent_outputs.values())
+            cur_agent_outputs = sorted(cur_agent_outputs, key=lambda x: x.batch_id)
             node.agent_process.tokenizer.padding_side = "left"
-            input_ids = [{"input_ids": agent_output.templated_prompt} for agent_output in agent_outputs]
+            input_ids = [{"input_ids": agent_output.templated_prompt} for agent_output in cur_agent_outputs]
             outputs = node.agent_process.tokenizer.pad(
                 input_ids,
                 padding="max_length",
@@ -305,11 +410,10 @@ class MultiAgentLoop(UtilitiesMixin):
                 return_attention_mask=True,
             )
             prompt_ids, prompt_attention_mask = outputs["input_ids"], outputs["attention_mask"]
-
             # responses
             node.agent_process.tokenizer.padding_side = "right"
             outputs = node.agent_process.tokenizer.pad(
-                [{"input_ids": agent_output.response_id} for agent_output in agent_outputs],
+                [{"input_ids": agent_output.response_id} for agent_output in cur_agent_outputs],
                 padding="max_length",
                 max_length=self.rollout_config.response_length,
                 return_tensors="pt",
@@ -319,7 +423,7 @@ class MultiAgentLoop(UtilitiesMixin):
 
             # response_mask
             outputs = node.agent_process.tokenizer.pad(
-                [{"input_ids": agent_output.response_mask} for agent_output in agent_outputs],
+                [{"input_ids": agent_output.response_mask} for agent_output in cur_agent_outputs],
                 padding="max_length",
                 max_length=self.rollout_config.response_length,
                 return_tensors="pt",
@@ -330,7 +434,8 @@ class MultiAgentLoop(UtilitiesMixin):
                 f"mismatch in response_ids and response_mask shape: {response_ids.shape} vs {response_mask.shape}"
             )
             response_mask = response_mask * response_attention_mask
-
+            
+                
             input_ids = torch.cat([prompt_ids, response_ids], dim=1)
             attention_mask = torch.cat([prompt_attention_mask, response_attention_mask], dim=1)
             position_ids = (attention_mask.cumsum(dim=1) - 1) * attention_mask
@@ -346,12 +451,25 @@ class MultiAgentLoop(UtilitiesMixin):
                 },
                 batch_size=len(input_ids),
             )
+            if node.node_id == self.node_queue[-1].node_id and self.rollout_config.agent.rewards_with_env:
+                reward_tensor = torch.zeros_like(batch[prefix + "responses"], dtype=torch.float32)
+                for i in range(len(cur_agent_outputs)):
+                    prompt_ids = batch[prefix + "prompts"][i]
+                    prompt_length = prompt_ids.shape[-1]
+                    valid_response_length = batch[prefix + "attention_mask"][i][prompt_length:].sum()
+                    reward_tensor[i, valid_response_length - 1] = cur_agent_outputs[i].rewards
+                batch[prefix + "token_level_rewards"] = reward_tensor
+                batch[prefix + "token_level_scores"] = copy.deepcopy(reward_tensor)
+                
+            if node.agent_process.env:
+                node.agent_process.env_managers.clear()
+                node.agent_process.env_managers = [{}]
             return DataProto(batch=batch, non_tensor_batch={}, meta_info={"metrics": {}})
         
         tasks = []
         for i in range(len(self.node_queue)):
             cur_node = self.node_queue[i]
-            _, _, cur_tp_rank, _, _, _ = self.dag._get_node_dp_info(cur_node)
+            _, cur_dp_rank, cur_tp_rank, _ = self.dag._get_node_dp_info(cur_node)
             if cur_tp_rank == 0:
                 tasks.append(_single_postprocess(agent_outputs = agent_outputs[cur_node.node_id], node = cur_node))
         loop = asyncio.get_event_loop()
@@ -382,14 +500,14 @@ class MultiAgentLoop(UtilitiesMixin):
             sampling_params["temperature"] = self.rollout_config.val_kwargs.temperature
             
         if self.placement_mode == 'colocate' or self.node_if_local(entry_node):
-            prompts = self._preprocess(batch)
-            prompts_ids = entry_node.agent_process.apply_chat_template(
+            prompts, ground_truth = self._preprocess(batch)
+            prompts_ids = entry_node.agent_process.tokenizer.apply_chat_template(
                         prompts,
                         add_generation_prompt=True,
                         tokenize=True,
                     )
             tasks = []
-            dp_size, dp_rank, tp_rank, _, _, _ = self.dag._get_node_dp_info(entry_node)
+            dp_size, dp_rank, tp_rank, _ = self.dag._get_node_dp_info(entry_node)
             if tp_rank == 0:
                 for i in range(len(prompts_ids)):
                     key = self._generate_key(entry_node, entry_node, i)
@@ -399,11 +517,11 @@ class MultiAgentLoop(UtilitiesMixin):
                                     templated_prompt = '', 
                                     should_stop = False, 
                                     response_mask = [0] * len(prompts_ids[i]), 
-                                    response_id = [], 
-                                    request_id = uuid4().hex), 
+                                response_id = [], 
+                                    request_id = uuid4().hex,
+                                    ground_truth = ground_truth[i]), 
                         dp_size, dp_size, timing_raw))
-                loop.run_until_complete(asyncio.gather(*tasks))     
-        self.finish_generate = False  
+                loop.run_until_complete(asyncio.gather(*tasks))      
         with Timer(name="generate_sequences", logger=None) as timer:
             if self.placement_mode == 'spread':
                 # if in different GPUWorker
@@ -422,8 +540,10 @@ class MultiAgentLoop(UtilitiesMixin):
         # databuffer will reset in dagworker, so only reset internal_dict
         # but in validate step, databuffer will not clean
         if batch.meta_info.get("validate", False):
-            tasks = [databuffer.reset.remote() for databuffer in self.data_buffers]
-            ray.get(tasks)
+            dist.barrier()
+            if dist.get_rank() == 0:
+                tasks = [databuffer.reset.remote() for databuffer in self.data_buffers]
+                ray.get(tasks)
         self.internal_data_cache.clear()
         return generated_proto
     

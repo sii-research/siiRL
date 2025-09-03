@@ -20,6 +20,7 @@ actor_1_config: &actor1_config
   rollout.tensor_model_parallel_size: 4
   rollout.gpu_memory_utilization: 0.3
   rollout.n: 1
+  
 
 
 actor_2_config: &actor2_config
@@ -36,12 +37,12 @@ nodes:
     agent_group: 0
     dependencies: []
     agent_options:
+      obs_with_env: true
       process_path: examples/experimental/marft/config/process.py
       pre_process_kwargs: 
-        pre_chat_template: "<|im_start|>system: Two LLM agents (Reasoner -> Actor) collaborate step-by-step to solve math problems. You are the **Reasoner**: Analyze the original problem, historical actions, and reflection data (if provided) to determine the critical next step. Guide the Actor by providing concise reasoning for the optimal operation.<|im_end|>\n <|im_start|> problem: {prompt} <|im_end|>\n <|im_start|> reasoner:  "
+        pre_chat_template: "<|im_start|>system: Two LLM agents (Reasoner -> Actor) collaborate step-by-step to solve math problems. You are the **Reasoner**: Analyze the original problem, historical actions, and reflection data (if provided) to determine the critical next step. Guide the Actor by providing concise reasoning for the optimal operation.<|im_end|>\n <|im_start|> problem: ${prompt} <|im_end|>\n <|im_start|> reasoner:  "
       post_process_kwargs:
         post_chat_template: " <|im_start|> reasoner: "
-      env: []
 
   - node_id: "rollout_actor"
     node_type: "MODEL_INFERENCE"
@@ -51,12 +52,14 @@ nodes:
     dependencies: 
      - "rollout_reasoner"
     agent_options:
+      obs_with_env: true
       process_path: examples/experimental/marft/config/process.py
       pre_process_kwargs: 
-        pre_chat_template: "<|im_start|>system: Two LLM agents (Reasoner -> Actor) collaborate step-by-step. You are the **Actor**: Execute operations using original problem, action history, and Reasoner's guidance. Give the final answer after '####'.<|im_end|>\n {prompt} <|im_start|> actor: "
+        pre_chat_template: "<|im_start|>system: Two LLM agents (Reasoner -> Actor) collaborate step-by-step. You are the **Actor**: Execute operations using original problem, action history, and Reasoner's guidance. Give the final output within \\boxed{}.<|im_end|>\n ${prompt} <|im_start|> actor: "
       post_process_kwargs:
         post_chat_template: " <|im_start|> actor: "
-      env: []
+      env_path: [examples/experimental/marft/config/math_env.py:MathEnv]
+
   - node_id: "function_reward"
     node_type: "COMPUTE"
     node_role: "REWARD"

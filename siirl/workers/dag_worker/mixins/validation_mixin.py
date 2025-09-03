@@ -152,6 +152,8 @@ class ValidationMixin:
 
         gen_batch = self._prepare_generation_batch(batch_proto)
 
+        if self.config.actor_rollout_ref.rollout.agent.rewards_with_env and "reward_model" in batch_proto.non_tensor_batch:
+            gen_batch.non_tensor_batch["reward_model"] = batch_proto.non_tensor_batch["reward_model"] 
         gen_batch.meta_info = {
             "eos_token_id": self.validate_tokenizer.eos_token_id,
             "pad_token_id": self.validate_tokenizer.pad_token_id,

@@ -82,6 +82,8 @@ class NodeExecutorsMixin:
             return NodeOutput(batch=batch, metrics={})
         else:
             gen_batch = self._prepare_generation_batch(batch)
+            if self.config.actor_rollout_ref.rollout.agent.rewards_with_env and "reward_model" in batch.non_tensor_batch:
+                gen_batch.non_tensor_batch["reward_model"] = batch.non_tensor_batch["reward_model"] 
             assert self.config.actor_rollout_ref.rollout.name == 'sglang'
             gen_output = self.multi_agent_loop.generate_sequence(gen_batch)
             if gen_output:
@@ -97,6 +99,8 @@ class NodeExecutorsMixin:
     @DistProfiler.annotate(role="compute_reward")
     def compute_reward(self, batch: DataProto, tp_size: int, **kwargs) -> NodeOutput:
         """Calculates rewards for a batch of generated sequences."""
+        if "token_level_rewards" in batch.batch:
+            return NodeOutput(batch=batch, metrics={})
         batch.meta_info["global_token_num"] = (torch.sum(batch.batch["attention_mask"], dim=-1) // tp_size).tolist()
         reward_tensor, extra_infos = compute_reward(batch, self.reward_fn)
         batch.batch["token_level_scores"] = reward_tensor
@@ -161,7 +165,11 @@ class NodeExecutorsMixin:
             cur_node = kwargs["cur_node"]
             if depend_nodes := self.taskgraph.get_dependencies(cur_node.node_id):
                 depend_node = depend_nodes[0]
-                batch.batch["token_level_rewards"] = torch.zeros_like(batch.batch[f"agent_group_{depend_node.agent_group}_token_level_rewards"])
+                if adv_config.share_reward_in_agent:
+                    batch.batch["token_level_rewards"] = batch.batch[f"agent_group_{depend_node.agent_group}_token_level_rewards"].clone()
+                else:    
+                    batch.batch["token_level_rewards"] = torch.zeros_like(batch.batch[f"agent_group_{depend_node.agent_group}_token_level_rewards"])
+                batch.batch["token_level_scores"] = batch.batch[f"agent_group_{depend_node.agent_group}_token_level_scores"].clone()
                 node_output = self.compute_value(batch, cur_node.agent_group)
                 node_output.batch.batch["pre_values"] = batch.batch[f"agent_group_{depend_node.agent_group}_values"]
                 node_output.batch.batch["pre_advantages"] = batch.batch[f"agent_group_{depend_node.agent_group}_advantages"]

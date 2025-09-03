@@ -47,15 +47,13 @@ class DAGWorker(InitializationMixin, ExecutionMixin, NodeExecutorsMixin, Validat
         config: SiiRLArguments,
         process_group_manager: ProcessGroupManager,
         taskgraph_mapping: Dict[int, TaskGraph],
-        data_buffers: List["ray.actor.ActorHandle"],
-        environments: Optional[Dict[int, "ray.actor.ActorHandle"]] = None,
+        data_buffers: List["ray.actor.ActorHandle"]
     ):
         super().__init__()
         self.config = config
         self.process_group_manager = process_group_manager
         self.taskgraph_mapping = taskgraph_mapping
         self.data_buffers = data_buffers
-        self.environments = environments
         self.enable_perf = os.environ.get("SIIRL_ENABLE_PERF", "0") == "1" or config.dag.enable_perf
 
         # State attributes
