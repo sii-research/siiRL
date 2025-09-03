@@ -67,7 +67,7 @@ from siirl.utils.debug import GPUMemoryLogger
 from siirl.utils.model_utils.torch_functional import get_response_mask, pad_2d_list_to_length
 from siirl.utils.params import RolloutArguments
 from siirl.workers.rollout.base import BaseRollout
-from siirl.utils.extras.device import is_cuda_available
+from siirl.utils.extras.device import is_cuda_available, device_synchronize
 
 # TODO
 # 1. support pp in vllm
@@ -232,7 +232,7 @@ class vLLMRollout(BaseRollout):
             self.perf_step = 1
             world_size = torch.distributed.get_world_size()
             model_name = os.path.basename(os.path.normpath(model_path))
-            ts = datetime.now(tz=ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d-%H")
+            ts = datetime.now(tz=ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d-%H-%M-%S")
             self.perf_log_path = os.path.join("performance_logs", model_name, ts)
             os.makedirs(self.perf_log_path, exist_ok=True)
             self.perf_log_file = os.path.join(self.perf_log_path, f"rollout_world_size_{world_size}.csv")
@@ -296,7 +296,7 @@ class vLLMRollout(BaseRollout):
         if self.enbale_perf:
             # Record prompt length
             prompt_lengths = [len(item["prompt_token_ids"]) for item in vllm_inputs]
-            torch.cuda.synchronize()
+            device_synchronize()
             start_time = time.time()
 
         do_sample = prompts.meta_info.get("do_sample", True)
@@ -356,7 +356,7 @@ class vLLMRollout(BaseRollout):
 
             if self.enbale_perf:
                 rank = torch.distributed.get_rank()
-                torch.cuda.synchronize()
+                device_synchronize()
                 inference_latency = time.time() - start_time
                 # Record the length of generated tokens
                 generated_lengths = [len(o.outputs[0].token_ids) for o in outputs]

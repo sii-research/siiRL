@@ -33,7 +33,7 @@ from zoneinfo import ZoneInfo
 
 from siirl.dataloader import DataLoaderNode
 from siirl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
-from siirl.utils.extras.device import get_device_id, get_device_name
+from siirl.utils.extras.device import get_device_id, get_device_name, device_synchronize
 from siirl.utils.metrics.metric_utils import compute_throughout_metrics, compute_timing_metrics
 from siirl.utils.params import SiiRLArguments
 from siirl.workers.base_worker import Worker
@@ -219,11 +219,11 @@ class UtilitiesMixin:
     def _timer(self, name: str, timing_dict: dict):
         """A context manager to measure execution time of a code block."""
         if self.enable_perf:
-            torch.cuda.synchronize()
+            device_synchronize()
         start_time = time.perf_counter()
         yield
         if self.enable_perf:
-            torch.cuda.synchronize()
+            device_synchronize()
         end_time = time.perf_counter()
         timing_dict[name] = timing_dict.get(name, 0) + end_time - start_time
 
@@ -752,7 +752,7 @@ class UtilitiesMixin:
                 return
 
             # Define output directory and create it if it doesn't exist
-            ts = self._get_time_now().strftime("%Y-%m-%d-%H")
+            ts = self._get_time_now().strftime("%Y-%m-%d-%H-%M-%S")
             try:
                 # Try to get model name from model path config
                 model_name = self._try_to_get_model_name_from_path()

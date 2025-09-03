@@ -76,3 +76,17 @@ def get_nccl_backend() -> str:
     else:
         raise RuntimeError(f"No available nccl backend found on device type {get_device_name()}.")
     return get_torch_device().current_device()
+
+def device_synchronize():
+    """
+    Synchronize the current device to ensure that all previously
+    launched operations have completed.
+
+    - If CUDA is available, it calls `torch.cuda.synchronize()`.
+    - If NPU is available, it calls `torch.npu.synchronize()`.
+
+    """
+    if is_cuda_available:
+        torch.cuda.synchronize()
+    elif is_npu_available:
+        torch.npu.synchronize()
