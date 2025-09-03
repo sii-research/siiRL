@@ -79,46 +79,50 @@ class AgentProcess():
         self.post_process_kwargs: dict = agent_options.post_process_kwargs
         self._init_process_handle(process_path)
         
-        self.env_path = agent_options.env
+        self.env_path = agent_options.env_path
+        self.env_managers = [{}] # map str to env instance
+        self.env = None
+        if self.env_path:
+            self.init_env_class()
         # init tokenizer for each node
         tokenizer_module = load_tokenizer(model_args=intern_config.model)
         self.tokenizer = tokenizer_module.get("tokenizer")
         
         self.env_handles = None
+    def load_attr(self, file_path, attr_name):
+        try:
+            module_name = f"{hash(file_path) & 0xfffffff}"
+            spec = importlib.util.spec_from_file_location(module_name, file_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)    
+        except Exception as e:
+            raise RuntimeError(f"Error loading class from '{file_path}': {e}") from e
+        try:
+            attr = getattr(module, attr_name)
+            return attr
+        except Exception as e:
+            logger.warning(f"Error loading attr from '{file_path}:{e}")
+        return None
             
-            
-    def init_env_handle(self):
-        
-        pass
-        
+    def init_env_class(self):
+        self.env = []
+        for env_path in self.env_path:
+            file_path, class_ref = env_path.split(':')
+            env = self.load_attr(file_path, class_ref)
+            self.env.append(env)
         
     def _init_process_handle(self, process_path):
         if process_path is not None:
-            try:
-                module_name = f"{hash(process_path) & 0xfffffff}"
-                spec = importlib.util.spec_from_file_location(module_name, process_path)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)    
-            except Exception as e:
-                raise RuntimeError(f"Error loading preprocess from '{process_path}': {e}") from e
-            try:
-                pre_func = getattr(module, 'pre_process')
-                self.pre_process = pre_func
-            except Exception as e:
-                raise RuntimeError(f"Error loading preprocess from '{process_path}:pre_process': {e}") from e
-            try:
-                post_func = getattr(module, 'post_process')
-                self.post_process = post_func
-            except Exception as e:
-                raise RuntimeError(f"Error loading preprocess from '{process_path}:post_process': {e}") from e
+            self.pre_process = self.load_attr(process_path, 'pre_process')
+            self.post_process = self.load_attr(process_path, 'post_process')
     # each agent may have diferent tokenizer
     # so, we make sure preprocess get str instead of list except get List[int] from dataloader in first agent
-    def apply_pre_process(self, prompt: Optional[Tuple[str, List]]) -> str:
+    def apply_pre_process(self, prompt: Optional[Tuple[str, List]], obs: Optional[Tuple[str, List]]) -> str:
         templated_prompt = None
         if isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
-        if hasattr(self, "pre_process"):
-            templated_prompt = self.pre_process(self.tokenizer, prompt, **self.pre_process_kwargs) 
+        if self.pre_process:
+            templated_prompt = self.pre_process(self.tokenizer, prompt, obs, **self.pre_process_kwargs) 
         else:
             templated_prompt = prompt
         return prompt, templated_prompt
@@ -127,20 +131,14 @@ class AgentProcess():
     def apply_post_process(self, oridinal_prompt , templated_prompt , response) -> Tuple[List[int], List[int]]:
         if isinstance(response, str):
             response = self.tokenizer.encode(response)
-        if hasattr(self, "post_process"):
+        if self.post_process:
             oridinal_prompt = self.post_process(self.tokenizer, oridinal_prompt, response, **self.post_process_kwargs)
+        else:
+            oridinal_prompt = oridinal_prompt + response
         response_mask = [1] * len(response)
         templated_prompt = templated_prompt + response
         return self.tokenizer.decode(oridinal_prompt), templated_prompt, response_mask
-    def decode(self, prompt_id):
-        return self.tokenizer.decode(prompt_id)
-    def encode(self, prompt):
-        return self.tokenizer.encode(prompt)
-    def apply_chat_template(self, prompts,
-                        add_generation_prompt,
-                        tokenize
-                    ):
-        return self.tokenizer.apply_chat_template(prompts, add_generation_prompt=add_generation_prompt, tokenize=tokenize)      
+  
 class Node:
     """
     Represents a node (task unit) in the DAG.

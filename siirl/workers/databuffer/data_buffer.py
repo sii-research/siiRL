@@ -145,7 +145,7 @@ class DataBuffer:
         self.storage: Dict[str, Union[ray.ObjectRef, List[DataProto], Tuple[DataProto, Dict]]] = {}
 
         self.active_storage = self.storage
-        self.old_storage: Optional[Dict[str, Union[ray.ObjectRef, List[DataProto], Tuple[DataProto, Dict], AgentOutput]]] = None
+        self.old_storage: Optional[Dict[str, Union[ray.ObjectRef, List[DataProto], Tuple[DataProto, Dict], str]]] = None
         
         self.storage_queue: Dict[str, Queue]
         self.active_storage_queue = self.storage
@@ -158,7 +158,7 @@ class DataBuffer:
 
         logger.debug(f"DataBuffer actor (ID: {self.buffer_id}) initialized on node {ray.get_runtime_context().get_node_id()}.")
 
-    async def put(self, key: str, value: Union[List[ray.ObjectRef], DataProto, AgentOutput]) -> bool:
+    async def put(self, key: str, value: Union[List[ray.ObjectRef], DataProto, str]) -> bool:
         """Atomically places a data item into the buffer.
 
         If a `put` occurs for a key that is already cached (from a previous `get`),
@@ -182,6 +182,10 @@ class DataBuffer:
                 if key not in self.active_storage_queue:
                     self.active_storage_queue[key] = Queue()
                 await self.active_storage_queue[key].put(value)
+                return True
+            if isinstance(value, str):
+                # used for env
+                self.active_storage[key] = value
                 return True
             if isinstance(value, DataProto):
                 current_item = self.active_storage.get(key)

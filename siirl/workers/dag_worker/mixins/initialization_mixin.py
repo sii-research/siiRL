@@ -30,8 +30,6 @@ from siirl.utils.extras.device import get_device_name, get_nccl_backend
 from siirl.workers.base_worker import Worker
 from siirl.workers.dag.node import NodeRole, NodeType
 from siirl.workers.dag_worker.constants import DAGConstants
-from siirl.utils.extras.device import get_device_name, get_nccl_backend
-from siirl.utils.import_string import import_string
 from siirl.workers.multi_agent.multiagent_generate import MultiAgentLoop
 
 device_name = get_device_name()

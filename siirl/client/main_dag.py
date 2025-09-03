@@ -29,7 +29,8 @@ from siirl.utils.logger.logging_utils import set_basic_config
 from siirl.utils.params import SiiRLArguments, log_dict_formatted, parse_config
 from siirl.workers.dag import DAGConfigLoader
 from siirl.workers.databuffer import init_data_buffer
-from siirl.workers.environment import EnvironmentConfigLoader
+
+
 
 # --- Constants ---
 RAY_RUNTIME_ENV_VARS = {
@@ -101,19 +102,12 @@ class MainRunner:
         logger.info("MainRunner started. Beginning workflow setup...")
         start_time = time.time()
 
-        # 1. Load environment configurations
-        environment_handlers = None
-        if siirl_args.dag.env_enable:
-            assert siirl_args.dag.environment_path is not None, "Environment path must be provided when env_enable is True."
-            logger.info(f"Loading environments from: {siirl_args.dag.environment_path}")
-            environment_handlers = EnvironmentConfigLoader().load_environments_from_file(siirl_args.dag.environment_path)
-
-        # 2. Init DataBuffer
+        # 1. Init DataBuffer
         logger.info(f"Init DataBuffer with sharding number: {siirl_args.trainer.nnodes}")
         databuffer_number = get_databuffer_shard_number(siirl_args)
         data_buffer_handlers = init_data_buffer(databuffer_number)
 
-        # 3. Load and configure the workerflow task graph (DAG)
+        # 2. Load and configure the workerflow task graph (DAG)
         if siirl_args.dag.workflow_path is None:
             # If no workerflow path is provided, determine the default workflow config
             workflow_path = determine_workflow_config(self, siirl_args)
@@ -127,7 +121,7 @@ class MainRunner:
         update_task_graph_node_configs(workerflow_taskgraph, siirl_args)
         display_node_config(workerflow_taskgraph)
 
-        # 4. Schedule the task graph across available resources
+        # 3. Schedule the task graph across available resources
         logger.info("Scheduling tasks across nodes and GPUs...")
         total_workers = siirl_args.trainer.nnodes * siirl_args.trainer.n_gpus_per_node
         task_scheduler = TaskScheduler(siirl_args.trainer.nnodes, siirl_args.trainer.n_gpus_per_node)
@@ -135,7 +129,7 @@ class MainRunner:
         log_schedule_assignments(rank_taskgraph_mapping, total_workers)
         unique_graphs_map = task_scheduler.get_unique_assigned_task_graphs()
 
-        # 5. Create and configure process groups for communication
+        # 4. Create and configure process groups for communication
         logger.info("Initializing process groups for distributed communication...")
         process_group_manager = ProcessGroupManager(total_workers, rank_taskgraph_mapping)
         log_process_group_manager_details(process_group_manager, log_level="debug")
@@ -153,7 +147,6 @@ class MainRunner:
             rank_taskgraph_mapping=rank_taskgraph_mapping,
             unique_graphs_map=unique_graphs_map,
             data_buffer_handles=data_buffer_handlers,  # Placeholder for DataBuffer
-            environments_handles=environment_handlers,
             device_name=siirl_args.trainer.device,
         )
 

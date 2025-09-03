@@ -35,11 +35,12 @@ from siirl.workers.reward_manager import (
     BatchRewardManager,
     NaiveRewardManager,
     PrimeRewardManager,
+    ParallelRewardManager
 )
 
 Tokenizer = Any
 RewardTensor = Any
-AnyRewardManager = Union[NaiveRewardManager, PrimeRewardManager, BatchRewardManager, DAPORewardManager]
+AnyRewardManager = Union[NaiveRewardManager, PrimeRewardManager, BatchRewardManager, DAPORewardManager, ParallelRewardManager]
 
 
 def load_custom_reward_function(config: SiiRLArguments) -> Optional[Callable]:
@@ -130,6 +131,7 @@ def create_reward_manager(
         "prime": PrimeRewardManager,
         "batch": BatchRewardManager,
         "dapo": DAPORewardManager,
+        "parallel": ParallelRewardManager
     }
     reward_manager_name = config.reward_model.reward_manager
     reward_manager_cls = manager_map.get(reward_manager_name)

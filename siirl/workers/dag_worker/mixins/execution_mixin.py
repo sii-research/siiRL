@@ -302,16 +302,13 @@ class ExecutionMixin:
                             if cur_node.agent_options and cur_node.agent_options.train_cycle:
                                 cycle_round = (epoch - 1) // cur_node.agent_options.train_cycle
                                 # only support 2 agent now, more than 2 agent may put into different device because of device_mem
-                                if cycle_round % 2 == 0:
-                                    if cur_node.node_role == NodeRole.ACTOR and cur_node.agent_group != 0:
-                                        node_output = NodeOutput(batch=batch)
-                                elif cycle_round % 2 == 1:
-                                    if cur_node.node_role == NodeRole.ACTOR and cur_node.agent_group != 1:
-                                        node_output = NodeOutput(batch=batch)
+                                agent_num = len(self.agent_group_worker)
+                                if cycle_round % agent_num == cur_node.agent_group:
+                                    node_output = cur_node.run(batch=batch, worker_group_index=cur_node.agent_group, siirl_args=self.config)
                                 else:
-                                    assert False, "should not happen"
+                                    node_output = NodeOutput(batch=batch)
                             else:
-                                node_output = cur_node.run(batch=batch, worker_group_index=cur_node.agent_group)
+                                node_output = cur_node.run(batch=batch, worker_group_index=cur_node.agent_group, siirl_args=self.config)
                         else:  # Passthrough node
                             logger.warning(f"Node {cur_node.node_id} has no executable. Passing data through.")
                             node_output = NodeOutput(batch=batch)
