@@ -27,7 +27,7 @@ def add_prefix_to_dataproto(data_proto: DataProto, node: Node):
                 new_batch[key] = value
         data_proto.batch = TensorDict(new_batch, batch_size=data_proto.batch.batch_size)
 
-    # Process non_tensor_batch
+    # # Process non_tensor_batch
     if data_proto.non_tensor_batch is not None:
         new_non_tensor = {}
         for key, value in data_proto.non_tensor_batch.items():
@@ -38,7 +38,7 @@ def add_prefix_to_dataproto(data_proto: DataProto, node: Node):
                 new_non_tensor[key] = value
         data_proto.non_tensor_batch = new_non_tensor
 
-    # Process meta_info
+    # # Process meta_info
     if data_proto.meta_info is not None:
         new_meta = {}
         for key, value in data_proto.meta_info.items():
@@ -85,7 +85,7 @@ def remove_prefix_from_dataproto(data_proto, node: Node):
                 new_non_tensor[key] = value
         data_proto.non_tensor_batch = new_non_tensor
 
-    # Process meta_info
+    # # Process meta_info
     if data_proto.meta_info is not None:
         new_meta = {}
         for key, value in data_proto.meta_info.items():
@@ -97,3 +97,26 @@ def remove_prefix_from_dataproto(data_proto, node: Node):
         data_proto.meta_info = new_meta
 
     return data_proto
+
+def add_prefix_to_metrics(metrics: dict, node: Node):
+    """
+    Adds a prefix to all keys in the metrics.
+    The prefix is formatted as f"agent_group_{node.agent_group}_".
+    Only keys that do not already have a prefix will be modified.
+
+    Args:
+        metrics (Dict): The metrics instance.
+        node (Node): The node containing the agent_group.
+    """
+    prefix = f"agent_{node.agent_group}_"
+    prefix_agent_group = "agent_"
+    if metrics:
+        new_metrics = {}
+        for key, value in metrics.items():
+            if not key.startswith(prefix_agent_group):
+                new_key = prefix + key
+                new_metrics[new_key] = value
+            else:
+                new_metrics[key] = value
+        metrics = new_metrics
+    return metrics

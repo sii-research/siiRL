@@ -12,6 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .base import EnvironmentConfigLoader
+from .base import BaseEnvironment
 
-__all__ = ["EnvironmentConfigLoader"]
+__all__ = ["BaseEnvironment"]

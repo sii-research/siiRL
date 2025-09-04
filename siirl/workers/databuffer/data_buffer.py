@@ -22,9 +22,9 @@ from loguru import logger
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 import time
-
+from asyncio import Queue
 from siirl.workers.databuffer.protocol import DataProto
-
+from siirl.workers.multi_agent.utils import AgentOutput
 # ====================================================================
 # Sequence Balancing Utility Functions
 # ====================================================================
@@ -145,7 +145,12 @@ class DataBuffer:
         self.storage: Dict[str, Union[ray.ObjectRef, List[DataProto], Tuple[DataProto, Dict]]] = {}
 
         self.active_storage = self.storage
-        self.old_storage: Optional[Dict[str, Union[ray.ObjectRef, List[DataProto], Tuple[DataProto, Dict]]]] = None
+        self.old_storage: Optional[Dict[str, Union[ray.ObjectRef, List[DataProto], Tuple[DataProto, Dict], str]]] = None
+        
+        self.storage_queue: Dict[str, Queue]
+        self.active_storage_queue = self.storage
+        self.old_storage_queue: Optional[Dict[str,  Queue]] = None
+        
         self.cleanup_task: Optional[asyncio.Task] = None
 
         self.lock = asyncio.Lock()
@@ -153,7 +158,7 @@ class DataBuffer:
 
         logger.debug(f"DataBuffer actor (ID: {self.buffer_id}) initialized on node {ray.get_runtime_context().get_node_id()}.")
 
-    async def put(self, key: str, value: Union[List[ray.ObjectRef], DataProto]) -> bool:
+    async def put(self, key: str, value: Union[List[ray.ObjectRef], DataProto, str]) -> bool:
         """Atomically places a data item into the buffer.
 
         If a `put` occurs for a key that is already cached (from a previous `get`),
@@ -173,7 +178,15 @@ class DataBuffer:
             if is_wrapped_ref:
                 self.active_storage[key] = value[0]
                 return True
-
+            if isinstance(value, AgentOutput):
+                if key not in self.active_storage_queue:
+                    self.active_storage_queue[key] = Queue()
+                await self.active_storage_queue[key].put(value)
+                return True
+            if isinstance(value, str):
+                # used for env
+                self.active_storage[key] = value
+                return True
             if isinstance(value, DataProto):
                 current_item = self.active_storage.get(key)
                 if current_item is None:
@@ -191,7 +204,22 @@ class DataBuffer:
 
             logger.error(f"DataBuffer (ID: {self.buffer_id}): Invalid type for 'value' in put for key '{key}': {type(value)}")
             return False
-
+    
+    async def get_queue(self, key: str) -> Union[List[AgentOutput], None]:
+        '''
+            get AgentOuput from queue
+        '''
+        item_container = None
+        async with self.lock:
+            if key in self.active_storage_queue:
+                queue:Queue = self.active_storage_queue.get(key)
+                while queue.qsize() > 0:
+                    if item_container:
+                        item_container.append(await queue.get())
+                    else:
+                        item_container = [await queue.get()]
+        return item_container
+        
     async def get(self, key: str, requesting_dag_worker_dp_rank: int = 0, requesting_dag_worker_world_size: int = 1) -> Union[DataProto, ray.ObjectRef, None]:
         """Retrieves a balanced data shard for a specific worker.
 
@@ -258,7 +286,7 @@ class DataBuffer:
 
         if item_container is None:
             return None
-        if isinstance(item_container, ray.ObjectRef):
+        if isinstance(item_container, ray.ObjectRef) :
             return item_container
 
         balanced_partitions = None
@@ -337,6 +365,8 @@ class DataBuffer:
         async with self.lock:
             self.old_storage = self.active_storage
             self.active_storage = {}
+            self.old_storage_queue = self.active_storage_queue
+            self.active_storage_queue = {}
         logger.debug(f"DataBuffer (ID: {self.buffer_id}): Switched to new empty storage. Old storage with {len(self.old_storage)} items is scheduled for cleanup.")
         self.cleanup_task = asyncio.create_task(self._cleanup_old_storage())
 
@@ -348,6 +378,7 @@ class DataBuffer:
             await asyncio.sleep(0)  # Yield control to the event loop.
             old_count = len(self.old_storage)
             self.old_storage.clear()
+            self.old_storage_queue.clear()
             self.old_storage = None
             logger.debug(f"DataBuffer (ID: {self.buffer_id}): Background cleanup finished. Freed {old_count} items.")
         except asyncio.CancelledError:
@@ -439,7 +470,8 @@ def init_data_buffer(sharding_number: int, max_workers: int = 2) -> List["ray.ac
 
         # 3. Actor Creation within the Guaranteed Placement Group
         data_buffer_cls = ray.remote(DataBuffer)
-        data_buffer_actors = [data_buffer_cls.options(scheduling_strategy=scheduling_strategy, num_cpus=1).remote(buffer_id=i, max_workers=max_workers) for i in range(sharding_number)]
+        # max_concurrency may need to defined by agent num
+        data_buffer_actors = [data_buffer_cls.options(scheduling_strategy=scheduling_strategy, num_cpus=1, max_concurrency=8).remote(buffer_id=i, max_workers=max_workers) for i in range(sharding_number)]
         logger.success("Successfully submitted creation tasks for all DataBuffer actors, each guaranteed to be on a unique node.")
 
     except Exception as e:

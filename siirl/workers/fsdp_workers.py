@@ -833,6 +833,7 @@ class ActorRolloutRefWorker(Worker):
 
     def set_rollout_sharding_manager(self, sharding_manager):
         self.rollout_sharding_manager = sharding_manager
+        self.rollout.sharding_manager = sharding_manager
 
 
 class CriticWorker(Worker):

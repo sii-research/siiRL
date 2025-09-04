@@ -311,7 +311,14 @@ class AgentArguments:
     custom_async_server: CustomAsyncServer = field(default=None, metadata={"help": "custom async server configs"})
     # Path to the custom async server implementation
 
-
+    train_cycle: int = field(default=None, metadata={"help": "Train cycle"})
+    process_path: str = field(default=None, metadata={"help": "Path to the pre-process function"})
+    pre_process_kwargs: dict = field(default_factory=dict, metadata={"help": "Pre-process function arguments"})
+    post_process_kwargs: dict = field(default_factory=dict, metadata={"help": "Post-process function arguments"})
+    env_path: list = field(default_factory=list, metadata={"help": "Env path list"})
+    obs_with_env: bool = field(default=False, metadata={"help": "Rollout wiht obs from Env"})
+    rewards_with_env: bool = field(default=False, metadata={"help": "Use rewards from Env"})
+    
 @dataclass
 class EngineArguments:
     vllm: Dict[str, Any] = field(default_factory=lambda: {})
@@ -506,6 +513,7 @@ class AlgorithmArguments:
     kl_penalty: str = field(default="kl", metadata={"help": "KL penalty type"})
     kl_ctrl: KLCtrlArguments = field(default_factory=KLCtrlArguments)
     use_kl_in_reward: bool = field(default=True, metadata={"help": "Use KL In-Reward"})
+    share_reward_in_agent: bool = field(default=True, metadata={"help": "Shard Reward in Reward"})
     norm_adv_by_std_in_grpo: bool = field(default=True, metadata={"help": "Whether to scale the GRPO advantage"})
     weight_factor_in_cpgd: str = field(default="STD_weight", metadata={"help": "The weighting methods for advantage {STD_weight, clip_filter_like_weight, naive}"})
     algorithm_name: str = field(default="grpo", metadata={"help": "Algorithm name, e.g., grpo, ppo, dapo"})
