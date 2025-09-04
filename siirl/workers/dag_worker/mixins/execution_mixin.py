@@ -23,7 +23,7 @@ from tqdm import tqdm
 from siirl.utils.debug import DistProfiler
 from siirl.workers.dag.node import Node, NodeType
 from siirl.workers.dag_worker.constants import DAGConstants
-from siirl.workers.dag_worker.dag_utils import add_prefix_to_dataproto, remove_prefix_from_dataproto
+from siirl.workers.dag_worker.dag_utils import add_prefix_to_dataproto, remove_prefix_from_dataproto, add_prefix_to_metrics
 from siirl.workers.dag_worker.data_structures import NodeOutput
 from siirl.workers.databuffer import DataProto
 from siirl.workers.multi_agent.multiagent_generate import MultiAgentLoop
@@ -300,7 +300,7 @@ class ExecutionMixin:
                                 node_output = self.compute_advantage(batch, cur_node = cur_node)
                         elif cur_node.executable:
                             if cur_node.agent_options and cur_node.agent_options.train_cycle:
-                                cycle_round = (epoch - 1) // cur_node.agent_options.train_cycle
+                                cycle_round = epoch // cur_node.agent_options.train_cycle
                                 # only support 2 agent now, more than 2 agent may put into different device because of device_mem
                                 agent_num = len(self.agent_group_worker)
                                 if cycle_round % agent_num == cur_node.agent_group:
@@ -332,6 +332,8 @@ class ExecutionMixin:
                                 del node_output.metrics["postprocess_status"]
 
                         if self._rank == 0 and node_output.metrics:
+                            if self._multi_agent:
+                                node_output.metrics = add_prefix_to_metrics(node_output.metrics, cur_node)
                             ordered_metrics.extend(sorted(node_output.metrics.items()))
                         if next_nodes := self.taskgraph.get_downstream_nodes(cur_node.node_id):
                             # Currently supports single downstream node, can be extended to a loop.
@@ -341,6 +343,9 @@ class ExecutionMixin:
                             if self._whether_put_data(cur_tp_rank, next_dp_size, cur_dp_size, cur_node, next_node):
                                 with self._timer("put_data_to_buffer", timing_raw):
                                     self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch, source_dp_size=cur_dp_size, dest_dp_size=next_dp_size, timing_raw=timing_raw)
+                        elif self._multi_agent:
+                            # last_node add prefix for metrics
+                            node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node) 
                         if self.enable_perf:
                             with self._timer("put_data_to_buffer_barrier", timing_raw):
                                 dist.barrier(self._gather_group)
@@ -358,9 +363,30 @@ class ExecutionMixin:
             # --- 6. Final Metrics Collection ---
             self._cleanup_step_buffers(visited_nodes, timing_raw)
 
-        final_metrics = self._collect_final_metrics(batch, timing_raw)
-        if final_metrics:
-            ordered_metrics.extend(sorted(final_metrics.items()))
+        if self._multi_agent:
+            node_queue = self.taskgraph.get_entry_nodes()
+            visited_nodes = set()
+            entry_node_id = node_queue[0].node_id
+            while node_queue:
+                cur_node = node_queue.pop(0)
+                if cur_node.node_id in visited_nodes:
+                    continue
+                if cur_node.node_role !=  NodeRole.ROLLOUT:
+                    break
+                batch = remove_prefix_from_dataproto(batch, cur_node)        
+                final_metrics = self._collect_final_metrics(batch, timing_raw)
+                final_metrics = add_prefix_to_metrics(final_metrics, cur_node)
+                if final_metrics:
+                    ordered_metrics.extend(sorted(final_metrics.items()))
+                if next_nodes := self.taskgraph.get_downstream_nodes(cur_node.node_id):
+                    for n in next_nodes:
+                        if n.node_id not in visited_nodes:
+                            node_queue.append(n)
+                batch = add_prefix_to_dataproto(batch, cur_node)
+        else:
+            final_metrics = self._collect_final_metrics(batch, timing_raw)
+            if final_metrics:
+                ordered_metrics.extend(sorted(final_metrics.items()))
 
         ordered_metrics.extend([("training/global_step", self.global_steps + 1), ("training/epoch", epoch + 1)])
         return ordered_metrics

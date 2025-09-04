@@ -97,3 +97,26 @@ def remove_prefix_from_dataproto(data_proto, node: Node):
         data_proto.meta_info = new_meta
 
     return data_proto
+
+def add_prefix_to_metrics(metrics: dict, node: Node):
+    """
+    Adds a prefix to all keys in the metrics.
+    The prefix is formatted as f"agent_group_{node.agent_group}_".
+    Only keys that do not already have a prefix will be modified.
+
+    Args:
+        metrics (Dict): The metrics instance.
+        node (Node): The node containing the agent_group.
+    """
+    prefix = f"agent_{node.agent_group}_"
+    prefix_agent_group = "agent_"
+    if metrics:
+        new_metrics = {}
+        for key, value in metrics.items():
+            if not key.startswith(prefix_agent_group):
+                new_key = prefix + key
+                new_metrics[new_key] = value
+            else:
+                new_metrics[key] = value
+        metrics = new_metrics
+    return metrics
