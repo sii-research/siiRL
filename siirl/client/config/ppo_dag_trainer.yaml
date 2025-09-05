@@ -374,7 +374,6 @@ custom_reward_function:
 algorithm:
   adv_estimator: gae  # GAE for PPO, GRPO for GRPO
   gamma: 1.0
-  gae_lambda: 0.95
   lam: 1.0
   norm_adv_by_std_in_grpo: True
   weight_factor_in_cpgd: STD_weight # for CPGD, ["STD_weight", "clip_filter_like_weight", "naive"]
