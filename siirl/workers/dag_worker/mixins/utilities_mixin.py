@@ -465,7 +465,7 @@ class UtilitiesMixin:
         if not isinstance(local_metrics, dict) or not local_metrics:
             return {}
 
-        world_size = dist.get_world_size(group) if group else 1
+        world_size = dist.get_world_size()
         if world_size <= 1:
             # If not in a distributed setting, perform local aggregation only.
             aggregator = DistributedMetricAggregator(local_metrics, group=None)
