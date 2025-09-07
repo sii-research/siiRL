@@ -33,7 +33,7 @@ from zoneinfo import ZoneInfo
 
 from siirl.dataloader import DataLoaderNode
 from siirl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
-from siirl.utils.extras.device import get_device_id, get_device_name, device_synchronize
+from siirl.utils.extras.device import device_synchronize, get_device_id, get_device_name
 from siirl.utils.metrics.metric_utils import compute_throughout_metrics, compute_timing_metrics
 from siirl.utils.params import SiiRLArguments
 from siirl.workers.base_worker import Worker
@@ -78,7 +78,9 @@ class DistributedMetricAggregator:
     in a distributed environment.
     """
 
-    def __init__(self, local_metrics: Dict[str, Union[float, List[float], torch.Tensor]], group: Optional[dist.ProcessGroup]):
+    def __init__(
+        self, local_metrics: Dict[str, Union[float, List[float], torch.Tensor]], group: Optional[dist.ProcessGroup]
+    ):
         """
         Initializes the aggregator and prepares metrics for reduction.
 
@@ -280,7 +282,9 @@ class UtilitiesMixin:
                 role_name_for_config = node.node_role.name.lower()
                 max_ckpt_keep = getattr(self.config.trainer, f"max_{role_name_for_config}_ckpt_to_keep", 10)
 
-                worker.save_checkpoint(local_path=checkpoint_path, global_step=self.global_steps, max_ckpt_to_keep=max_ckpt_keep)
+                worker.save_checkpoint(
+                    local_path=checkpoint_path, global_step=self.global_steps, max_ckpt_to_keep=max_ckpt_keep
+                )
                 saved_worker_keys.add(node_worker_key)
 
         # In each DP group, only TP rank 0 saves the DataLoader state to avoid redundancy.
@@ -311,8 +315,8 @@ class UtilitiesMixin:
     def _load_checkpoint(self):
         """
         Loads a checkpoint in a fully distributed and consistent manner.
-        - It relies on Rank 0 to be the single source of truth for which checkpoint to load and broadcasts that decision.
-          This is essential to prevent inconsistencies from filesystem latency.
+        - It relies on Rank 0 to be the single source of truth for which checkpoint to load and broadcasts that
+          decision. This is essential to prevent inconsistencies from filesystem latency.
         - It constructs agent-specific paths to load the correct state for each agent.
         """
         from siirl.workers.dag.node import NodeType
@@ -343,7 +347,9 @@ class UtilitiesMixin:
             if path_to_load and os.path.exists(path_to_load):
                 checkpoint_path_container[0] = path_to_load
             else:
-                logger.warning(f"Rank 0: Checkpoint path not found or invalid: '{path_to_load}'. Starting from scratch.")
+                logger.warning(
+                    f"Rank 0: Checkpoint path not found or invalid: '{path_to_load}'. Starting from scratch."
+                )
 
         # --- 2. Rank 0 broadcasts the decision to all other ranks ---
         # This is the crucial step for ensuring consistency.
@@ -379,10 +385,15 @@ class UtilitiesMixin:
                 checkpoint_path = os.path.join(global_step_folder, sub_dir_name)
 
                 if os.path.exists(checkpoint_path):
-                    worker.load_checkpoint(local_path=checkpoint_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
+                    worker.load_checkpoint(
+                        local_path=checkpoint_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
+                    )
                     loaded_worker_keys.add(node_worker_key)
                 else:
-                    logger.warning(f"Rank {self._rank}: Checkpoint for agent {node.agent_group}'s {node.node_role.name} not found at {checkpoint_path}. Weights will be from initialization.")
+                    logger.warning(
+                        f"Rank {self._rank}: Checkpoint for agent {node.agent_group}'s {node.node_role.name} not found "
+                        f"at {checkpoint_path}. Weights will be from initialization."
+                    )
 
         # Load dataloader state. All ranks in a DP group load from the same file.
         _, dp_rank, _, _ = self._get_node_dp_info(self.first_rollout_node)
@@ -391,7 +402,10 @@ class UtilitiesMixin:
             dataloader_state = torch.load(dataloader_path, map_location="cpu")
             self.dataloader.load_state_dict(dataloader_state)
         else:
-            logger.warning(f"Rank {self._rank} (DP_Rank {dp_rank}): Dataloader checkpoint not found at {dataloader_path}. Sampler state will not be restored, which may lead to data inconsistency.")
+            logger.warning(
+                f"Rank {self._rank} (DP_Rank {dp_rank}): Dataloader checkpoint not found at {dataloader_path}. Sampler "
+                f"state will not be restored, which may lead to data inconsistency."
+            )
 
         # Barrier to ensure all ranks are synchronized after loading.
         dist.barrier(self._gather_group)
@@ -405,7 +419,9 @@ class UtilitiesMixin:
         log_parts.extend([f"{k}:{v:.4f}" if isinstance(v, float) else f"{k}:{v}" for k, v in ordered_metrics])
         logger.info(" | ".join(log_parts))
 
-    def _reduce_and_broadcast_metrics(self, local_metrics: Dict[str, Union[float, List[float], torch.Tensor]], group: Optional[dist.ProcessGroup]) -> Dict[str, float]:
+    def _reduce_and_broadcast_metrics(
+        self, local_metrics: Dict[str, Union[float, List[float], torch.Tensor]], group: Optional[dist.ProcessGroup]
+    ) -> Dict[str, float]:
         """
         Aggregates metrics in a distributed environment using a dedicated helper class.
 
@@ -419,7 +435,7 @@ class UtilitiesMixin:
         if not isinstance(local_metrics, dict) or not local_metrics:
             return {}
 
-        world_size = dist.get_world_size(group) if group else 1
+        world_size = dist.get_world_size(group)
         if world_size <= 1:
             # If not in a distributed setting, perform local aggregation only.
             aggregator = DistributedMetricAggregator(local_metrics, group=None)
@@ -532,10 +548,14 @@ class UtilitiesMixin:
             if key in local_data:
                 metrics_to_aggregate[f"{prefix}/mean"] = local_data[key]
 
-        representative_actor_node = next((n for n in self.taskgraph.nodes.values() if n.node_role == NodeRole.ACTOR), self.first_rollout_node)
+        representative_actor_node = next(
+            (n for n in self.taskgraph.nodes.values() if n.node_role == NodeRole.ACTOR), self.first_rollout_node
+        )
         _, _, tp_rank_in_group, _ = self._get_node_dp_info(representative_actor_node)
         local_token_sum = sum(batch.meta_info.get("global_token_num", [0])) if tp_rank_in_group == 0 else 0
-        metrics_to_aggregate["perf/total_num_tokens/mean"] = torch.tensor(float(local_token_sum))  # Use mean to get a sum
+        metrics_to_aggregate["perf/total_num_tokens/mean"] = torch.tensor(
+            float(local_token_sum)
+        )  # Use mean to get a sum
 
         # --- 3. Perform the aggregated, distributed reduction ---
         with self._timer("metrics_aggregation", timing_raw):
@@ -550,10 +570,11 @@ class UtilitiesMixin:
             else:
                 final_metrics[key] = value
 
-        # Fix the sum from mean
+        # Special handling for total_num_tokens to convert mean back to sum
         if "perf/total_num_tokens/mean" in final_metrics:
-            world_size = dist.get_world_size(self._gather_group) if self._gather_group is not None else 1
-            final_metrics["perf/total_num_tokens"] = final_metrics.pop("perf/total_num_tokens/mean") * world_size
+            final_metrics["perf/total_num_tokens"] = final_metrics.pop(
+                "perf/total_num_tokens/mean"
+            ) * dist.get_world_size(self._gather_group)
 
         # --- 4. Handle special cases like Explained Variance ---
         if use_critic:
@@ -601,9 +622,17 @@ class UtilitiesMixin:
         # or just ignore them. This is cleaner than returning an empty dict.
         return final_metrics
 
-    def put_data_to_buffers(self, key: str, data: DataProto, source_dp_size: int, dest_dp_size: int, timing_raw: Dict[str, float]):
+    def put_data_to_buffers(
+        self, key: str, data: DataProto, source_dp_size: int, dest_dp_size: int, timing_raw: Dict[str, float]
+    ):
         """Puts data into shared Ray plasma store for consumption by downstream nodes."""
-        data.meta_info["padding_values"] = {"input_ids": self.validate_tokenizer.pad_token_id, "responses": self.validate_tokenizer.pad_token_id, "labels": -100, "attention_mask": 0, "response_mask": 0}
+        data.meta_info["padding_values"] = {
+            "input_ids": self.validate_tokenizer.pad_token_id,
+            "responses": self.validate_tokenizer.pad_token_id,
+            "labels": -100,
+            "attention_mask": 0,
+            "response_mask": 0,
+        }
         data.meta_info["padding_side"] = self.validate_tokenizer.padding_side
 
         if source_dp_size == dest_dp_size:
@@ -618,7 +647,9 @@ class UtilitiesMixin:
             with self._timer(f"put_proto_data_{key}", timing_raw):
                 loop.run_until_complete(asyncio.gather(*put_futures))
 
-    def get_data_from_buffers(self, key: str, my_current_dp_rank: int, my_current_dp_size: int, timing_raw: Dict[str, float]) -> Optional[DataProto]:
+    def get_data_from_buffers(
+        self, key: str, my_current_dp_rank: int, my_current_dp_size: int, timing_raw: Dict[str, float]
+    ) -> Optional[DataProto]:
         """Gets data from shared buffers that was produced by an upstream node."""
         # First, check the high-speed internal cache.
         with self._timer(f"get_intern_data_{key}", timing_raw):
@@ -632,7 +663,9 @@ class UtilitiesMixin:
             return None
 
         loop = asyncio.get_event_loop()
-        first_item = loop.run_until_complete(self.data_buffers[0].get.remote(key, my_current_dp_rank, my_current_dp_size))
+        first_item = loop.run_until_complete(
+            self.data_buffers[0].get.remote(key, my_current_dp_rank, my_current_dp_size)
+        )
         if first_item is None:
             return None
 
@@ -642,7 +675,9 @@ class UtilitiesMixin:
         elif isinstance(first_item, DataProto):
             # If data was chunked, retrieve all chunks and concatenate
             with self._timer(f"get_proto_data_{key}", timing_raw):
-                other_chunks_futures = [b.get.remote(key, my_current_dp_rank, my_current_dp_size) for b in self.data_buffers[1:]]
+                other_chunks_futures = [
+                    b.get.remote(key, my_current_dp_rank, my_current_dp_size) for b in self.data_buffers[1:]
+                ]
                 other_chunks = loop.run_until_complete(asyncio.gather(*other_chunks_futures))
             with self._timer(f"get_proto_data_concat_chunks_{key}", timing_raw):
                 return DataProto.concat([first_item] + other_chunks)
@@ -663,7 +698,9 @@ class UtilitiesMixin:
         """
         return self.taskgraph_execute_finished
 
-    def format_metrics_by_group(self, metrics: Dict[str, Any], group_order: List[str], float_precision: int = 3, delimiter: str = " - ") -> Dict[str, Any]:
+    def format_metrics_by_group(
+        self, metrics: Dict[str, Any], group_order: List[str], float_precision: int = 3, delimiter: str = " - "
+    ) -> Dict[str, Any]:
         """
         A flexible helper function that formats metrics based on a predefined group order
         and alphabetical order within groups. It supports extracting specific keys from
@@ -690,7 +727,15 @@ class UtilitiesMixin:
 
                 # Find all keys belonging to this group, excluding any that are already processed
                 # or explicitly mentioned elsewhere in the order. Then sort them alphabetically.
-                keys_in_group = sorted([key for key in metrics if key.startswith(group_prefix) and key not in processed_keys and key not in explicitly_mentioned_keys])
+                keys_in_group = sorted(
+                    [
+                        key
+                        for key in metrics
+                        if key.startswith(group_prefix)
+                        and key not in processed_keys
+                        and key not in explicitly_mentioned_keys
+                    ]
+                )
 
                 for key in keys_in_group:
                     ordered_dict[key] = metrics[key]
@@ -748,7 +793,9 @@ class UtilitiesMixin:
             sorted_keys = sorted(list(common_keys))
 
             if not sorted_keys:
-                logger.warning(f"No common metric keys found across all ranks for step {self.global_steps}. Skipping CSV write.")
+                logger.warning(
+                    f"No common metric keys found across all ranks for step {self.global_steps}. Skipping CSV write."
+                )
                 return
 
             # Define output directory and create it if it doesn't exist
@@ -770,7 +817,11 @@ class UtilitiesMixin:
                     writer = csv.writer(csvfile)
 
                     # Write the header row: ['metric', 'rank_0', 'rank_1', ...]
-                    header = ["metric"] + [f"rank_{i}" for i in range(world_size)] + ["max", "min", "delta_max_min", "delta_max_rank_0"]
+                    header = (
+                        ["metric"]
+                        + [f"rank_{i}" for i in range(world_size)]
+                        + ["max", "min", "delta_max_min", "delta_max_rank_0"]
+                    )
                     writer.writerow(header)
 
                     # Write one row for each common metric key
@@ -790,12 +841,18 @@ class UtilitiesMixin:
                         # Calculate max and min values for the row
                         row_max = max([x for x in row[1:] if isinstance(x, (int, float))], default="N/A")
                         row_min = min([x for x in row[1:] if isinstance(x, (int, float))], default="N/A")
-                        row_delta_max = row_max - row_min if isinstance(row_max, (int, float)) and isinstance(row_min, (int, float)) else "N/A"
+                        row_delta_max = (
+                            row_max - row_min
+                            if isinstance(row_max, (int, float)) and isinstance(row_min, (int, float))
+                            else "N/A"
+                        )
                         row_delta_rank0 = row_max - row[1] if isinstance(row[1], (int, float)) else "N/A"
                         row.extend([row_max, row_min, row_delta_max, row_delta_rank0])
                         writer.writerow(row)
 
-                logger.info(f"Common performance metrics for step {self.global_steps} successfully written to {filename}")
+                logger.info(
+                    f"Common performance metrics for step {self.global_steps} successfully written to {filename}"
+                )
 
             except OSError as e:
                 logger.error(f"Failed to write performance metrics to CSV file {filename}: {e}")
@@ -829,14 +886,22 @@ class UtilitiesMixin:
         # --- Algorithm-Specific Metrics ---
         log_str += "\n--- 📈 Algorithm Metrics ---\n"
         log_str += f"  {'Actor Entropy':<28}: {get_metric('actor/entropy_loss', 4)}\n"
-        log_str += f"  {'Critic Rewards (Mean/Min/Max)':<28}: {get_metric('critic/rewards/mean', 3)} / {get_metric('critic/rewards/min', 3)} / {get_metric('critic/rewards/max', 3)}\n"
-        log_str += f"  {'Critic Scores (Mean/Min/Max)':<28}: {get_metric('critic/score/mean', 3)} / {get_metric('critic/score/min', 3)} / {get_metric('critic/score/max', 3)}\n"
+        log_str += (
+            f"  {'Critic Rewards (Mean/Min/Max)':<28}: {get_metric('critic/rewards/mean', 3)} / "
+            f"{get_metric('critic/rewards/min', 3)} / {get_metric('critic/rewards/max', 3)}\n"
+        )
+        log_str += (
+            f"  {'Critic Scores (Mean/Min/Max)':<28}: {get_metric('critic/score/mean', 3)} / "
+            f"{get_metric('critic/score/min', 3)} / {get_metric('critic/score/max', 3)}\n"
+        )
 
         if self.enable_perf:
             # --- Module-wise Timings (Single Column) ---
             log_str += "\n--- ⏳ Module-wise Timings (s) ---\n"
             # Dynamically find all delta_time metrics except the total step time
-            timing_keys = sorted([k for k in metrics.keys() if k.startswith("perf/delta_time/") and k != "perf/delta_time/step"])
+            timing_keys = sorted(
+                [k for k in metrics.keys() if k.startswith("perf/delta_time/") and k != "perf/delta_time/step"]
+            )
 
             ref_key = "perf/delta_time/ref"
             reference_key = "perf/delta_time/reference"
@@ -847,7 +912,9 @@ class UtilitiesMixin:
                 # Find the maximum label length across all keys for clean alignment
                 max_label_len = 0
                 if timing_keys:
-                    max_label_len = max(len(k.replace("perf/delta_time/", "").replace("_", " ").title()) for k in timing_keys)
+                    max_label_len = max(
+                        len(k.replace("perf/delta_time/", "").replace("_", " ").title()) for k in timing_keys
+                    )
 
                 for key in timing_keys:
                     label = key.replace("perf/delta_time/", "").replace("_", " ").title()
@@ -872,12 +939,24 @@ class UtilitiesMixin:
 
         # --- Sequence Lengths ---
         log_str += "\n--- 📏 Sequence Lengths ---\n"
-        log_str += f"  {'Prompt Length (Mean/Max)':<28}: {get_metric('prompt/length/mean', 1)} / {get_metric('prompt/length/max', 0)}\n"
-        log_str += f"  {'Response Length (Mean/Max)':<28}: {get_metric('response/length/mean', 1)} / {get_metric('response/length/max', 0)}\n"
+        log_str += (
+            f"  {'Prompt Length (Mean/Max)':<28}: {get_metric('prompt/length/mean', 1)} / "
+            f"{get_metric('prompt/length/max', 0)}\n"
+        )
+        log_str += (
+            f"  {'Response Length (Mean/Max)':<28}: {get_metric('response/length/mean', 1)} / "
+            f"{get_metric('response/length/max', 0)}\n"
+        )
         log_str += f"  {'Response Clip Ratio':<28}: {get_metric('response/clip_ratio/mean', 4)}\n"
         log_str += f"  {'Prompt Clip Ratio':<28}: {get_metric('prompt/clip_ratio/mean', 4)}\n"
-        log_str += f"  {'Correct Resp Len (Mean/Max)':<28}: {get_metric('response/correct_length/mean', 1)} / {get_metric('response/correct_length/max', 0)}\n"
-        log_str += f"  {'Wrong Resp Len (Mean/Max)':<28}: {get_metric('response/wrong_length/mean', 1)} / {get_metric('response/wrong_length/max', 0)}\n"
+        log_str += (
+            f"  {'Correct Resp Len (Mean/Max)':<28}: {get_metric('response/correct_length/mean', 1)} / "
+            f"{get_metric('response/correct_length/max', 0)}\n"
+        )
+        log_str += (
+            f"  {'Wrong Resp Len (Mean/Max)':<28}: {get_metric('response/wrong_length/mean', 1)} / "
+            f"{get_metric('response/wrong_length/max', 0)}\n"
+        )
 
         log_str += "\n" + "=" * 82 + "\n"
 
@@ -903,7 +982,14 @@ class UtilitiesMixin:
             new_prompt = chat_template.format(prompt=prompt)
             raw_prompts[idx][0]["content"] = new_prompt
             new_prompts.append(new_prompt)
-        encode_data = self_tokenizer(new_prompts, return_tensors="pt", padding="max_length", truncation=True, max_length=self.config.data.max_prompt_length, padding_side="left")
+        encode_data = self_tokenizer(
+            new_prompts,
+            return_tensors="pt",
+            padding="max_length",
+            truncation=True,
+            max_length=self.config.data.max_prompt_length,
+            padding_side="left",
+        )
         encode_data_origin = self_tokenizer(
             new_prompts,
             return_tensors="np",
@@ -916,7 +1002,9 @@ class UtilitiesMixin:
         batch.batch[key_prefix + "input_ids"] = encode_data["input_ids"]
         batch.batch[key_prefix + "position_ids"] = position_ids
         batch.batch[key_prefix + "attention_mask"] = attention_mask
-        batch.non_tensor_batch[key_prefix + "raw_prompt_ids_origin"] = batch.non_tensor_batch[key_prefix + "raw_prompt_ids"].copy()
+        batch.non_tensor_batch[key_prefix + "raw_prompt_ids_origin"] = batch.non_tensor_batch[
+            key_prefix + "raw_prompt_ids"
+        ].copy()
         batch.non_tensor_batch[key_prefix + "raw_prompt_ids"] = encode_data_origin["input_ids"]
 
     def _batch_apply_post_template(self, batch, tokenizer, chat_template="", key_prefix=""):
@@ -938,7 +1026,14 @@ class UtilitiesMixin:
             new_responses.append(new_response)
 
         # add right pad for response
-        encode_data = self_tokenizer(new_responses, return_tensors="pt", padding="max_length", truncation=True, max_length=self.config.data.max_response_length, padding_side="right")
+        encode_data = self_tokenizer(
+            new_responses,
+            return_tensors="pt",
+            padding="max_length",
+            truncation=True,
+            max_length=self.config.data.max_response_length,
+            padding_side="right",
+        )
         # generate new response and input_ids
         response_id = encode_data["input_ids"]
         batch.batch[key_prefix + "responses"] = response_id
@@ -956,11 +1051,17 @@ class UtilitiesMixin:
             {
                 next_prefix + "input_ids": batch.batch[cur_prefix + "input_ids"],
                 next_prefix + "attention_mask": batch.batch[cur_prefix + "attention_mask"],
-                next_prefix + "position_ids": batch.batch[cur_prefix + "position_ids"],  # here input_ids become the whole sentences
+                next_prefix + "position_ids": batch.batch[
+                    cur_prefix + "position_ids"
+                ],  # here input_ids become the whole sentences
             },
             batch_size=batch.batch[cur_prefix + "input_ids"].size()[0],
         )
-        non_tensor_batch = {next_prefix + "raw_prompt": batch.non_tensor_batch[cur_prefix + "raw_prompt"], next_prefix + "reward_model": batch.non_tensor_batch[cur_prefix + "reward_model"], next_prefix + "data_source": batch.non_tensor_batch[cur_prefix + "data_source"]}
+        non_tensor_batch = {
+            next_prefix + "raw_prompt": batch.non_tensor_batch[cur_prefix + "raw_prompt"],
+            next_prefix + "reward_model": batch.non_tensor_batch[cur_prefix + "reward_model"],
+            next_prefix + "data_source": batch.non_tensor_batch[cur_prefix + "data_source"],
+        }
         # get no pad new_raw_prompt_ids
 
         non_tensor_batch[next_prefix + "raw_prompt_ids"] = []
@@ -971,7 +1072,11 @@ class UtilitiesMixin:
             first_idx = non_pad_index[0][0].item()
             last_idx = non_pad_index[-1][0].item()
             non_pad_id = pad_id[first_idx : last_idx + 1].tolist()
-            non_tensor_batch[next_prefix + "raw_prompt_ids"].append(batch.non_tensor_batch[cur_prefix + "raw_prompt_ids_origin"][idx] + non_pad_id)
-        non_tensor_batch[next_prefix + "raw_prompt_ids"] = np.array(non_tensor_batch[next_prefix + "raw_prompt_ids"], dtype=object)
+            non_tensor_batch[next_prefix + "raw_prompt_ids"].append(
+                batch.non_tensor_batch[cur_prefix + "raw_prompt_ids_origin"][idx] + non_pad_id
+            )
+        non_tensor_batch[next_prefix + "raw_prompt_ids"] = np.array(
+            non_tensor_batch[next_prefix + "raw_prompt_ids"], dtype=object
+        )
         new_batch = DataProto(batch=next_batch, non_tensor_batch=non_tensor_batch, meta_info={})
         batch.union(new_batch)
