@@ -422,8 +422,12 @@ class InitializationMixin:
                 elif hasattr(config, "optim"):
                     config.optim.total_training_steps = self.dataloader.total_training_steps
                 worker_args = {"config": config, "process_group": node_process_group}
-                if node.node_role in DAGConstants.WORKER_ROLE_MAPPING:
-                    worker_args["role"] = DAGConstants.WORKER_ROLE_MAPPING[node.node_role]
+                
+                # For separated workers (Megatron backend), no role parameter is needed
+                # Only legacy ActorRolloutRefWorker needs the role parameter
+                if hasattr(worker_cls, '__name__') and 'ActorRolloutRefWorker' in worker_cls.__name__:
+                    if node.node_role in DAGConstants.WORKER_ROLE_MAPPING:
+                        worker_args["role"] = DAGConstants.WORKER_ROLE_MAPPING[node.node_role]
 
                 worker_instance = worker_cls(**worker_args)
                 self.workers[node_worker_key] = worker_instance
@@ -639,7 +643,7 @@ class InitializationMixin:
             self.multi_agent_loop =  MultiAgentLoop(self, config = self.config.actor_rollout_ref, node_workers = self.workers, local_dag = self.taskgraph, databuffer = self.data_buffers, placement_mode = 'colocate')
         
     def _setup_sharding_manager(self, agent_group: int, worker_dict: Dict[NodeRole, Worker]):
-        """Configures the sharding manager to sync weights between FSDP and vLLM."""
+        """Configures the sharding manager to sync weights between training backend and inference backend."""
         actor_worker = worker_dict[NodeRole.ACTOR]
         rollout_worker = worker_dict[NodeRole.ROLLOUT]
         rollout_pg = self.agent_group_process_group[agent_group][NodeRole.ROLLOUT]
@@ -695,10 +699,13 @@ class InitializationMixin:
                     "actor_module": actor_worker.actor_module,
                     "inference_engine": rollout_worker.rollout.inference_engine,
                     "model_config": actor_worker.actor_model_config,
+                    "rollout_config": rollout_worker.config.rollout,
                     "transformer_config": actor_worker.tf_config,
                     "layer_name_mapping": layer_name_mapping,
                     "weight_converter": get_mcore_weight_converter(actor_worker.actor_model_config, actor_worker.dtype),
+                    "device_mesh": rollout_worker.device_mesh,
                     "offload_param": actor_worker._is_offload_param,
+                    "bridge": actor_worker.bridge,
                 },
             ),
             # TODO(Ping Zhang): update for SGLang later

@@ -19,10 +19,10 @@ In megatron actor, the differences are:
 Note that our model doesn't have to be `MegatronModule` because we don't share embedding in the last layer
 """
 
-import copy
 import itertools
 from functools import partial
-from typing import Dict, Iterable
+from typing import Iterable
+from loguru import logger
 
 import torch
 import torch.distributed
@@ -39,6 +39,8 @@ from siirl.utils.extras.device import get_device_id, get_torch_device
 from siirl.utils.megatron.pipeline_parallel import make_batch_generator
 from siirl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
 from siirl.utils.megatron.megatron_utils import get_model_config
+from siirl.utils.debug import GPUMemoryLogger
+from siirl.utils.debug.profile import Profiler
 from siirl.utils.extras.py_functional import append_to_dict
 from siirl.utils.model_utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from siirl.utils.model_utils.torch_functional import broadcast_dict_tensor
@@ -77,18 +79,22 @@ class MegatronPPOActor(BasePPOActor):
                 ``model_config.hidden_size``
             hf_config (PretrainedConfig): huggingface config
             tf_config (TransformerConfig): mcore transformer config
-            actor_module (nn.ModuleList): actor module is a ModuleList that contains a list of nn.Module in this pp stage.
-                each nn.Module in this rank holds a vpp module chunk. See https://arxiv.org/pdf/2104.04473.pdf for more details.
+            actor_module (nn.ModuleList): actor module is a ModuleList that contains a list of nn.Module in this
+                pp stage.
+                each nn.Module in this rank holds a vpp module chunk. See https://arxiv.org/pdf/2104.04473.pdf for
+                more details.
                 The actor module has some constraints to follow in order to use the updating logics implemented here
 
-                1. It must implement unpad_input before any computation and pad_input after all the computation. Remove padding is an
+                1. It must implement unpad_input before any computation and pad_input after all the computation.
+                Remove padding is an
                 optimization that removes the padding tokens. See unpad_input and pad_input function in flash-attn
                 (https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/bert_padding.py).
 
                 2. Each pp stage must return the hidden state with the same shape [total_nnz, 1, hidden_size],
                 where total_nnz is the number of valid tokens in this batch. If sequence parallel is enabled, the size
                 of the hidden state is [total_nnz // tp, 1, hidden_size].
-            actor_optimizer (DistributedOptimizer): currently, we only support DistributedOptimizer in Megatron. It implements
+            actor_optimizer (DistributedOptimizer): currently, we only support DistributedOptimizer in Megatron.
+                It implements
                 zero1 optimizer that shards the optimizer state across dp ranks.
 
         >>> from megatron.training import get_model
@@ -132,8 +138,8 @@ class MegatronPPOActor(BasePPOActor):
 
     def _validate_config(self, config) -> None:
         """Validate config options not implemented for Megatron backend"""
-        assert config.get("ulysses_sequence_parallel_size", 1) == 1
-        if config.get("shuffle", False):
+        assert config.ulysses_sequence_parallel_size == 1
+        if config.shuffle:
             assert config.data_loader_seed is not None, "If shuffle dataloader, seed must be manually set"
         if config.megatron.tensor_model_parallel_size == 1:
             print("[Warining] Because actor tp size == 1, set sp to False")
@@ -249,23 +255,35 @@ class MegatronPPOActor(BasePPOActor):
         Args:
             data (DataProto): a DataProto containing keys
 
-                ``input_ids``: tensor of shape [batch_size, sequence_length]. torch.int64, where ``sequence_length = prompt_length + response_length``
+                ``input_ids``: tensor of shape [batch_size, sequence_length]. torch.int64, where
+                ``sequence_length = prompt_length + response_length``
 
                 ``attention_mask``: tensor of shape [batch_size, sequence_length]. torch.int64
 
                 ``position_ids``: tensor of shape [batch_size, sequence_length]. torch.int64
 
-                ``responses``: tensor of shape [batch_size, response_length]. torch.int64. Note that responses = input_ids[:, -response_length:]
+                ``responses``: tensor of shape [batch_size, response_length]. torch.int64. Note that
+                responses = input_ids[:, -response_length:]
 
-                ``old_log_probs``: tensor of shape [batch_size, response_length]. torch.float32. The log probability of responses.
+                ``old_log_probs``: tensor of shape [batch_size, response_length]. torch.float32. The log probability
+                of responses.
 
-                ``advantages``: tensor of shape [batch_size, response_length]. torch.float32. The advantages of responses.
+                ``advantages``: tensor of shape [batch_size, response_length]. torch.float32. The advantages of
+                responses.
                 See PPO paper for details. https://arxiv.org/abs/1707.06347
 
         Returns:
 
         """
-        select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "old_log_probs", "advantages"]
+        select_keys = [
+            "responses",
+            "input_ids",
+            "attention_mask",
+            "response_mask",
+            "position_ids",
+            "old_log_probs",
+            "advantages",
+        ]
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
         self.has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
@@ -380,12 +398,21 @@ class MegatronPPOActor(BasePPOActor):
             vpp_size = mpu.get_virtual_pipeline_model_parallel_world_size()
             if vpp_size is not None and vpp_size > 1:
                 microbatch_group_size_per_vp_stage = self.tf_config.microbatch_group_size_per_vp_stage
-                micro_batches, indices = rearrange_micro_batches(batch=mini_batch.batch, num_batches_divided_by=microbatch_group_size_per_vp_stage, max_token_len=max_token_len)
-                assert len(micro_batches) % self.tf_config.microbatch_group_size_per_vp_stage == 0, f"micro_batches {micro_batches} must be divisible by microbatch_group_size_per_vp_stage {microbatch_group_size_per_vp_stage} for megatron backend"
+                micro_batches, indices = rearrange_micro_batches(
+                    batch=mini_batch.batch,
+                    num_batches_divided_by=microbatch_group_size_per_vp_stage,
+                    max_token_len=max_token_len,
+                )
+                assert len(micro_batches) % self.tf_config.microbatch_group_size_per_vp_stage == 0, (
+                    f"micro_batches {micro_batches} must be divisible by microbatch_group_size_per_vp_stage "
+                    f"{microbatch_group_size_per_vp_stage} for megatron backend"
+                )
             else:
                 micro_batches, indices = rearrange_micro_batches(batch=mini_batch.batch, max_token_len=max_token_len)
         else:
-            assert micro_batch_size is not None, "micro_batch_size is needed to be passed in when not using dynamic batch size"
+            assert micro_batch_size is not None, (
+                "micro_batch_size is needed to be passed in when not using dynamic batch size"
+            )
             micro_batches = mini_batch.batch.split(micro_batch_size)
         # compute input shapes for pp stages
         n_micro_batch = len(micro_batches)
@@ -423,7 +450,7 @@ class MegatronPPOActor(BasePPOActor):
             batch = batch.contiguous()
 
             input_ids = batch["input_ids"]
-            attention_mask = batch["attention_mask"]
+            attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
 
             multi_modal_inputs = {}
@@ -436,9 +463,9 @@ class MegatronPPOActor(BasePPOActor):
                     )
             responses = batch["responses"]
             response_length = responses.size(1)
-            label = copy.deepcopy(position_ids)
+            label = position_ids.clone()
             label[:, -response_length - 1 : -1] = responses
-            label_mask = copy.deepcopy(attention_mask)
+            label_mask = attention_mask.clone()
             label_mask[:, : -response_length - 1] = False
             label_mask[:, -1] = False
 
@@ -524,7 +551,7 @@ class MegatronPPOActor(BasePPOActor):
         return losses_reduced
 
     @GPUMemoryLogger(role="megatron actor", logger=logger)
-    def update_policy(self, dataloader: Iterable[DataProto]) -> Dict:
+    def update_policy(self, dataloader: Iterable[DataProto]) -> dict:
         """Update the policy with an iterator of DataProto
 
         Args:
@@ -567,8 +594,7 @@ class MegatronPPOActor(BasePPOActor):
                 append_to_dict(metrics, metric)  # append the metric from this micro-batch to global metrics.
 
             update_successful, grad_norm, num_zeros_in_grad = self.actor_optimizer.step()
-            learning_rate = self.actor_optimizer.param_groups[-1]["lr"]
-            data = {"actor/grad_norm": grad_norm, "actor/lr": learning_rate}
+            data = {"actor/grad_norm": grad_norm}
             append_to_dict(metrics, data)
 
             if update_successful:

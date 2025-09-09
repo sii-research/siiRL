@@ -1,5 +1,6 @@
 # Copyright 2025, Shanghai Innovation Institute. All rights reserved.
-#
+# Copyright 2025, Infrawaves. All rights reserved.
+# 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -61,6 +62,9 @@ class FSDPArguments:
 class MegatronArguments:
     tensor_model_parallel_size: int = field(default=1, metadata={"help": "Tensor parallelism size"})
     pipeline_model_parallel_size: int = field(default=1, metadata={"help": "Pipeline parallelism size"})
+    context_parallel_size: int = field(default=1, metadata={"help": "Context parallelism size"})
+    expert_model_parallel_size: int = field(default=1, metadata={"help": "Expert model parallelism size"})
+    expert_tensor_parallel_size: int = field(default=1, metadata={"help": "Expert tensor parallelism size"})
     virtual_pipeline_model_parallel_size: Optional[int] = field(default=None, metadata={"help": "Virtual pipeline model parallel size"})
     sequence_parallel: bool = field(default=False, metadata={"help": "Whether the sequence parallel is enabled."})
     use_distributed_optimizer: bool = field(
@@ -153,6 +157,7 @@ class ModelArguments(ProcessorArguments):
     external_lib: Optional[str] = field(default=None, metadata={"help": "External model library"})
     override_config: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Model config overrides"})
     enable_gradient_checkpointing: bool = field(default=True, metadata={"help": "Gradient checkpointing"})
+    gradient_checkpointing_kwargs: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Gradient checkpointing kwargs"})
     use_remove_padding: bool = field(default=False, metadata={"help": "Padding removal optimization"})
     use_fused_kernels: bool = field(default=False, metadata={"help": "Kernels fuse optimization"})
     cache_dir: Optional[str] = field(
@@ -274,6 +279,8 @@ class ActorArguments:
     recompute_old_log_prob: bool = field(default=True, metadata={"help": "recompute old log prob"})
     use_cpgd_loss: bool = field(default=False, metadata={"help": "use cpgd loss"})
     policy_drift_coeff: float = field(default=0.0, metadata={"help": "policy drift coeff for CPGD"})
+    data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
+    profile: dict[str, Any] = field(default_factory=dict, metadata={"help": "Actor Profile settings"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -421,6 +428,10 @@ class RefArguments:
     grad_offload: bool = field(default=False, metadata={"help": "Enable grad offload or not"})
     optimizer_offload: bool = field(default=False, metadata={"help": "Enable optimizer offload or not"})
     load_weight: bool = field(default=True)
+    profile: dict[str, Any] = field(default_factory=dict, metadata={"help": "Reference Profile settings"})
+    shuffle: bool = field(default=False, metadata={"help": "Data shuffling"})
+    data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
+    recompute_old_log_prob: bool = field(default=True, metadata={"help": "recompute old log prob"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -468,6 +479,8 @@ class CriticArguments:
     checkpoint: CheckpointArguments = field(default_factory=CheckpointArguments, metadata={"help": "Checkpoint configuration"})
     ppo_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU"})
     loss_agg_mode: str = field(default="token-mean", metadata={"help": "token-mean, seq-mean-token-sum, seq-mean-token-mean"})
+    profile: dict[str, Any] = field(default_factory=dict, metadata={"help": "Critic Profile settings"})
+    data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -513,6 +526,9 @@ class RewardModelArguments:
     reward_kwargs: Dict[str, Any] = field(default_factory=lambda: {})
     sandbox_fusion: Optional[Dict[str, Any]] = field(default=None)
     overlong_buffer: OverlongBufferArguments = field(default_factory=OverlongBufferArguments, metadata={"help": "DAPO overlong buffer configuration"})
+    profile: dict[str, Any] = field(default_factory=dict, metadata={"help": "Reward Model Profile settings"})
+    shuffle: bool = field(default=False, metadata={"help": "Data shuffling"})
+    data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
