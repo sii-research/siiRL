@@ -118,6 +118,21 @@ class AgentProcess():
     # each agent may have diferent tokenizer
     # so, we make sure preprocess get str instead of list except get List[int] from dataloader in first agent
     def apply_pre_process(self, prompt: Optional[Tuple[str, List]], obs: Optional[Tuple[str, List]]) -> str:
+        """
+        Applies preprocessing to the input prompt (and optional environment observation) to generate a templated prompt.
+        
+        Converts raw prompts to token IDs (if needed) and uses a custom preprocessing function (if configured)
+        to format the prompt (e.g., adding chat templates, incorporating observations).
+
+        Args:
+            prompt: Input prompt to preprocess. Can be either a raw string (to be tokenized) or a list of token IDs.
+            obs: Optional environment observation (tuple of string/list) to incorporate into the prompt (for agent-environment interactions).
+
+        Returns:
+            Tuple[List[int], List[int]]: 
+                - Original prompt (converted to token IDs if it was a string).
+                - Templated prompt (token IDs after preprocessing, e.g., with chat templates or observations added).
+        """
         templated_prompt = None
         if isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
@@ -129,6 +144,27 @@ class AgentProcess():
     # each agent may have diferent tokenizer
     # so, we make sure postprocess get list[int] and return str
     def apply_post_process(self, oridinal_prompt , templated_prompt , response) -> Tuple[List[int], List[int]]:
+        """
+        Applies postprocessing to the generation result to combine the original prompt with the response,
+        and generates a mask for the response tokens.
+        
+        Converts raw string responses to token IDs (if needed), merges the prompt with the response,
+        and creates a binary mask to identify response tokens (for training tasks like next-token prediction).
+
+        Note: Each agent may use a different tokenizer, so this method ensures input is list of token IDs
+        and returns properly formatted outputs (decoded string for original prompt, token IDs for templated prompt/mask).
+
+        Args:
+            oridinal_prompt: Original prompt (list of token IDs) before generation.
+            templated_prompt: Preprocessed templated prompt (list of token IDs) used for generation.
+            response: Generated response to postprocess. Can be either a raw string (to be tokenized) or a list of token IDs.
+
+        Returns:
+            Tuple[str, List[int], List[int]]:
+                - Decoded original prompt (string, merged with response tokens).
+                - Templated prompt merged with response tokens (list of token IDs, for model input).
+                - Response mask (binary list: 1 for response tokens, 0 otherwise; same length as response).
+        """
         if isinstance(response, str):
             response = self.tokenizer.encode(response)
         if self.post_process:

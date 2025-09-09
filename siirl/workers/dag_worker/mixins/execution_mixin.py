@@ -80,6 +80,7 @@ class ExecutionMixin:
     put_data_to_buffers: Any
     reset_data_buffer: Any
     _collect_final_metrics: Any
+    _collect_multi_final_metrics: Any
     compute_reward: Any
     compute_advantage: Any
     check_spmd_mode: Any
@@ -270,10 +271,6 @@ class ExecutionMixin:
                     if cur_node.node_id != entry_node_id:
                         with self._timer("get_data_from_buffer", timing_raw):
                             batch = self.get_data_from_buffers(key=cur_node.node_id, my_current_dp_rank=cur_dp_rank, my_current_dp_size=cur_dp_size, timing_raw=timing_raw)
-                            if batch is None:
-                                logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
-                                return None  # Abort the entire step
-
                             batch = remove_prefix_from_dataproto(batch, cur_node)
                             if batch is None:
                                 logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
@@ -301,7 +298,6 @@ class ExecutionMixin:
                         elif cur_node.executable:
                             if cur_node.agent_options and cur_node.agent_options.train_cycle:
                                 cycle_round = epoch // cur_node.agent_options.train_cycle
-                                # only support 2 agent now, more than 2 agent may put into different device because of device_mem
                                 agent_num = len(self.agent_group_worker)
                                 if cycle_round % agent_num == cur_node.agent_group:
                                     node_output = cur_node.run(batch=batch, worker_group_index=cur_node.agent_group, siirl_args=self.config)
@@ -364,25 +360,7 @@ class ExecutionMixin:
             self._cleanup_step_buffers(visited_nodes, timing_raw)
 
         if self._multi_agent:
-            node_queue = self.taskgraph.get_entry_nodes()
-            visited_nodes = set()
-            entry_node_id = node_queue[0].node_id
-            while node_queue:
-                cur_node = node_queue.pop(0)
-                if cur_node.node_id in visited_nodes:
-                    continue
-                if cur_node.node_role !=  NodeRole.ROLLOUT:
-                    break
-                batch = remove_prefix_from_dataproto(batch, cur_node)        
-                final_metrics = self._collect_final_metrics(batch, timing_raw)
-                final_metrics = add_prefix_to_metrics(final_metrics, cur_node)
-                if final_metrics:
-                    ordered_metrics.extend(sorted(final_metrics.items()))
-                if next_nodes := self.taskgraph.get_downstream_nodes(cur_node.node_id):
-                    for n in next_nodes:
-                        if n.node_id not in visited_nodes:
-                            node_queue.append(n)
-                batch = add_prefix_to_dataproto(batch, cur_node)
+            ordered_metrics = self._collect_multi_final_metrics(batch, ordered_metrics, timing_raw)
         else:
             final_metrics = self._collect_final_metrics(batch, timing_raw)
             if final_metrics:

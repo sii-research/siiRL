@@ -40,7 +40,7 @@ from siirl.workers.base_worker import Worker
 from siirl.workers.dag import TaskGraph
 from siirl.workers.dag.node import Node, NodeRole, NodeType
 from siirl.workers.databuffer import DataProto
-
+from siirl.workers.dag_worker.dag_utils import add_prefix_to_dataproto, remove_prefix_from_dataproto, add_prefix_to_metrics
 
 class _ReduceOp(Enum):
     """Enumeration for supported reduction operations."""
@@ -390,14 +390,11 @@ class UtilitiesMixin:
                     )
                     loaded_worker_keys.add(node_worker_key)
                 else:
-                    if len(self.agent_group_worker) > 1:
-                        # will use other agent critic
-                        pass
-                    else:
-                        logger.warning(
-                            f"Rank {self._rank}: Checkpoint for agent {node.agent_group}'s {node.node_role.name} not found "
-                            f"at {checkpoint_path}. Weights will be from initialization."
-                        )
+                    logger.warning(
+                        f"Rank {self._rank}: Checkpoint for agent {node.agent_group}'s {node.node_role.name} not found "
+                        f"at {checkpoint_path}. Weights will be from initialization."
+                        f"If has multi-agent, will share the same checkpoint in agents"
+                    )
 
         # Load dataloader state. All ranks in a DP group load from the same file.
         _, dp_rank, _, _ = self._get_node_dp_info(self.first_rollout_node)
@@ -625,6 +622,27 @@ class UtilitiesMixin:
         # All ranks return the final metrics. Ranks other than 0 can use them if needed,
         # or just ignore them. This is cleaner than returning an empty dict.
         return final_metrics
+
+    def _collect_multi_final_metrics(self, batch: DataProto, ordered_metrics: dict, timing_raw: dict) -> Dict[str, float]:
+        node_queue = self.taskgraph.get_entry_nodes()
+        visited_nodes = set()
+        while node_queue:
+            cur_node = node_queue.pop(0)
+            if cur_node.node_id in visited_nodes:
+                continue
+            if cur_node.node_role !=  NodeRole.ROLLOUT:
+                break
+            batch = remove_prefix_from_dataproto(batch, cur_node)        
+            final_metrics = self._collect_final_metrics(batch, timing_raw)
+            final_metrics = add_prefix_to_metrics(final_metrics, cur_node)
+            if final_metrics:
+                ordered_metrics.extend(sorted(final_metrics.items()))
+            if next_nodes := self.taskgraph.get_downstream_nodes(cur_node.node_id):
+                for n in next_nodes:
+                    if n.node_id not in visited_nodes:
+                        node_queue.append(n)
+            batch = add_prefix_to_dataproto(batch, cur_node)
+        return ordered_metrics
 
     def put_data_to_buffers(
         self, key: str, data: DataProto, source_dp_size: int, dest_dp_size: int, timing_raw: Dict[str, float]

@@ -27,7 +27,7 @@ def add_prefix_to_dataproto(data_proto: DataProto, node: Node):
                 new_batch[key] = value
         data_proto.batch = TensorDict(new_batch, batch_size=data_proto.batch.batch_size)
 
-    # # Process non_tensor_batch
+    # Process non_tensor_batch
     if data_proto.non_tensor_batch is not None:
         new_non_tensor = {}
         for key, value in data_proto.non_tensor_batch.items():
@@ -38,7 +38,7 @@ def add_prefix_to_dataproto(data_proto: DataProto, node: Node):
                 new_non_tensor[key] = value
         data_proto.non_tensor_batch = new_non_tensor
 
-    # # Process meta_info
+    # Process meta_info
     if data_proto.meta_info is not None:
         new_meta = {}
         for key, value in data_proto.meta_info.items():
@@ -85,7 +85,7 @@ def remove_prefix_from_dataproto(data_proto, node: Node):
                 new_non_tensor[key] = value
         data_proto.non_tensor_batch = new_non_tensor
 
-    # # Process meta_info
+    # Process meta_info
     if data_proto.meta_info is not None:
         new_meta = {}
         for key, value in data_proto.meta_info.items():

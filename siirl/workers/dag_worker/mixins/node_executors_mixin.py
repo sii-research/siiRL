@@ -54,47 +54,66 @@ class NodeExecutorsMixin:
     _find_first_non_compute_ancestor: Any
 
     @DistProfiler.annotate(role="generate")
+    def generate_sync_mode(self, worker_group_index: int, batch: DataProto, **kwargs) -> NodeOutput:
+        '''
+        Sync mode generate
+        '''
+        gen_batch:DataProto = self._prepare_generation_batch(batch)
+        if self.config.actor_rollout_ref.rollout.name == 'sglang':
+            gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+        gen_output = self.agent_group_worker[worker_group_index][NodeRole.ROLLOUT].generate_sequences(gen_batch)
+        metrics = gen_output.meta_info.get("metrics", {})
+        gen_output.meta_info = {}
+        batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))])
+        batch = batch.repeat(self.config.actor_rollout_ref.rollout.n, interleave=True).union(gen_output)
+        if "response_mask" not in batch.batch:
+            batch.batch["response_mask"] = compute_response_mask(batch)
+        return NodeOutput(batch=batch, metrics=metrics)
+
+    @DistProfiler.annotate(role="generate")
+    def generate_async_mode(self, worker_group_index: int, batch: DataProto, **kwargs) -> NodeOutput:
+        '''Generates sequences for a training batch using the async rollout model.'''
+        if self._async_rollout_manager is not None:
+            gen_batch = self._prepare_generation_batch(batch)
+            gen_output = self._async_rollout_manager.generate_sequences(gen_batch)
+            metrics = gen_output.meta_info.get("metrics", {})
+            gen_output.meta_info = {}
+            batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))])
+            batch = batch.repeat(self.config.actor_rollout_ref.rollout.n, interleave=True).union(gen_output)
+            if "response_mask" not in batch.batch:
+                batch.batch["response_mask"] = compute_response_mask(batch)
+            return NodeOutput(batch=batch, metrics=metrics)
+        return NodeOutput(batch=batch, metrics={})
+    
+    @DistProfiler.annotate(role="generate")
+    def generate_multi_agent_mode(self, worker_group_index: int, batch: DataProto, **kwargs) -> NodeOutput:
+        '''Generates sequences for a training batch using the multi-agent rollout model.'''
+        gen_batch = self._prepare_generation_batch(batch)
+        if self.config.actor_rollout_ref.rollout.agent.rewards_with_env and "reward_model" in batch.non_tensor_batch:
+            gen_batch.non_tensor_batch["reward_model"] = batch.non_tensor_batch["reward_model"] 
+        assert self.config.actor_rollout_ref.rollout.name == 'sglang'
+        gen_output = self.multi_agent_loop.generate_sequence(gen_batch)
+        if gen_output:
+            metrics = gen_output.meta_info.get("metrics", {})
+            gen_output.meta_info = {}
+            batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))])
+            batch = batch.repeat(self.config.actor_rollout_ref.rollout.n, interleave=True).union(gen_output)
+            if "response_mask" not in batch.batch:
+                batch.batch["response_mask"] = compute_response_mask(batch)
+            return NodeOutput(batch=batch, metrics=metrics) 
+        return NodeOutput(batch=batch, metrics={})
+    
+    @DistProfiler.annotate(role="generate")
     def generate(self, worker_group_index: int, batch: DataProto, **kwargs) -> NodeOutput:
         """Generates sequences for a training batch using the rollout model."""
         if self._multi_agent is False:
             if self.rollout_mode == 'sync':
-                gen_batch:DataProto = self._prepare_generation_batch(batch)
-                if self.config.actor_rollout_ref.rollout.name == 'sglang':
-                    gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                gen_output = self.agent_group_worker[worker_group_index][NodeRole.ROLLOUT].generate_sequences(gen_batch)
-                metrics = gen_output.meta_info.get("metrics", {})
-                gen_output.meta_info = {}
-                batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))])
-                batch = batch.repeat(self.config.actor_rollout_ref.rollout.n, interleave=True).union(gen_output)
-                if "response_mask" not in batch.batch:
-                    batch.batch["response_mask"] = compute_response_mask(batch)
-                return NodeOutput(batch=batch, metrics=metrics)
-            elif self._async_rollout_manager is not None:
-                gen_batch = self._prepare_generation_batch(batch)
-                gen_output = self._async_rollout_manager.generate_sequences(gen_batch)
-                metrics = gen_output.meta_info.get("metrics", {})
-                gen_output.meta_info = {}
-                batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))])
-                batch = batch.repeat(self.config.actor_rollout_ref.rollout.n, interleave=True).union(gen_output)
-                if "response_mask" not in batch.batch:
-                    batch.batch["response_mask"] = compute_response_mask(batch)
-                return NodeOutput(batch=batch, metrics=metrics)
-            return NodeOutput(batch=batch, metrics={})
+                return self.generate_sync_mode(worker_group_index, batch, **kwargs)
+            else: 
+                return self.generate_async_mode(worker_group_index, batch, **kwargs)
         else:
-            gen_batch = self._prepare_generation_batch(batch)
-            if self.config.actor_rollout_ref.rollout.agent.rewards_with_env and "reward_model" in batch.non_tensor_batch:
-                gen_batch.non_tensor_batch["reward_model"] = batch.non_tensor_batch["reward_model"] 
-            assert self.config.actor_rollout_ref.rollout.name == 'sglang'
-            gen_output = self.multi_agent_loop.generate_sequence(gen_batch)
-            if gen_output:
-                metrics = gen_output.meta_info.get("metrics", {})
-                gen_output.meta_info = {}
-                batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))])
-                batch = batch.repeat(self.config.actor_rollout_ref.rollout.n, interleave=True).union(gen_output)
-                if "response_mask" not in batch.batch:
-                    batch.batch["response_mask"] = compute_response_mask(batch)
-                return NodeOutput(batch=batch, metrics=metrics) 
-            return NodeOutput(batch=batch, metrics={})    
+            return self.generate_multi_agent_mode(worker_group_index, batch, **kwargs)
+            
                
     @DistProfiler.annotate(role="compute_reward")
     def compute_reward(self, batch: DataProto, tp_size: int, **kwargs) -> NodeOutput:
