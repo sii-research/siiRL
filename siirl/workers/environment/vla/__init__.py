@@ -13,4 +13,8 @@
 # limitations under the License.
 
 from .base import BaseVLAEnvironment
+from .libero.venv import SubprocVectorEnv
+from .libero.adapter import LIBEROAdapter
+
+__all__ = ["BaseVLAEnvironment", "LIBEROAdapter", "SubprocVectorEnv"]
 
