@@ -175,7 +175,7 @@ class DAGConfigLoader:
             node_specific_config["_node_id_"] = node_id
 
             # Multi-agent need extra params
-            user_options = node_config_dict.get("user_options", {})
+            agent_options = node_config_dict.get("agent_options", None)
             
             dag_node = Node(
                 node_id=node_id,
@@ -186,7 +186,7 @@ class DAGConfigLoader:
                 dependencies=dependencies,
                 config=node_specific_config,  # Use the renamed variable here
                 executable_ref=executable_ref_str,
-                user_options=user_options
+                agent_options=agent_options
             )
             dag_nodes.append(dag_node)
         task_graph = TaskGraph(dag_id)

@@ -1374,16 +1374,13 @@ class SGLangRollout(BaseRollout):
         # this function is left for uniform train-inference resharding
 
     async def generate(
-        self, *args, **kwargs
+        self, prompt_ids: torch.Tensor, sampling_params: dict[str, Any], request_id: str
     ) -> torch.Tensor:
-        # prompt_ids: torch.Tensor, sampling_params: dict[str, Any], request_id: str
-        prompt_ids = kwargs['prompt_ids']
-        sampling_params = kwargs['sampling_params']
-        request_id = kwargs['request_id']
         request_sampling_params = self.sampling_params.copy()
         request_sampling_params.update(sampling_params)
-        output = await self._handle_engine_generate(prompt_ids, request_sampling_params)      
-        return output["output_ids"]
+        output = await self._handle_engine_generate(prompt_ids, request_sampling_params)
+        return output["text"]
+    
 
     async def wake_up(self):
         if not self.is_sleep:
@@ -1451,7 +1448,8 @@ class SGLangRollout(BaseRollout):
             return loop.run_until_complete(self.wake_up())
         else:
             assert False, f"{method} has not implement"
-            
+    def get_device_mesh(self):
+        return self._device_mesh_cpu
             
 def ensure_event_loop():
     try:

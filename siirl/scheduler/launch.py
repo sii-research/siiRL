@@ -39,7 +39,7 @@ class RayTrainer:
     4.  Starting the training process and monitoring its execution until completion or failure.
     """
 
-    def __init__(self, config: SiiRLArguments, process_group_manager: ProcessGroupManager, rank_taskgraph_mapping: Dict[int, "TaskGraph"], unique_graphs_map: Dict[str, "TaskGraph"], data_buffer_handles: List["ray.actor.ActorHandle"], environments_handles: Dict[int, "ray.actor.ActorHandle"] = None, device_name="cuda"):
+    def __init__(self, config: SiiRLArguments, process_group_manager: ProcessGroupManager, rank_taskgraph_mapping: Dict[int, "TaskGraph"], unique_graphs_map: Dict[str, "TaskGraph"], data_buffer_handles: List["ray.actor.ActorHandle"], device_name="cuda"):
         """
         Initializes the RayTrainer.
 
@@ -49,13 +49,11 @@ class RayTrainer:
             rank_taskgraph_mapping: A mapping from a global rank to its assigned TaskGraph.
             unique_graphs_map: A mapping of unique graph IDs to their TaskGraph objects.
             data_buffer_handles: A list of Ray actor handles for data buffers.
-            environments_handles: A dictionary of Ray actor handles for environments.
         """
         # Store essential configuration and management objects.
         self.base_config = config
         self.process_group_manager = process_group_manager
         self.rank_taskgraph_mapping = rank_taskgraph_mapping
-        self.environments_handles = environments_handles
         self.data_buffer_handles = data_buffer_handles
         self.unique_graphs_map = unique_graphs_map
 
@@ -323,7 +321,6 @@ class RayTrainer:
             process_manager=self.process_group_manager,
             rank_taskgraph_mapping=self.rank_taskgraph_mapping,
             data_buffer_handles=self.data_buffer_handles,
-            environments_handles=self.environments_handles,
             device_name=self.device_name,
             **ray_actor_manager_kwargs,
         )
