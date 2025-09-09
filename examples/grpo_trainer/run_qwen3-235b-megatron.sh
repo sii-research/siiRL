@@ -2,36 +2,53 @@
 # ===================================================================================
 # ===                       USER CONFIGURATION SECTION                            ===
 # ===================================================================================
+# --- For config debugging
+export HYDRA_FULL_ERROR=0
+export SIIRL_LOG_VERBOSITY=INFO
+export RAY_DEDUP_LOGS=1
 
 # --- Experiment and Model Definition ---
 export DATASET=gsm8k
-export ALG=gae
-export WANDB_API_KEY=local-1bf5a678ba35baf1b0770b5d153e4aafd4686d66
+export ALG=grpo
+export MODEL_NAME=qwen3-235b-a22b
 
-# # --- Path Definitions ---
-# export HOME={your_home_path}
-export TRAIN_DATA_PATH=/root/data/gsm8k/train.parquet
-export TEST_DATA_PATH=/root/data/gsm8k/test.parquet
-export MODEL_PATH=/workspace/infrawaves/models/Qwen/Qwen3-8B
+# --- Path Definitions ---
+export TRAIN_DATA_PATH=/inspire/hdd/project/qianghuaxuexi/public/datasets/gsm8k/train.parquet
+export TEST_DATA_PATH=/inspire/hdd/project/qianghuaxuexi/public/datasets/gsm8k/test.parquet
+export MODEL_PATH=/dev/shm/Qwen3-235B-A22B/inspire/hdd/project/qianghuaxuexi/public/models/Qwen3-235B-A22B
+# export MODEL_PATH=/inspire/hdd/project/qianghuaxuexi/public/models/Qwen3-235B-A22B
+# export DIST_CKPT_PATH=/inspire/hdd/project/qianghuaxuexi/public/models/Qwen3-235B-A22B-dist-ckpt-128/release
 
 # Base output paths
 export BASE_CKPT_PATH=ckpts
 export BASE_TENSORBOARD_PATH=tensorboard
 
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+
 # --- Key Training Hyperparameters ---
-export TRAIN_BATCH_SIZE_PER_NODE=128
-export PPO_MINI_BATCH_SIZE_PER_NODE=64
-export PPO_MICRO_BATCH_SIZE_PER_GPU=8
-export MAX_PROMPT_LENGTH=128
-export MAX_RESPONSE_LENGTH=128
+export TRAIN_BATCH_SIZE_PER_NODE=32
+export PPO_MINI_BATCH_SIZE_PER_NODE=32
+export PPO_MICRO_BATCH_SIZE_PER_GPU=4
+# export MAX_PROMPT_LENGTH=$((1024 * 2))
+# export MAX_RESPONSE_LENGTH=$((1024 * 8))
+export MAX_PROMPT_LENGTH=512
+export MAX_RESPONSE_LENGTH=512
 export ROLLOUT_GPU_MEMORY_UTILIZATION=0.6
-export ROLLOUT_TP=1
-export ROLLOUT_N=1
+export ROLLOUT_TP=16
+export ROLLOUT_N=16
 export SAVE_FREQ=30
 export TEST_FREQ=10
-export TOTAL_EPOCHS=30
+export TOTAL_EPOCHS=15
 export MAX_CKPT_KEEP=5
 
+export ACTOR_REF_PP=8
+# export ACTOR_REF_VPP=1
+export ACTOR_REF_TP=1
+export ACTOR_REF_EP=8
+export ACTOR_REF_CP=1
+export ACTOR_REF_SP=True
+
+export use_dynamic_bsz=False
 # --- Multi-node (Multi-machine) distributed training environments ---
 
 # Uncomment the following line and set the correct network interface if needed for distributed backend
@@ -44,11 +61,11 @@ export NODE_RANK=${PET_NODE_RANK:-0}
 export MASTER_ADDR=${MASTER_ADDR:-localhost}
 
 # --- Output Paths and Experiment Naming ---
-export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_megatron_${NNODES}nodes
-export PROJECT_NAME=siirl_${DATASET}_${ALG}
-export EXPERIMENT_NAME=siirl_megatron_${MODEL_NAME}_${ALG}_${DATASET}_experiment
-export TENSORBOARD_DIR=${BASE_TENSORBOARD_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_megatron_tensorboard/dlc_${NNODES}_$timestamp
-export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${ALG}_${DATASET}_megatron_${NNODES}_$timestamp
+export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_hybrid_${NNODES}nodes
+export PROJECT_NAME=siirl_zp_${DATASET}_${ALG}
+export EXPERIMENT_NAME=siirl_moe_megatron_${MODEL_NAME}_${ALG}_${DATASET}_experiment
+export TENSORBOARD_DIR=${BASE_TENSORBOARD_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_hybrid_tensorboard/dlc_${NNODES}_$timestamp
+export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${ALG}_${DATASET}_hybrid_${NNODES}_$timestamp
 
 # --- Calculated Global Hyperparameters ---
 export TRAIN_BATCH_SIZE=$(($TRAIN_BATCH_SIZE_PER_NODE * $NNODES))
@@ -69,37 +86,55 @@ TRAINING_CMD=(
     actor_rollout_ref.model.path=\$MODEL_PATH
     actor_rollout_ref.actor.optim.lr=1e-6
     actor_rollout_ref.model.use_remove_padding=True
-    actor_rollout_ref.model.use_fused_kernels=False
+    actor_rollout_ref.model.use_fused_kernels=True
+    actor_rollout_ref.model.trust_remote_code=True
+    actor_rollout_ref.model.enable_gradient_checkpointing=True
+    actor_rollout_ref.actor.strategy=megatron
+    actor_rollout_ref.actor.use_dynamic_bsz=\$use_dynamic_bsz
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=\$use_dynamic_bsz
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=\$use_dynamic_bsz
+    actor_rollout_ref.actor.megatron.tensor_model_parallel_size=\$ACTOR_REF_TP
+    actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=\$ACTOR_REF_PP
+    # actor_rollout_ref.actor.megatron.virtual_pipeline_model_parallel_size=\$ACTOR_REF_VPP
+    actor_rollout_ref.actor.megatron.expert_model_parallel_size=\$ACTOR_REF_EP
+    actor_rollout_ref.actor.megatron.context_parallel_size=\$ACTOR_REF_CP
+    actor_rollout_ref.actor.megatron.sequence_parallel=\$ACTOR_REF_SP
+    actor_rollout_ref.actor.megatron.use_distributed_optimizer=True
+    actor_rollout_ref.actor.megatron.param_dtype=bfloat16
+    actor_rollout_ref.actor.megatron.param_offload=True
+    actor_rollout_ref.actor.megatron.optimizer_offload=True
+    actor_rollout_ref.actor.megatron.use_dist_checkpointing=False
+    actor_rollout_ref.actor.megatron.use_mbridge=True
+    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
+    +actor_rollout_ref.actor.megatron.override_transformer_config.account_for_embedding_in_pipeline_split=True
+    +actor_rollout_ref.actor.megatron.override_transformer_config.account_for_loss_in_pipeline_split=True
+    actor_rollout_ref.actor.policy_drift_coeff=0.001
     actor_rollout_ref.actor.ppo_mini_batch_size=\$PPO_MINI_BATCH_SIZE
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.actor.use_kl_loss=True
     actor_rollout_ref.actor.grad_clip=0.5
     actor_rollout_ref.actor.clip_ratio=0.2
-    actor_rollout_ref.actor.kl_loss_coef=0.01
+    actor_rollout_ref.actor.kl_loss_coef=0.001
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
-    actor_rollout_ref.model.enable_gradient_checkpointing=True
-    actor_rollout_ref.actor.fsdp_config.param_offload=False
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.rollout.tensor_model_parallel_size=\$ROLLOUT_TP
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.gpu_memory_utilization=\$ROLLOUT_GPU_MEMORY_UTILIZATION
-    actor_rollout_ref.rollout.max_model_len=8192
+    actor_rollout_ref.rollout.max_model_len=512
     actor_rollout_ref.rollout.enable_chunked_prefill=False
-    actor_rollout_ref.rollout.enforce_eager=False
-    actor_rollout_ref.rollout.free_cache_engine=False
+    actor_rollout_ref.rollout.enforce_eager=True
+    actor_rollout_ref.rollout.free_cache_engine=True
     actor_rollout_ref.rollout.n=\$ROLLOUT_N
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
-    actor_rollout_ref.ref.fsdp_config.param_offload=True
-    critic.optim.lr=1e-5
-    critic.model.use_remove_padding=True
-    critic.model.path=\$MODEL_PATH
-    critic.model.enable_gradient_checkpointing=True
-    critic.use_dynamic_bsz=False
-    critic.ppo_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
-    critic.ppo_max_token_len_per_gpu=98304
-    critic.model.fsdp_config.param_offload=False
-    critic.model.fsdp_config.optimizer_offload=False
+    actor_rollout_ref.ref.megatron.tensor_model_parallel_size=\$ACTOR_REF_TP
+    actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=\$ACTOR_REF_PP
+    # actor_rollout_ref.ref.megatron.virtual_pipeline_model_parallel_size=\$ACTOR_REF_VPP
+    actor_rollout_ref.ref.megatron.expert_model_parallel_size=\$ACTOR_REF_EP
+    actor_rollout_ref.ref.megatron.context_parallel_size=\$ACTOR_REF_CP
+    actor_rollout_ref.ref.megatron.sequence_parallel=\$ACTOR_REF_SP
+    actor_rollout_ref.ref.megatron.param_offload=True
+    actor_rollout_ref.ref.megatron.use_dist_checkpointing=False
+    algorithm.weight_factor_in_cpgd='STD_weight'
     algorithm.kl_ctrl.kl_coef=0.001
     trainer.critic_warmup=0
     trainer.logger=['console','wandb']
@@ -110,10 +145,11 @@ TRAINING_CMD=(
     trainer.save_freq=\$SAVE_FREQ
     trainer.test_freq=\$TEST_FREQ
     trainer.total_epochs=\$TOTAL_EPOCHS
-    trainer.resume_mode=auto
+    trainer.resume_mode=off
     trainer.max_actor_ckpt_to_keep=\$MAX_CKPT_KEEP
     trainer.default_local_dir=\$CKPT_PATH
     trainer.val_before_train=True
+    dag.enable_perf=False
 )
 
 # ===================================================================================
@@ -161,7 +197,7 @@ start_ray_cluster() {
                 sleep 5
             done
             echo "INFO: Head is healthy. Worker starting..."
-            ray start --address="$head_node_address" "${ray_start_common_opts[@]}" --block
+            ray start --address="$head_node_address" "${ray_start_common_opts[@]}"
         fi
     else
         echo "INFO: Starting Ray in single-node mode..."
@@ -183,7 +219,7 @@ main() {
     export RAY_MASTER_PORT=${RAY_MASTER_PORT:-6379}
     export RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-8265}
     export RAY_MASTER_ADDR=$MASTER_ADDR
-
+    
     start_ray_cluster
 
     if [ "$NNODES" -gt 1 ] && [ "$NODE_RANK" = "0" ]; then
@@ -194,7 +230,7 @@ main() {
             local ready_nodes=$(ray list nodes --format=json | python3 -c "import sys, json; print(len(json.load(sys.stdin)))")
             if [ "$ready_nodes" -ge "$NNODES" ]; then break; fi
             echo "Waiting... ($ready_nodes / $NNODES nodes ready)"
-            sleep 2
+            sleep 5
         done
         echo "All $NNODES nodes have joined."
     fi

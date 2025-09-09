@@ -13,6 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .registry import get_mcore_forward_fn, get_mcore_forward_fused_fn, get_mcore_weight_converter, hf_to_mcore_config, init_mcore_model
+try:
+    from mbridge import AutoBridge
+    from mbridge.utils.post_creation_callbacks import freeze_moe_router, make_value_model
+except ImportError:
+    print("mbridge package not found. Please install mbridge with `pip install verl[mcore]` or `pip install mbridge`")
+    raise
 
-__all__ = ["hf_to_mcore_config", "init_mcore_model", "get_mcore_forward_fn", "get_mcore_forward_fused_fn", "get_mcore_weight_converter"]
+__all__ = ["AutoBridge", "make_value_model", "freeze_moe_router"]

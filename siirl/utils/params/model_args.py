@@ -69,6 +69,15 @@ class MegatronArguments:
     )
     param_dtype: str = field(default="bfloat16", metadata={"help": "parameter data dtype"})
     seed: int = field(default=1, metadata={"help": "The random seed"})
+    param_offload: bool = field(default=False, metadata={"help": "Offload parameters to CPU"})
+    grad_offload: bool = field(default=False, metadata={"help": "Offload gradients to CPU"})
+    optimizer_offload: bool = field(default=False, metadata={"help": "Offload optimizer states to CPU"})
+    extra: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Extra settings"})
+    override_transformer_config: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Override transformer config"})
+    use_dist_checkpointing: bool = field(default=False, metadata={"help": "Whether to use distributed checkpointing"})
+    dist_checkpointing_path: str = field(default="", metadata={"help": "Path to save distributed checkpointing"})
+    override_ddp_config: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Override ddp config"})
+    use_mbridge: bool = field(default=False, metadata={"help": "Whether to use mbridge"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -78,8 +87,16 @@ class MegatronArguments:
 class OptimizerArguments:
     lr: float = field(default=1e-6, metadata={"help": "Learning rate"})
     lr_warmup_steps_ratio: float = field(default=0.0, metadata={"help": "Warmup steps ratio"})
+    min_lr: float = field(default=0.0, metadata={"help": "Min learning rate"})
     min_lr_ratio: Optional[float] = field(default=None, metadata={"help": "Min learning rate ratio"})
     warmup_style: str = field(default="constant", metadata={"help": "Warmup strategy"})
+    lr_warmup_init: float = field(default=0.0, metadata={"help": "Learning rate warmup init"})
+    lr_decay_steps: Optional[int] = field(default=None, metadata={"help": "Learning rate decay steps"})
+    lr_decay_style: str = field(default="linear", metadata={"help": "Learning rate decay style"})
+    weight_decay_incr_style: str = field(default="constant", metadata={"help": "Weight decay increase style"})
+    lr_wsd_decay_style: str = field(default="exponential", metadata={"help": "Learning rate warmup decay style"})
+    lr_wsd_decay_steps: Optional[int] = field(default=None, metadata={"help": "Learning rate warmup decay steps"})
+    use_checkpoint_opt_param_scheduler: bool = field(default=False, metadata={"help": "Whether to use checkpoint opt param scheduler"})
     total_training_steps: int = field(default=0, metadata={"help": "Total training steps"})
     betas: tuple[float, float] = field(default=(0.9, 0.999), metadata={"help": "Beta params Of Optimizer"})
     weight_decay: float = field(default=1e-2, metadata={"help": "Weight decay params of Optimizer"})
@@ -89,6 +106,7 @@ class OptimizerArguments:
     )
     clip_grad: float = field(default=1.0, metadata={"help": "gradient clip"})
     num_cycles: float = field(default=0.5, metadata={"help": "num cycles"})
+    override_optimizer_config: Optional[dict] = field(default=None, metadata={"help": "Override optimizer config"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -203,7 +221,20 @@ class ModelArguments(ProcessorArguments):
 
 @dataclass
 class CheckpointArguments:
-    contents: List[str] = field(default_factory=["model", "hf_model", "optimizer", "extra"], metadata={"help": "The contents to save in the checkpoint."})
+    contents: List[str] = field(default_factory=["model", "hf_model", "optimizer", "extra"], metadata={"help": "The contents to save and load in the checkpoint."})
+    save_contents: List[str] = field(default_factory=["model", "optimizer", "extra"], metadata={"help": "The contents to save in the checkpoint."})
+    load_contents: List[str] = field(default_factory=["model", "optimizer", "extra"], metadata={"help": "The contents to load in the checkpoint."})
+    async_save: bool = field(default=False, metadata={"help": "Async checkpoint save mode"})
+
+
+@dataclass
+class PolicyLossArguments:
+    loss_mode: str = field(default="vanilla", metadata={"help": "Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg'."})
+    clip_cov_ratio: float = field(default=0.0002, metadata={"help": "Ratio of tokens to be clipped for clip-cov loss."})
+    clip_cov_lb: float = field(default=1.0, metadata={"help": "Lower bound for clip-cov loss."})
+    clip_cov_ub: float = field(default=5.0, metadata={"help": "Upper bound for clip-cov loss."})
+    kl_cov_ratio: float = field(default=0.0002, metadata={"help": "Ratio of tokens to be applied KL penalty for kl-cov loss."})
+    ppo_kl_coef: float = field(default=0.1, metadata={"help": "KL divergence penalty coefficient."})
 
 
 @dataclass
@@ -226,6 +257,8 @@ class ActorArguments:
     ppo_epochs: int = field(default=1, metadata={"help": "PPO epochs"})
     shuffle: bool = field(default=False, metadata={"help": "Data shuffling"})
     ulysses_sequence_parallel_size: int = field(default=1, metadata={"help": "Sequence parallel size"})
+    policy_loss: PolicyLossArguments = field(default_factory=PolicyLossArguments, metadata={"help": "Policy loss settings"})
+    tis_imp_ratio_cap: float = field(default=-1, metadata={"help": "Truncated importance sampling ratio cap"})
     optim: OptimizerArguments = field(default_factory=OptimizerArguments, metadata={"help": "Optimizer settings"})
     fsdp_config: FSDPArguments = field(default_factory=FSDPArguments, metadata={"help": "FSDP settings"})
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
@@ -518,6 +551,8 @@ class AlgorithmArguments:
     weight_factor_in_cpgd: str = field(default="STD_weight", metadata={"help": "The weighting methods for advantage {STD_weight, clip_filter_like_weight, naive}"})
     algorithm_name: str = field(default="grpo", metadata={"help": "Algorithm name, e.g., grpo, ppo, dapo"})
     filter_groups: FilterGroupsArguments = field(default_factory=FilterGroupsArguments, metadata={"help": "DAPO filter groups configuration"})
+    use_pf_ppo: bool = field(default=False, metadata={"help": "Whether to enable preference feedback PPO."})
+    pf_ppo: dict[str, Any] = field(default_factory=dict, metadata={"help": " Preference feedback PPO settings."})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

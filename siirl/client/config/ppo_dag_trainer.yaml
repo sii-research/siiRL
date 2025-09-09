@@ -76,11 +76,22 @@ actor_rollout_ref:
     ulysses_sequence_parallel_size: 1 # sp size
     checkpoint:
       contents: ['model', 'optimizer', 'extra']  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
+      save_contents: ['model', 'optimizer', 'extra']
+      load_contents: ['model', 'optimizer', 'extra']
+      async_save: False
     optim:
       lr: 1e-6
+      lr_warmup_init: 0.0
       lr_warmup_steps: -1 # Prioritized. Negative values mean delegating to lr_warmup_steps_ratio.
       lr_warmup_steps_ratio: 0.  # the total steps will be injected during runtime
       min_lr_ratio: 0.0   # only used with cosine lr scheduler, default to 0.0
+      min_lr: 0.0
+      lr_decay_steps: null
+      lr_decay_style: linear
+      weight_decay_incr_style: constant
+      lr_wsd_decay_style: exponential
+      lr_wsd_decay_steps: null
+      use_checkpoint_opt_param_scheduler: False
       num_cycles: 0.5     # only used with cosine lr scheduler, default to 0.5
       warmup_style: constant  # select from constant/cosine
       total_training_steps: -1  # must be override by program
@@ -94,8 +105,28 @@ actor_rollout_ref:
       offload_policy: False # only for fsdp2, offload param\grad\optimizer during train
       reshard_after_forward: True # only for fsdp2, [True, False, int between 1 and fsdp_size]
       fsdp_size: -1
+    # Megatron-specific configuration
+    megatron:  # Only used when strategy is megatron
+      tensor_model_parallel_size: 2  # Tensor parallelism across GPUs
+      pipeline_model_parallel_size: 2  # Pipeline parallelism across stages
+      virtual_pipeline_model_parallel_size: null  # Optional: virtual pipeline stages
+      sequence_parallel: True  # Enable Megatron's sequence parallelism
+      use_distributed_optimizer: True  # Use Megatron's distributed optimizer (ZeRO-1 style)
+      param_dtype: "bfloat16"  # Parameter data type
+      seed: 1  # Random seed for reproducibility
+      context_parallel_size: 1  # Context parallelism (for very long sequences)
+      expert_model_parallel_size: 1  # Expert parallelism for MoE models
+      expert_tensor_parallel_size: 1  # Expert tensor parallelism for MoE models
+      param_offload: False  # Offload parameters to CPU
+      grad_offload: False   # Offload gradients to CPU 
+      optimizer_offload: False  # Offload optimizer states to CPU
+      override_transformer_config: {}
+      override_ddp_config: {}
+      use_dist_checkpointing: False
+      dist_checkpointing_path: ""
+      use_mbridge: False
   ref:
-    strategy: fsdp
+    strategy: fsdp  # [fsdp, megatron]
     fsdp_config:
       param_offload: False
       reshard_after_forward: True # only for fsdp2, [True, False, int between 1 and fsdp_size]
@@ -109,6 +140,23 @@ actor_rollout_ref:
     log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
     log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
     ulysses_sequence_parallel_size: ${actor_rollout_ref.actor.ulysses_sequence_parallel_size} # sp size
+    # Megatron-specific configuration
+    megatron:  # Only used when strategy is megatron
+      tensor_model_parallel_size: 2  # Reference's tensor parallelism
+      pipeline_model_parallel_size: 2
+      virtual_pipeline_model_parallel_size: null
+      sequence_parallel: True
+      use_distributed_optimizer: False  # Reference doesn't need optimizer
+      use_dist_checkpointing: False
+      dist_checkpointing_path: ""
+      param_dtype: "bfloat16"
+      seed: 1
+      context_parallel_size: 1
+      expert_model_parallel_size: 1
+      expert_tensor_parallel_size: 1
+      param_offload: False
+      override_transformer_config: ${actor_rollout_ref.actor.megatron.override_transformer_config}
+      use_mbridge: ${actor_rollout_ref.actor.megatron.use_mbridge}
   rollout:
     name: vllm
     mode: sync # sync: LLM, async: AsyncLLM
@@ -209,6 +257,14 @@ critic:
   strategy: fsdp # [fsdp, fsdp2]
   optim:
     lr: 1e-5
+    lr_warmup_init: 0.0
+    min_lr: 0.0
+    lr_decay_steps: null
+    lr_decay_style: linear
+    weight_decay_incr_style: constant
+    lr_wsd_decay_style: exponential
+    lr_wsd_decay_steps: null
+    use_checkpoint_opt_param_scheduler: False
     lr_warmup_steps_ratio: 0.  # the total steps will be injected during runtime
     min_lr_ratio: null   # only useful for warmup with cosine
     warmup_style: constant  # select from constant/cosine
@@ -252,6 +308,29 @@ critic:
   loss_agg_mode: ${actor_rollout_ref.actor.loss_agg_mode}
   checkpoint:
     contents: ['model', 'optimizer', 'extra']  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
+    save_contents: ['model', 'optimizer', 'extra']
+    load_contents: ['model', 'optimizer', 'extra']
+    async_save: False
+  # Megatron-specific configuration
+  megatron:  # Only used when strategy is megatron
+    tensor_model_parallel_size: 2  # Critic's tensor parallelism
+    pipeline_model_parallel_size: 2
+    virtual_pipeline_model_parallel_size: null
+    sequence_parallel: True
+    use_distributed_optimizer: True
+    param_dtype: "bfloat16"
+    seed: 1
+    context_parallel_size: 1
+    expert_model_parallel_size: 1
+    expert_tensor_parallel_size: 1
+    param_offload: False
+    grad_offload: False
+    optimizer_offload: False
+    use_dist_checkpointing: False
+    dist_checkpointing_path: ""
+    override_transformer_config: ${actor_rollout_ref.actor.megatron.override_transformer_config}
+    override_ddp_config: ${actor_rollout_ref.actor.megatron.override_ddp_config}
+    use_mbridge: ${actor_rollout_ref.actor.megatron.use_mbridge}
 
 reward_model:
   enable: False
@@ -281,6 +360,16 @@ reward_model:
   sandbox_fusion:
     url: null # faas url to run code in cloud sandbox
     max_concurrent: 64 # max concurrent requests to sandbox
+  # Megatron-specific configuration
+  megatron:  # Only used when strategy is megatron
+    tensor_model_parallel_size: 2  # Reward model's tensor parallelism
+    pipeline_model_parallel_size: 1  # Reward models typically don't need PP
+    sequence_parallel: False
+    use_distributed_optimizer: False
+    param_dtype: "bfloat16"
+    seed: 1
+    override_transformer_config: ${actor_rollout_ref.actor.megatron.override_transformer_config}
+    use_mbridge: ${actor_rollout_ref.actor.megatron.use_mbridge}
   # DAPO-specific overlong buffer configuration
   overlong_buffer:
     enable: False  # Enable overlong sequence buffer

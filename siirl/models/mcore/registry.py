@@ -36,6 +36,9 @@ from .config_converter import (
 from .model_forward import (
     gptmodel_forward,
 )
+from .model_forward_fused import (
+    fused_forward_gptmodel,
+)
 from .model_initializer import (
     BaseModelInitializer,
     DeepseekV3Model,
@@ -106,6 +109,19 @@ MODEL_FORWARD_REGISTRY: Dict[SupportedModel, Callable] = {
     SupportedModel.DEEPSEEK_V3: gptmodel_forward,
 }
 
+# Registry for model forward functions
+MODEL_FORWARD_FUSED_REGISTRY: dict[SupportedModel, Callable] = {
+    SupportedModel.LLAMA: fused_forward_gptmodel,
+    SupportedModel.QWEN2: fused_forward_gptmodel,
+    SupportedModel.QWEN2_MOE: fused_forward_gptmodel,
+    SupportedModel.MIXTRAL: fused_forward_gptmodel,
+    SupportedModel.DEEPSEEK_V3: fused_forward_gptmodel,
+    SupportedModel.LLAMA4: fused_forward_gptmodel,
+    SupportedModel.QWEN3: fused_forward_gptmodel,
+    SupportedModel.QWEN3_MOE: fused_forward_gptmodel,
+    SupportedModel.DEEPSEEK_V3: fused_forward_gptmodel,
+}
+
 # Registry for model weight converters
 MODEL_WEIGHT_CONVERTER_REGISTRY: Dict[SupportedModel, Type] = {
     SupportedModel.LLAMA: McoreToHFWeightConverterDense,
@@ -172,6 +188,13 @@ def get_mcore_forward_fn(hf_config: PretrainedConfig) -> Callable:
     model = get_supported_model(hf_config.architectures[0])
     return MODEL_FORWARD_REGISTRY[model]
 
+def get_mcore_forward_fused_fn(hf_config: PretrainedConfig) -> Callable:
+    """
+    Get the forward function for given model architecture.
+    """
+    assert len(hf_config.architectures) == 1, "Only one architecture is supported for now"
+    model = get_supported_model(hf_config.architectures[0])
+    return MODEL_FORWARD_FUSED_REGISTRY[model]
 
 def get_mcore_weight_converter(hf_config: PretrainedConfig, dtype: torch.dtype) -> Callable:
     """
