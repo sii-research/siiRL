@@ -22,9 +22,9 @@ siiRL: Shanghai Innovation Institute RL Framework for Advanced LLMs and Multi-Ag
 | <a href="README.md"><b> English</b></a> |
 </p>
 
-**siiRL** 是一个新型的、**完全分布式的强化学习 (RL) 框架**，旨在突破大语言模型 (LLM) 后训练中的扩展性瓶颈，由**上海创智学院**的研究人员开发。
+**siiRL** 是一个新型的、**完全分布式的强化学习 (RL) 框架**，旨在突破大语言模型 (LLM) 后训练中的扩展性瓶颈，并支持未来的多智能体研究，由**上海创智学院**的研究人员开发。
 
-通过移除其他框架中常见的中心化控制器，siiRL 实现了**近线性的扩展能力**、**显著的吞吐量提升**以及**前所未有的灵活性**，为基于强化学习的 LLM 开发带来了全新的可能性。
+通过移除主流框架中的中心化数据流控制器，siiRL 实现了**近线性的扩展能力**、**显著的吞吐量提升**，通过DAG模块化的设计获得了**极大的的灵活性**，为基于强化学习的 LLM 开发带来了全新的可能性。
 
 ---
 
@@ -44,11 +44,17 @@ siiRL: Shanghai Innovation Institute RL Framework for Advanced LLMs and Multi-Ag
 
 ## 📰 最新动态
 
-* **[2025/07]**: 我们很开心向开源社区发布 siiRL！欢迎查阅我们的[论文](https://arxiv.org/abs/2507.13833)，深入了解其架构和评测。
+* **[2025/09]**: siiRL 现已集成 Megatron 训练后端，并支持MoE模型训练。其性能已在 Qwen3-MoE 模型（30B、235B）上得到验证。
+
+* **[2025/09]**: siiRL通过与华为昇腾、沐曦科技、阿里云等主要厂商合作，现已支持在其GPU 集群上从 32 卡稳定扩展至 1024 卡，线性扩展效率超过 90%。
+
+* **[2025/09]**: siiRL 支持多智能体与环境之间进行多轮交互。
+
+* **[2025/07]**: siiRL 为 LaMAS 新增了 [MARFT](https://arxiv.org/pdf/2504.16129) 支持，可通过 Flex-POMDP 对 LLM 多智能体进行强化学习微调。
 
 * **[2025/07]**: siiRL 现已支持 [CPGD](https://arxiv.org/pdf/2505.12504v1)，这是一种通过正则化大幅度的策略更新来增强 RL 训练稳定性和性能的算法。
 
-* **[2025/07]**: siiRL 为 LaMAS 新增了 [MARFT](https://arxiv.org/pdf/2504.16129) 支持，可通过 Flex-POMDP 对 LLM 多智能体进行强化学习微调。
+* **[2025/07]**: 我们很开心向开源社区发布 siiRL！欢迎查阅我们的[论文](https://arxiv.org/abs/2507.13833)，深入了解其架构和评测。
 
 ---
 
@@ -64,9 +70,9 @@ siiRL 是一个为大规模集群设计的完全分布式强化学习框架。si
 siiRL 是一个**完全分布式、多控制器的架构**。
 
 关键组件包括：
-* **DAG Planner**: 将用户定义的逻辑工作流 (DAG) 转换为序列化、可供每个工作节点执行的流水线。
-* **DAG Workers**: 核心执行单元，每个工作节点绑定到单个 GPU，独立运行其分配的任务。
-* **Data Coordinator**: 一组分布式组件（`分布式数据加载器`和`分布式数据缓冲区`），无需中央协调器即可管理从初始加载到中间数据再分配的整个数据生命周期。
+* **DAG Planner**: 将用户定义的 DAG 转换为序列化、可供每个DAG Worker执行的流水线。
+* **DAG Workers**: 核心执行单元，每个DAG Worker绑定到单个 GPU，独立运行其分配的任务。
+* **Data Coordinator**: 一组分布式组件（`分布式数据加载器`和`分布式数据缓冲区`），无需中央协调器即可管理从初始加载到中间数据重分配的整个数据生命周期。
 
 ## 🧪 实验评测
 
@@ -78,12 +84,12 @@ siiRL 是一个**完全分布式、多控制器的架构**。
 <p align="center">
 <img src="asset/ppo_performance_comparison.png" width="80%" alt="PPO 算法性能对比"/>
 <br>
-<em>图 2: 使用 PPO 算法的端到端性能对比</em>
+<em>图 2:  PPO 算法下端到端性能对比</em>
 </p>
 <p align="center">
 <img src="asset/grpo_performance_comparison.png" width="80%" alt="GRPO 算法性能对比"/>
 <br>
-<em>图 3: 使用 GRPO 算法的端到端性能对比</em>
+<em>图 3: GRPO 算法下端到端性能对比</em>
 </p>
 
 ### 大规模扩展性
@@ -92,13 +98,13 @@ siiRL 展示了近线性的扩展能力，可平滑扩展至 1024 张 GPU。相�
 <p align="center">
 <img src="asset/scaling_trend_new.png" width="80%" alt="siiRL 扩展性测试"/>
 <br>
-<em>图 4: siiRL 在 VLM 模型上的扩展性测试</em>
+<em>图 4: siiRL 的扩展性测试</em>
 </p>
 
 <p align="center">
 <img src="asset/batch_size_total_throughput_final.png" width="80%" alt="VLM 任务性能对比"/>
 <br>
-<em>图 5: 在基线系统最大负载下，VLM 任务的性能对比</em>
+<em>图 5: 在基线系统最大负载下的性能对比</em>
 </p>
 
 ### 长上下文性能
@@ -135,20 +141,14 @@ siiRL 展示了近线性的扩展能力，可平滑扩展至 1024 张 GPU。相�
 
 siiRL 仍在积极开发中。我们对未来充满期待，并致力于在两个关键方向上扩展框架的功能：推进多智能体支持和优化基础框架。
 
-### 🚀 增强的多智能体能力
-我们灵活的 DAG 设计为复杂的多智能体系统提供了天然且强大的基础。我们计划将其作为最主要的特性，主要包括：
+### 增强的多智能体能力
+我们灵活的 DAG 设计为复杂的多智能体系统提供了天然且强大的基础。
 
-* **[ ]** 复杂的智能体交互工作流。
-* **[ ]** 扩展多智能体强化学习 (MARL) 算法支持。
-* **[ ]** 丰富的环境交互接口。
+### 支持 VLA 训练
+其目标是创建一个能够为具身智能（embodied AI）任务训练大规模、多模态 VLA 模型的端到端分布式强化学习（RL）解决方案。您可以在此 [Pull Request](https://github.com/sii-research/siiRL/pull/30) 中跟踪此功能的开发进度。
 
-### 🔧 基础框架增强
-我们将持续努力提升核心系统的性能、效率和扩展性。主要优先事项包括：
-
-* **[ ]** 集成 Megatron-LM 和 SGLang。
-* **[ ]** 优化模型浮点运算利用率 (MFU)。
-* **[ ]** 解决 Rollout 阶段的长尾问题。
-* **[ ]** 扩展硬件支持。
+### 基础框架增强
+我们将持续努力提升核心系统的性能、效率和扩展性。
 
 ---
 
@@ -158,13 +158,13 @@ siiRL 仍在积极开发中。我们对未来充满期待，并致力于在两�
 
 siiRL 的构建也离不开其他优秀的开源项目。我们衷心感谢 PyTorch、Ray、vLLM、vLLM-Ascend 和 SGLang 团队的杰出工作。
 
-我们的工作旨在解决研究过程中发现的扩展性挑战，并希望 siiRL 能为社区的共同进步做出积极贡献。
+我们的工作解决了研究过程中发现的扩展性问题并设计了灵活的工作流设计，并希望 siiRL 能为社区的共同进步做出积极贡献。
 
 ---
 
 ## 🖋️ 如何引用
 
-如果您在研究中发现 siiRL 有用，请考虑引用我们的论文。
+如果您在研究中发现 siiRL 对您有帮助，请考虑引用我们的论文。
 
 ```bibtex
 @misc{wang2025distflowfullydistributedrl,
