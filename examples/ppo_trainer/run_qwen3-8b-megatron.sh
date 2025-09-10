@@ -7,7 +7,7 @@ export HYDRA_FULL_ERROR=0
 export SIIRL_LOG_VERBOSITY=INFO
 
 # --- Experiment and Model Definition ---
-export DATASET=gsm8k
+export DATASET=deepscaler
 export ALG=gae
 export MODEL_NAME=qwen3-8b
 

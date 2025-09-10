@@ -8,7 +8,7 @@ export SIIRL_LOG_VERBOSITY=INFO
 export RAY_DEDUP_LOGS=1
 
 # --- Experiment and Model Definition ---
-export DATASET=gsm8k
+export DATASET=deepscaler
 export ALG=grpo
 export MODEL_NAME=qwen3-235b-a22b
 
