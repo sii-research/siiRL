@@ -45,11 +45,17 @@ By eliminating the centralized controller common in other frameworks, siiRL deli
 
 ## 📰 News
 
-* **[2025/07]**: We are excited to release siiRL to the open-source community! Check out our [paper](https://arxiv.org/abs/2507.13833) for a deep dive into the architecture and evaluation.
+* **[2025/09]**:siiRL now integrates Megatron training backend with support for MoE training. Performance has been validated on Qwen3-MoE models (30B, 235B).
+
+* **[2025/09]**:siiRL now supports stable scaling on GPU clusters from 32 GPUs up to 1024 GPUs, with over 90% linear scalability efficiency, through collaboration with major manufacturers including Huawei Ascend, MetaX, and Alibaba Cloud.
+
+* **[2025/09]**:siiRL supports multi-turn interactions among multi-agents with the environment.
+
+* **[2025/07]**:siiRL adds [MARFT](https://arxiv.org/pdf/2504.16129) support for LaMAS, enabling RL fine-tuning of multi-LLM agents via Flex-POMDP.
 
 * **[2025/07]**: siiRL now supports [CPGD](https://arxiv.org/pdf/2505.12504v1), a novel algorithm that enhances RL training stability and performance by regularizing large policy updates.
 
-* **[2025/07]**:siiRL adds [MARFT](https://arxiv.org/pdf/2504.16129) support for LaMAS, enabling RL fine-tuning of multi-LLM agents via Flex-POMDP.
+* **[2025/07]**: We are excited to release siiRL to the open-source community! Check out our [paper](https://arxiv.org/abs/2507.13833) for a deep dive into the architecture and evaluation.
 
 ---
 
@@ -136,26 +142,17 @@ Experiments confirm that siiRL's performance optimizations do not come at the co
 
 siiRL is under active development. We are excited about the future and are focused on extending the framework's capabilities in two key directions: advancing multi-agent support and optimizing the base framework.
 
-### 🚀 Advanced Multi-Agent Capabilities
-Our flexible DAG-based design provides a natural and powerful foundation for complex multi-agent systems. We plan to make this a first-class feature by:
+###  Advanced Multi-Agent Capabilities
+Our flexible DAG-based design provides a natural and powerful foundation for complex multi-agent systems. 
 
-* **[ ]** Sophisticated Agent Interaction Workflows.
-
-* **[ ]** Expanded Multi-Agent RL (MARL) Algorithm Support.
-
-* **[ ]** Rich Environment Interaction.
-
-### 🔧 Base Framework Enhancements
-We are continuously working to improve the performance, efficiency, and scalability of the core system. Key priorities include:
+###  Support Training for VLA
+The goal is to create an end-to-end, distributed RL solution capable of training large-scale, multi-modal VLA models for embodied AI tasks. You can track the development progress for this feature in this [Pull Request](https://github.com/sii-research/siiRL/pull/30)
 
 
-* **[ ]** Megatron-LM and SGlang Integration.
+###  Base Framework Enhancements
+We are continuously working to improve the performance, efficiency, and scalability of the base system. 
 
-* **[ ]** Optimizing Model Flops Utilization (MFU).
 
-* **[ ]** Solving the Rollout Long-Tail Issue.
-
-* **[ ]** Expanding Hardware Support.
 
 We welcome community contributions! Please see our [Contributing Guide](CONTRIBUTING.md) to get started.
 
