@@ -640,17 +640,25 @@ class UtilitiesMixin:
 
         # --- 4. Handle special cases like Explained Variance ---
         if use_critic:
+            # Determine the correct device for distributed operations
+            device_name = get_device_name()
+            if device_name in ["cuda", "npu"]:
+                device = f"{device_name}:{get_device_id()}"
+            else:
+                # Fallback to the device of an existing tensor. If it's CPU, all_reduce will fail,
+                # which is the original problem, indicating a deeper issue.
+                device = local_data["returns"].device
             # These components only need to be summed. We can do a direct all_reduce.
             components_to_sum = {k: v for k, v in local_data.items() if k.endswith("_comp")}
             for tensor in components_to_sum.values():
                 if self._gather_group is not None:
-                    dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=self._gather_group)
+                    dist.all_reduce(tensor.to(device), op=dist.ReduceOp.SUM, group=self._gather_group)
 
             # Now all ranks have the global sums and can compute the final value.
             N = local_data["returns"].numel()
             total_N_tensor = torch.tensor([N], dtype=torch.int64, device=local_data["returns"].device)
             if self._gather_group is not None:
-                dist.all_reduce(total_N_tensor, op=dist.ReduceOp.SUM, group=self._gather_group)
+                dist.all_reduce(total_N_tensor.to(device), op=dist.ReduceOp.SUM, group=self._gather_group)
             global_N = total_N_tensor.item()
 
             if global_N > 0:
