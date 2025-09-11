@@ -85,35 +85,60 @@ nodes:
     dependencies:
       - "actor_1_old_log_prob"
 
-  - node_id: "critic_value"
+  - node_id: "reference_1_log_prob"
+    node_type: "MODEL_TRAIN"
+    node_role: "REFERENCE"
+    agent_group: 0
+    dependencies:
+      - "actor_2_old_log_prob"
+
+  - node_id: "reference_2_log_prob"
+    node_type: "MODEL_TRAIN"
+    node_role: "REFERENCE"
+    agent_group: 1
+    dependencies:
+      - "reference_1_log_prob"
+
+  - node_id: "critic_1_value"
+    node_type: "MODEL_TRAIN"
+    node_role: "CRITIC"
+    agent_group: 0
+    only_forward_compute: true
+    dependencies:
+      - "reference_2_log_prob"
+
+  - node_id: "critic_2_value"
     node_type: "MODEL_TRAIN"
     node_role: "CRITIC"
     agent_group: 1
     only_forward_compute: true
     dependencies:
-      - "actor_2_old_log_prob"
-
+      - "critic_1_value"
+    agent_options:
+      share_instance: 0
+  
   - node_id: "calculate_2_advantages"
     node_type: "COMPUTE"
     node_role: "ADVANTAGE"
     agent_group: 1
     dependencies:
-      - "critic_value"
+      - "critic_2_value"
 
-  - node_id: "calculate_1_advantages"
-    node_type: "COMPUTE"
-    node_role: "ADVANTAGE"
+  - node_id: "critic_1_train"
+    node_type: "MODEL_TRAIN"
+    node_role: "CRITIC"
     agent_group: 0
     dependencies:
       - "calculate_2_advantages"
-
 
   - node_id: "critic_2_train"
     node_type: "MODEL_TRAIN"
     node_role: "CRITIC"
     agent_group: 1
     dependencies:
-      - "calculate_1_advantages"
+      - "critic_1_train"
+    agent_options:
+      share_instance: 0
 
   - node_id: "actor_1_train"
     node_type: "MODEL_TRAIN"

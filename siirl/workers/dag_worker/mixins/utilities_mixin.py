@@ -22,7 +22,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Union
-
+import random
+import hashlib
 import numpy as np
 import psutil
 import ray
@@ -42,6 +43,8 @@ from siirl.workers.dag import TaskGraph
 from siirl.workers.dag.node import Node, NodeRole, NodeType
 from siirl.workers.databuffer import DataProto
 from siirl.workers.dag_worker.dag_utils import add_prefix_to_dataproto, remove_prefix_from_dataproto, add_prefix_to_metrics
+from siirl.workers.databuffer.protocol import collate_fn
+
 
 class _ReduceOp(Enum):
     """Enumeration for supported reduction operations."""
@@ -73,6 +76,25 @@ METRIC_CONFIG_MEAN_ONLY = {
 }
 
 
+def sort_by_other_list(objects, reference_list):
+    """
+    Sort the target list according to the order of the reference list
+
+    Args:
+    target_list: The target list to be sorted
+    reference_list: The reference list used as the basis for sorting
+
+    Returns:
+    The sorted target list
+    """
+    combined = [(val, i, obj) for i, (val, obj) in enumerate(zip(reference_list, objects))]
+    combined.sort()
+    sorted_objects = [item[2] for item in combined]
+    return sorted_objects
+
+
+def consistent_hash(s):
+    return int(hashlib.md5(s.encode()).hexdigest(), 16)
 class DistributedMetricAggregator:
     """
     A helper class to encapsulate the logic for aggregating metrics
@@ -692,6 +714,7 @@ class UtilitiesMixin:
         # or just ignore them. This is cleaner than returning an empty dict.
         return final_metrics
 
+
     def _collect_multi_final_metrics(self, batch: DataProto, ordered_metrics: dict, timing_raw: dict) -> Dict[str, float]:
         node_queue = self.taskgraph.get_entry_nodes()
         visited_nodes = set()
@@ -713,7 +736,9 @@ class UtilitiesMixin:
             batch = add_prefix_to_dataproto(batch, cur_node)
         return ordered_metrics
 
-    def put_data_to_buffers(self, key: str, data: DataProto, source_dp_size: int, dest_dp_size: int, timing_raw: Dict[str, float]):
+    def put_data_to_buffers(
+        self, key: str, data: DataProto, source_dp_size: int, dest_dp_size: int, enforce_buffer: bool, timing_raw: Dict[str, float]
+    ):
         """Puts data into shared Ray plasma store for consumption by downstream nodes."""
         try:
             logger.debug(f"Rank {self._rank}: Starting put_data_to_buffers for key '{key}', source_dp_size={source_dp_size}, dest_dp_size={dest_dp_size}")
@@ -721,7 +746,7 @@ class UtilitiesMixin:
             data.meta_info["padding_values"] = {"input_ids": self.validate_tokenizer.pad_token_id, "responses": self.validate_tokenizer.pad_token_id, "labels": -100, "attention_mask": 0, "response_mask": 0}
             data.meta_info["padding_side"] = self.validate_tokenizer.padding_side
 
-            if source_dp_size == dest_dp_size:
+            if (not enforce_buffer) and source_dp_size == dest_dp_size:
                 with self._timer(f"put_intern_data_{key}", timing_raw):
                     logger.debug(f"Rank {self._rank}: DP size match ({source_dp_size}). Storing data for key '{key}' in local cache.")
                     self.internal_data_cache[key] = data
@@ -733,7 +758,6 @@ class UtilitiesMixin:
                 except RuntimeError:
                     logger.debug(f"Rank {self._rank}: Creating new event loop for key '{key}'")
                     loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
 
                 with self._timer(f"put_ray_proto_data_{key}", timing_raw):
                     chunks = data.chunk(chunks=len(self.data_buffers))
@@ -1112,114 +1136,101 @@ class UtilitiesMixin:
         return result
 
 
-    def _batch_apply_pre_template(self, batch, tokenizer, chat_template="", key_prefix=""):
-        self_tokenizer = tokenizer["tokenizer"]
-        raw_prompts = batch.non_tensor_batch[key_prefix + "raw_prompt"]
-        new_prompts = []
-        for idx in range(len(raw_prompts)):
-            token_ids = batch.non_tensor_batch[key_prefix + "raw_prompt_ids"][idx]
-            prompt = self_tokenizer.decode(token_ids)
-            new_prompt = chat_template.format(prompt=prompt)
-            raw_prompts[idx][0]["content"] = new_prompt
-            new_prompts.append(new_prompt)
-        encode_data = self_tokenizer(
-            new_prompts,
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=self.config.data.max_prompt_length,
-            padding_side="left",
-        )
-        encode_data_origin = self_tokenizer(
-            new_prompts,
-            return_tensors="np",
-            padding=False,
-            truncation=True,
-            max_length=self.config.data.max_prompt_length,
-        )
-        attention_mask = encode_data["attention_mask"]
-        position_ids = (attention_mask.cumsum(dim=1) - 1) * attention_mask
-        batch.batch[key_prefix + "input_ids"] = encode_data["input_ids"]
-        batch.batch[key_prefix + "position_ids"] = position_ids
-        batch.batch[key_prefix + "attention_mask"] = attention_mask
-        batch.non_tensor_batch[key_prefix + "raw_prompt_ids_origin"] = batch.non_tensor_batch[
-            key_prefix + "raw_prompt_ids"
-        ].copy()
-        batch.non_tensor_batch[key_prefix + "raw_prompt_ids"] = encode_data_origin["input_ids"]
-
-    def _batch_apply_post_template(self, batch, tokenizer, chat_template="", key_prefix=""):
-        # add output template
-        self_tokenizer = tokenizer["tokenizer"]
-        pad_token_id = self_tokenizer.pad_token_id
-        new_responses = []
-
-        # remove right pad and apply post template
-        # check if only "responses", "input_ids", "attention_mask", "position_ids" will be use in later compute
-        for idx in range(len(batch.batch[key_prefix + "responses"])):
-            ## remove left_pad and right_pad
-            non_pad_index = torch.nonzero(batch.batch[key_prefix + "responses"][idx] != pad_token_id, as_tuple=False)
-            first_idx = non_pad_index[0][0].item()
-            last_idx = non_pad_index[-1][0].item()
-            response_id = batch.batch[key_prefix + "responses"][idx][first_idx : last_idx + 1].tolist()
-            prompt = self_tokenizer.decode(response_id)
-            new_response = chat_template.format(prompt=prompt)
-            new_responses.append(new_response)
-
-        # add right pad for response
-        encode_data = self_tokenizer(
-            new_responses,
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=self.config.data.max_response_length,
-            padding_side="right",
-        )
-        # generate new response and input_ids
-        response_id = encode_data["input_ids"]
-        batch.batch[key_prefix + "responses"] = response_id
-        batch.batch[key_prefix + "input_ids"] = torch.cat([batch.batch[key_prefix + "prompts"], response_id], dim=1)
-
-        # generate attention_mask and position_id
-        attention_mask = (batch.batch[key_prefix + "input_ids"] != pad_token_id).long()
-        position_ids = (attention_mask.cumsum(dim=1) - 1) * attention_mask
-        batch.batch[key_prefix + "attention_mask"] = attention_mask
-        batch.batch[key_prefix + "position_ids"] = position_ids
-
-    def _map_rollout_out2input(self, batch: DataProto, tokenizer, next_prefix="", cur_prefix="") -> DataProto:
-        self_tokenizer = tokenizer["tokenizer"]
-        next_batch = TensorDict(
-            {
-                next_prefix + "input_ids": batch.batch[cur_prefix + "input_ids"],
-                next_prefix + "attention_mask": batch.batch[cur_prefix + "attention_mask"],
-                next_prefix + "position_ids": batch.batch[
-                    cur_prefix + "position_ids"
-                ],  # here input_ids become the whole sentences
-            },
-            batch_size=batch.batch[cur_prefix + "input_ids"].size()[0],
-        )
-        non_tensor_batch = {
-            next_prefix + "raw_prompt": batch.non_tensor_batch[cur_prefix + "raw_prompt"],
-            next_prefix + "reward_model": batch.non_tensor_batch[cur_prefix + "reward_model"],
-            next_prefix + "data_source": batch.non_tensor_batch[cur_prefix + "data_source"],
-        }
-        # get no pad new_raw_prompt_ids
-
-        non_tensor_batch[next_prefix + "raw_prompt_ids"] = []
-        bs = batch.batch[cur_prefix + "input_ids"].size()[0]
-        for idx in range(bs):
-            pad_id = batch.batch[cur_prefix + "responses"][idx]
-            non_pad_index = torch.nonzero(pad_id != self_tokenizer.pad_token_id, as_tuple=False)
-            first_idx = non_pad_index[0][0].item()
-            last_idx = non_pad_index[-1][0].item()
-            non_pad_id = pad_id[first_idx : last_idx + 1].tolist()
-            non_tensor_batch[next_prefix + "raw_prompt_ids"].append(
-                batch.non_tensor_batch[cur_prefix + "raw_prompt_ids_origin"][idx] + non_pad_id
-            )
-        non_tensor_batch[next_prefix + "raw_prompt_ids"] = np.array(
-            non_tensor_batch[next_prefix + "raw_prompt_ids"], dtype=object
-        )
-        new_batch = DataProto(batch=next_batch, non_tensor_batch=non_tensor_batch, meta_info={})
-        batch.union(new_batch)
-
     def check_spmd_mode(self):
         return self.rollout_mode == 'sync' and self._multi_agent == False
+    
+
+    def multi_agent_put_log(self, key: str, data: DataProto, agent_group: int, next_dp_size: int, timing_raw):
+        def uuid_hex_to_bucket(uuid_hex: str, num_buckets: int = 8) -> int:
+            return consistent_hash(uuid_hex) % num_buckets
+        data_size = len(data)
+        put_futures = []
+        meta_info = data.meta_info
+        with self._timer(f"put_ray_proto_data_{key}", timing_raw):
+            for i in range(data_size):
+                cur_data = data[i]
+                request_id = cur_data.non_tensor_batch[f"agent_group_{agent_group}_request_id"]
+                next_dp_rank = uuid_hex_to_bucket(request_id, next_dp_size)
+                cur_key = key + f"_{next_dp_rank}"
+                buf = random.choice(self.data_buffers)
+                # slice of DataProto is DataProtoItem, will loss meta_info, need to recompute when use
+                cur_data = collate_fn([cur_data])
+                cur_data.meta_info = meta_info
+                put_futures.append(buf.put.remote(cur_key, cur_data))
+        with self._timer(f"put_proto_data_{key}", timing_raw):
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(asyncio.gather(*put_futures))
+        # if self._multi_agent:
+        #     if source_dp_size > dest_dp_size:
+        #         with self._timer(f"put_ray_proto_data_{key}", timing_raw):
+        #             assert source_dp_size % dest_dp_size == 0, f"source dp size {source_dp_size} should div by dest dp size {dest_dp_size}"
+        #             dp_range = source_dp_size // dest_dp_size
+        #             dest_dp_rank =  source_dp_rank // dp_range
+        #             key = key + f"_{dest_dp_rank}"
+        #             put_futures = []
+        #             bs = 0
+        #             while bs < len(data):
+        #                 traj = data.non_tensor_batch[f'agent_group_{agent_group}_traj_len'][bs]
+        #                 next_bs = bs + traj
+        #                 buf = random.choice(self.data_buffers)
+        #                 put_futures.append(buf.put.remote(key, data[bs: next_bs]))
+        #                 bs = next_bs
+        #         with self._timer(f"put_proto_data_{key}", timing_raw):
+        #             loop.run_until_complete(asyncio.gather(*put_futures))
+        #     else:
+        #         with self._timer(f"put_ray_proto_data_{key}", timing_raw):
+        #             assert dest_dp_size % source_dp_size == 0, f"source dp size {source_dp_size} should div by dest dp size {dest_dp_size}"
+        #             dp_range = dest_dp_size // source_dp_size
+        #             dest_dp_rank_start = source_dp_rank * dp_range
+        #             total_batch_size = 0
+        #             tmp_idx = 0
+        #             total_prompts = len(data.non_tensor_batch[f'agent_group_{agent_group}_traj_len'])
+        #             while tmp_idx < total_prompts:
+        #                 total_batch_size += 1
+        #                 tmp_idx = tmp_idx + data.non_tensor_batch[f'agent_group_{agent_group}_traj_len'][tmp_idx]
+        #             dp_total_bs = total_batch_size // dest_dp_size
+        #             put_futures = []
+        #             bs = 0
+        #             dp_bs_idx = 0
+        #             while bs < len(data):
+        #                 bs_key = key + f"_{dest_dp_rank_start + dp_bs_idx // dp_total_bs}"
+        #                 traj = data.non_tensor_batch[f'agent_group_{agent_group}_traj_len'][bs]
+        #                 next_bs = bs + traj
+        #                 buf = random.choice(self.data_buffers)
+        #                 put_futures.append(buf.put.remote(bs_key, data[bs: next_bs]))
+        #                 bs = next_bs     
+        #                 dp_bs_idx = dp_bs_idx + 1                   
+        #         with self._timer(f"put_proto_data_{key}", timing_raw):
+        #             loop.run_until_complete(asyncio.gather(*put_futures)) 
+        
+    
+    def multi_agent_get_log(self, key: str, cur_dp_rank: int, agent_group: int, timing_raw):
+        loop = asyncio.get_event_loop()
+        key = key + f"_{cur_dp_rank}"
+        prefix_key = f"agent_group_{agent_group}_"
+        with self._timer(f"get_ref_data_{key}", timing_raw):
+            tasks = [buf.get.remote(key) for buf in self.data_buffers]
+            temp_data =loop.run_until_complete(asyncio.gather(*tasks))
+            # temp_data = self.data_buffers.get(key) 
+            datas = [item for t in temp_data if t is not None for item in t]
+            sorted_datas = sorted(datas, key = lambda x : (x.non_tensor_batch[prefix_key + 'request_id'], -x.non_tensor_batch[prefix_key + 'traj_step']))
+            meta_info = sorted_datas[0].meta_info
+            dataproto = collate_fn(sorted_datas)
+            dataproto.meta_info = meta_info
+        return dataproto
+        # if self._multi_agent:
+        #     with self._timer(f"get_ref_data_{key}", timing_raw):
+        #         key = key + f"_{my_current_dp_rank}"
+        #         tasks = [buf.get.remote(key) for buf in self.data_buffers]
+        #         temp_data =loop.run_until_complete(asyncio.gather(*tasks))
+        #         # temp_data = self.data_buffers.get(key) 
+        #         datas = [item for t in temp_data if t is not None for item in t]
+        #     with self._timer(f"get_proto_data_concat_chunks_{key}", timing_raw):
+        #         dataproto = collate_fn(datas)
+        #     with self._timer(f"get_proto_data_sort_{key}", timing_raw):
+        #         original_batch_idx = dataproto.non_tensor_batch[f"agent_group_{agent_group}_batch_id"]
+        #         for key,value in dataproto.batch.items():
+        #             dataproto.batch[key] = sort_by_other_list(value, original_batch_idx)
+        #         for key,value in dataproto.non_tensor_batch.items():
+        #             dataproto.non_tensor_batch[key] = np.array(sort_by_other_list(value, original_batch_idx))
+        #     return dataproto

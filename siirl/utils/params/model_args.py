@@ -358,7 +358,7 @@ class AgentArguments:
     env_path: list = field(default_factory=list, metadata={"help": "Env path list"})
     obs_with_env: bool = field(default=False, metadata={"help": "Rollout wiht obs from Env"})
     rewards_with_env: bool = field(default=False, metadata={"help": "Use rewards from Env"})
-    
+    share_instance: int = field(default=None, metadata={"help": "Use the same instance with the target agent group"})
 @dataclass
 class EngineArguments:
     vllm: Dict[str, Any] = field(default_factory=lambda: {})

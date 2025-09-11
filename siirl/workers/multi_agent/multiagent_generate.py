@@ -37,6 +37,7 @@ from siirl.workers.databuffer.protocol import DataProto
 from siirl.utils.params import RolloutArguments, ActorRolloutRefArguments
 from siirl.workers.dag_worker.mixins.utilities_mixin import UtilitiesMixin
 from siirl.workers.dag_worker.dag_utils import remove_prefix_from_dataproto
+
 class MultiAgentLoop(UtilitiesMixin):
     def __init__(self, dag, config: ActorRolloutRefArguments, node_workers:Dict, local_dag:TaskGraph, databuffer:List["ray.actor.ActorHandle"], placement_mode: str = 'colocate'):
         # dely import Dag after dagworker finish init
@@ -304,8 +305,6 @@ class MultiAgentLoop(UtilitiesMixin):
             
             finished_res[cur_node.node_id].add(agent_output.request_id)
             # pre agent use same rewards with last agent
-            agent_res[cur_node.node_id][agent_output.request_id].rewards = agent_output.rewards
-            agent_res[cur_node.node_id][agent_output.request_id].status = agent_output.status
             await self.async_put_data(next_key, agent_output, cur_dp_size, next_dp_size, timing_raw)
             return
         if cur_node.agent_options and cur_node.agent_options.obs_with_env:
@@ -361,8 +360,6 @@ class MultiAgentLoop(UtilitiesMixin):
                     assert False
                 await self.async_put_data(agent_output.request_id + f'_{cur_node.agent_group}', agent_output.original_prompt, 2, 4, timing_raw)
                 
-        if len(agent_output.templated_prompt) >= self.max_model_len:
-            agent_output.status = AgentOutputStatus.LENGTH_FINISH
         input_and_response = agent_output.templated_prompt
         agent_output.templated_prompt = input_and_response[: len(agent_output.templated_prompt) - len(agent_output.response_mask)]
         agent_output.response_mask = agent_output.response_mask[:self.rollout_config.response_length]
@@ -373,19 +370,23 @@ class MultiAgentLoop(UtilitiesMixin):
             agent_output.response_id = input_and_response[-len(agent_output.response_mask) :]
         if cur_node.node_id not in agent_res:
             agent_res[cur_node.node_id] = {}
-        agent_res[cur_node.node_id][agent_output.request_id] = copy.deepcopy(agent_output)
+            agent_res[cur_node.node_id][agent_output.request_id] = []
+        if agent_output.request_id not in agent_res[cur_node.node_id]:
+            agent_res[cur_node.node_id][agent_output.request_id] = []
+        agent_res[cur_node.node_id][agent_output.request_id].append(copy.deepcopy(agent_output))
+        # agent_res[cur_node.node_id][agent_output.request_id]=[copy.deepcopy(agent_output)]
         # last node need to add turn
         if node_idx == len(self.node_queue) - 1:
             agent_output.turn = agent_output.turn + 1
             if agent_output.turn >= self.rollout_config.multi_turn.max_assistant_turns:
                 agent_output.status = AgentOutputStatus.Turn_FINISH
+            if len(agent_output.templated_prompt) >= self.max_model_len:
+                agent_output.status = AgentOutputStatus.LENGTH_FINISH
 
         if agent_output.status !=  AgentOutputStatus.RUNNING:
             if cur_node.node_id not in finished_res:
                 finished_res[cur_node.node_id] = set()
             finished_res[cur_node.node_id].add(agent_output.request_id)
-            agent_res[cur_node.node_id][agent_output.request_id].status = agent_output.status
-
        
         await self.async_put_data(next_key, agent_output, cur_dp_size, next_dp_size, timing_raw)
         
@@ -503,7 +504,6 @@ class MultiAgentLoop(UtilitiesMixin):
         #   Format: [0,0,0,0,1,1,1,1, | 1,1,1,0,0,0,0,0]
         # - position_ids: Sequential numbering for valid tokens (masked tokens get 0)
         #   Format: [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
-
         async def _single_postprocess(agent_outputs: List[AgentOutput], node: Node):
             """
             Helper function to postprocess outputs for a single node in the DAG.
@@ -517,9 +517,22 @@ class MultiAgentLoop(UtilitiesMixin):
             """
             # Sort agent outputs by batch ID to maintain original order
             cur_agent_outputs = list(agent_outputs.values())
-            cur_agent_outputs = sorted(cur_agent_outputs, key=lambda x: x.batch_id)
+            cur_agent_outputs = [
+                list(agent_output)  
+                for agent_output in sorted(cur_agent_outputs, key=lambda x: x[0].batch_id)
+            ]
+            prompt_texts = [step_output.templated_prompt for agent_output in cur_agent_outputs for step_output in agent_output]
+            prompt_texts = node.agent_process.tokenizer.batch_decode(prompt_texts, skip_special_tokens=True)
             node.agent_process.tokenizer.padding_side = "left"
-            input_ids = [{"input_ids": agent_output.templated_prompt} for agent_output in cur_agent_outputs]
+            input_ids = [{"input_ids": step_output.templated_prompt} for agent_output in cur_agent_outputs for step_output in agent_output]
+            batch_size = len(input_ids)
+            world_size = dist.get_world_size()
+            pad_batch_size = 0
+            if remainder := batch_size % world_size:
+                # need pad    
+                pad_batch_size = world_size - remainder
+                for _ in range(pad_batch_size):
+                    input_ids.append(input_ids[0].copy())
             outputs = node.agent_process.tokenizer.pad(
                 input_ids,
                 padding="max_length",
@@ -530,8 +543,12 @@ class MultiAgentLoop(UtilitiesMixin):
             prompt_ids, prompt_attention_mask = outputs["input_ids"], outputs["attention_mask"]
             # responses
             node.agent_process.tokenizer.padding_side = "right"
+            response_ids = [{"input_ids": step_output.response_id} for agent_output in cur_agent_outputs for step_output in agent_output]
+            if pad_batch_size:
+                for _ in range(pad_batch_size):
+                    response_ids.append(response_ids[0].copy())
             outputs = node.agent_process.tokenizer.pad(
-                [{"input_ids": agent_output.response_id} for agent_output in cur_agent_outputs],
+                response_ids,
                 padding="max_length",
                 max_length=self.rollout_config.response_length,
                 return_tensors="pt",
@@ -540,8 +557,13 @@ class MultiAgentLoop(UtilitiesMixin):
             response_ids, response_attention_mask = outputs["input_ids"], outputs["attention_mask"]
 
             # response_mask
+            response_masks = [{"input_ids": step_output.response_mask} for agent_output in cur_agent_outputs for step_output in agent_output]
+            
+            if pad_batch_size:
+                for _ in range(pad_batch_size):
+                    response_masks.append({"input_ids":[0] * len(response_masks[0]["input_ids"])})
             outputs = node.agent_process.tokenizer.pad(
-                [{"input_ids": agent_output.response_mask} for agent_output in cur_agent_outputs],
+                response_masks,
                 padding="max_length",
                 max_length=self.rollout_config.response_length,
                 return_tensors="pt",
@@ -552,37 +574,62 @@ class MultiAgentLoop(UtilitiesMixin):
                 f"mismatch in response_ids and response_mask shape: {response_ids.shape} vs {response_mask.shape}"
             )
             response_mask = response_mask * response_attention_mask
-            
-                
+            request_ids = []
+            traj_len = []
+            traj_step = []
+            for agent_output in cur_agent_outputs:
+                traj = len(agent_output)
+                step = 0
+                for step_output in agent_output:
+                    request_ids.append(step_output.request_id)
+                    traj_len.append(traj)
+                    traj_step.append(step)
+                    step = step + 1
+            if pad_batch_size:
+                for _ in range(pad_batch_size):
+                    request_ids.append("pad_request")
+                    traj_len.append(1)
+                    traj_step.append(0)
+                    prompt_texts.append(prompt_texts[0])
             input_ids = torch.cat([prompt_ids, response_ids], dim=1)
             attention_mask = torch.cat([prompt_attention_mask, response_attention_mask], dim=1)
             position_ids = (attention_mask.cumsum(dim=1) - 1) * attention_mask
             prefix = f"agent_group_{node.agent_group}_"
             batch = TensorDict(
-                {
+                { 
                     prefix + "prompts": prompt_ids,  # [bsz, prompt_length]
                     prefix + "responses": response_ids,  # [bsz, response_length]
                     prefix + "response_mask": response_mask,  # [bsz, response_length]
                     prefix + "input_ids": input_ids,  # [bsz, prompt_length + response_length]
                     prefix + "attention_mask": attention_mask,  # [bsz, prompt_length + response_length]
                     prefix + "position_ids": position_ids,  # [bsz, prompt_length + response_length]
+                    
                 },
                 batch_size=len(input_ids),
             )
+            non_tensor_batch = {
+                prefix + "request_id": np.array(request_ids),
+                prefix + "traj_len": np.array(traj_len),
+                prefix + "traj_step": np.array(traj_step),
+                prefix + "prompt_texts": np.array(prompt_texts)
+            }
             if node.node_id == self.node_queue[-1].node_id and self.rollout_config.agent.rewards_with_env:
                 reward_tensor = torch.zeros_like(batch[prefix + "responses"], dtype=torch.float32)
-                for i in range(len(cur_agent_outputs)):
-                    prompt_ids = batch[prefix + "prompts"][i]
-                    prompt_length = prompt_ids.shape[-1]
-                    valid_response_length = batch[prefix + "attention_mask"][i][prompt_length:].sum()
-                    reward_tensor[i, valid_response_length - 1] = cur_agent_outputs[i].rewards
+                idx = 0
+                for agent_outputs in cur_agent_outputs:
+                    for step_output in agent_outputs:
+                        prompt_ids = batch[prefix + "prompts"][idx]
+                        prompt_length = prompt_ids.shape[-1]
+                        valid_response_length = batch[prefix + "attention_mask"][idx][prompt_length:].sum()
+                        reward_tensor[idx, valid_response_length - 1] = step_output.rewards
+                        idx = idx + 1
                 batch[prefix + "token_level_rewards"] = reward_tensor
                 batch[prefix + "token_level_scores"] = copy.deepcopy(reward_tensor)
                 
             if node.agent_process.env:
                 node.agent_process.env_managers.clear()
                 node.agent_process.env_managers = [{}]
-            return DataProto(batch=batch, non_tensor_batch={}, meta_info={"metrics": {}})
+            return DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info={"metrics": {}})
         
         tasks = []
         for i in range(len(self.node_queue)):
@@ -598,7 +645,6 @@ class MultiAgentLoop(UtilitiesMixin):
                 dataproto.union(data)
             else:
                 dataproto = data
-        
         return dataproto
 
     def generate_sequence(self, batch:DataProto, timing_raw: Dict[str, float] = {}):
@@ -670,6 +716,7 @@ class MultiAgentLoop(UtilitiesMixin):
                 tasks = [databuffer.reset.remote() for databuffer in self.data_buffers]
                 ray.get(tasks)
         self.internal_data_cache.clear()
+        # logger.info(f"batch keys :{batch.batch.keys()} ||| {batch.non_tensor_batch.keys()} ||| {batch.meta_info.keys()}")
         return generated_proto
     
 

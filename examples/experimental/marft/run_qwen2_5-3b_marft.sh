@@ -5,14 +5,14 @@
 
 # --- Experiment and Model Definition ---
 export DATASET=deepscaler
-export ALG=gae
-export MODEL_NAME=qwen2.5-3b
+export ALG=gae_marft
+export MODEL_NAME=qwen3-1.7b
 
 # --- Path Definitions ---
 export HOME={your_home_path}
 export TRAIN_DATA_PATH=$HOME/data/datasets/$DATASET/train.parquet
 export TEST_DATA_PATH=$HOME/data/datasets/$DATASET/test.parquet
-export MODEL_PATH=$HOME/data/models/Qwen2.5-3B-Instruct
+export MODEL_PATH=$HOME/data/models/Qwen3-1.7B-Instruct
 
 # Base output paths
 export BASE_CKPT_PATH=ckpts
@@ -24,10 +24,10 @@ export BASE_TENSORBOARD_PATH=tensorboard
 # export GLOO_SOCKET_IFNAME=bond0  # Modify as needed
 
 # --- Key Training Hyperparameters ---
-export TRAIN_BATCH_SIZE_PER_NODE=512
-export PPO_MINI_BATCH_SIZE_PER_NODE=128
-export PPO_MICRO_BATCH_SIZE_PER_GPU=8
-export MAX_PROMPT_LENGTH=14336
+export TRAIN_BATCH_SIZE_PER_NODE=128
+export PPO_MINI_BATCH_SIZE_PER_NODE=64
+export PPO_MICRO_BATCH_SIZE_PER_GPU=4
+export MAX_PROMPT_LENGTH=10240
 export MAX_RESPONSE_LENGTH=2048
 export ROLLOUT_GPU_MEMORY_UTILIZATION=0.3
 export ROLLOUT_TP=4
@@ -57,7 +57,7 @@ TRAINING_CMD=(
     actor_rollout_ref.model.use_fused_kernels=False
     actor_rollout_ref.actor.ppo_mini_batch_size=\$PPO_MINI_BATCH_SIZE
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
-    actor_rollout_ref.actor.use_kl_loss=False
+    actor_rollout_ref.actor.use_kl_loss=True
     actor_rollout_ref.actor.grad_clip=0.5
     actor_rollout_ref.actor.clip_ratio=0.2
     actor_rollout_ref.actor.kl_loss_coef=0.01
@@ -69,12 +69,12 @@ TRAINING_CMD=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=\$ROLLOUT_TP
     actor_rollout_ref.rollout.name=sglang
     actor_rollout_ref.rollout.gpu_memory_utilization=\$ROLLOUT_GPU_MEMORY_UTILIZATION
-    actor_rollout_ref.rollout.max_model_len=16384
+    actor_rollout_ref.rollout.max_model_len=12288
     actor_rollout_ref.rollout.enable_chunked_prefill=False
     actor_rollout_ref.rollout.enforce_eager=False
     actor_rollout_ref.rollout.free_cache_engine=False
     actor_rollout_ref.rollout.agent.rewards_with_env=True
-    actor_rollout_ref.rollout.multi_turn.max_assistant_turns=3
+    actor_rollout_ref.rollout.multi_turn.max_assistant_turns=1
     actor_rollout_ref.rollout.n=\$ROLLOUT_N
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.ref.fsdp_config.param_offload=True
@@ -84,7 +84,7 @@ TRAINING_CMD=(
     critic.model.enable_gradient_checkpointing=True
     critic.use_dynamic_bsz=False
     critic.ppo_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
-    critic.ppo_max_token_len_per_gpu=98304
+    critic.ppo_max_token_len_per_gpu=12288
     critic.model.fsdp_config.param_offload=False
     critic.model.fsdp_config.optimizer_offload=False
     algorithm.kl_ctrl.kl_coef=0.001
@@ -101,7 +101,7 @@ TRAINING_CMD=(
     trainer.resume_mode=auto
     trainer.max_actor_ckpt_to_keep=\$MAX_CKPT_KEEP
     trainer.default_local_dir=\$CKPT_PATH
-    trainer.val_before_train=True
+    trainer.val_before_train=False
     dag.workflow_path=\$DAG_WORKERFLOW 
 )
 

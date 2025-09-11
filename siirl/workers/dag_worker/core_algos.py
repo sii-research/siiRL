@@ -23,6 +23,8 @@ __all__ = ["register_adv_est", "get_adv_estimator_fn", "AdvantageEstimator"]
 from collections import defaultdict
 from enum import Enum
 from typing import Any, Callable, Optional
+from siirl import DataProto
+
 
 import numpy as np
 import math
@@ -491,6 +493,108 @@ def compute_rloo_outcome_advantage(
 
     return scores, scores
 
+def compute_marft_gae_advantage_return(
+    data: DataProto,
+    pre_agent_group_ids,
+    gamma: torch.Tensor,
+    lam: torch.Tensor,
+):
+    """
+    Args:
+        data: `DataProto`
+        pre_agent_group_ids: `List`
+            pre agent id
+        gamma: `(float)`
+            discounted factor used in RL
+        lam: `(float)`
+            lambda value when computing Generalized Advantage Estimation (https://arxiv.org/abs/1506.02438)
+
+    Returns:
+        advantages: `(torch.Tensor)`
+            shape: (bs, response_length)
+        Returns: `(torch.Tensor)`
+            shape: (bs, response_length)
+
+    """
+    from loguru import logger
+    key_prefix = "agent_group_"
+    async def compute_traj_adv():
+        pass
+    token_level_rewards = []
+    values = []
+    response_mask = []
+    advantages = []
+    returns = []
+    for agent_group in pre_agent_group_ids:
+        key = key_prefix + str(agent_group)
+        token_level_rewards.append(data.batch[key + "_token_level_rewards"])
+        values.append(data.batch[key + "_values"])
+        response_mask.append(data.batch[key + "_response_mask"])
+        advantages.append(torch.zeros_like(response_mask[-1]))
+        returns.append(torch.zeros_like(advantages[-1]))
+    token_level_rewards.append(data.batch["token_level_rewards"])
+    values.append(data.batch["values"])
+    response_mask.append(data.batch["response_mask"])
+    advantages.append(torch.zeros_like(response_mask[-1]))
+    returns.append(torch.zeros_like(advantages[-1]))
+    pre_agent_group_ids.append(pre_agent_group_ids[-1] + 1)
+    
+    
+    with torch.no_grad():
+        seen = set()
+        dp_start_bs = [i for i, s in enumerate(data.non_tensor_batch['request_id']) if s not in seen and not seen.add(s)]
+        # loop all batch_size
+        for bs_id in dp_start_bs:
+            # last agent last traj last token
+            gae = 0
+            traj_len = data.non_tensor_batch["traj_len"][bs_id]
+            # loop each traj， tra has been reserved
+            for traj_idx in range(traj_len):
+                # loop each agent of traj
+                traj_bs_id = bs_id + traj_idx
+                # assert traj_idx == traj_len - data.non_tensor_batch["traj_step"][traj_bs_id] - 1, f'traj_idx {traj_idx}, traj_bs_id: {traj_bs_id}, traj_step {data.non_tensor_batch["traj_step"][traj_bs_id]}, traj_len {traj_len}, request {data.non_tensor_batch["request_id"][traj_bs_id]},request_data {data} '
+                for agent_idx in reversed(pre_agent_group_ids):
+                    gen_len = response_mask[agent_idx][traj_bs_id].sum()
+                    # loop each token of agent
+                    for t in reversed(range(gen_len)):                 
+                        rew = token_level_rewards[agent_idx][traj_bs_id, t]
+                        v = values[agent_idx][traj_bs_id, t]
+                        if agent_idx == pre_agent_group_ids[-1]:
+                            # last_agent
+                            if t == gen_len - 1:
+                                #last_token
+                                if traj_idx == 0:
+                                    v_next = 0
+                                else:
+                                    v_next = values[0][traj_bs_id - 1, 0]
+                                delta = rew + gamma * v_next - v
+                                gae = delta + gamma * lam * gae
+                            else:
+                                v_next = values[agent_idx][traj_bs_id, t + 1]
+                                delta = gamma * v_next - v
+                                gae = delta + gamma * lam * gae
+                        else:
+                            # not last agent
+                            if t == gen_len - 1:
+                                # last_token
+                                v_next = values[agent_idx + 1][traj_bs_id, 0]
+                                delta = rew + gamma * v_next -v
+                                gae = delta + gamma * lam * gae
+                            else:
+                                v_next = values[agent_idx][traj_bs_id, t + 1]
+                                delta = gamma * v_next - v
+                                gae = delta + gamma * lam * gae
+                        advantages[agent_idx][traj_bs_id, t] = gae
+                        returns[agent_idx][traj_bs_id, t] = gae + v
+        for agent_idx in pre_agent_group_ids: 
+            advantages[agent_idx] = F.masked_whiten(advantages[agent_idx], response_mask[agent_idx])
+            if agent_idx != pre_agent_group_ids[-1]:
+                data.batch[key_prefix + str(agent_group) + "_advantages"] = advantages[agent_idx]
+                data.batch[key_prefix + str(agent_group) + "_returns"] = returns[agent_idx]
+            else:
+                data.batch["advantages"] = advantages[agent_idx]
+                data.batch["returns"] = returns[agent_idx]
+    return
 
 @register_adv_est(AdvantageEstimator.OPO)  # or simply: @register_adv_est("opo")
 def compute_opo_outcome_advantage(
