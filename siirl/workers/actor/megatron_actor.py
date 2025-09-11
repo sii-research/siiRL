@@ -123,9 +123,7 @@ class MegatronPPOActor(BasePPOActor):
             )
         else:
             self.prof = None
-        #TODO(Ping Zhang): remove the hard-code here once configuration is aligned.
-        # self.use_fused_kernels = self.config.use_fused_kernels
-        self.use_fused_kernels = True
+        self.use_fused_kernels = self.config.use_fused_kernels
         if self.use_fused_kernels:
             from siirl.models.mcore.model_forward_fused import patch_fused_forward
 
