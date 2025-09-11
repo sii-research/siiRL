@@ -20,6 +20,8 @@ import gc
 import os
 import warnings
 from typing import Any, Dict
+import inspect
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
@@ -37,6 +39,7 @@ import siirl.utils.megatron.tensor_parallel as tp_utils
 from siirl.utils.extras.device import get_device_id, get_device_name, get_torch_device
 from siirl.utils.model_utils.model import normalize_model_name
 from siirl.utils.model_utils.torch_dtypes import PrecisionType
+from siirl.utils.extras.fs import local_mkdir_safe
 
 
 def get_model_config(model):
@@ -49,20 +52,29 @@ def get_model(
     wrap_with_ddp=True,
     use_distributed_optimizer=True,
     transformer_config=None,
+    override_ddp_config=None,
 ):
     """Build the model."""
     # Build model.
-    if mpu.get_pipeline_model_parallel_world_size() > 1 and mpu.get_virtual_pipeline_model_parallel_world_size() is not None:
-        assert model_type != ModelType.encoder_and_decoder, "Interleaved schedule not supported for model with both encoder and decoder"
+    if (
+        mpu.get_pipeline_model_parallel_world_size() > 1
+        and mpu.get_virtual_pipeline_model_parallel_world_size() is not None
+    ):
+        assert model_type != ModelType.encoder_and_decoder, (
+            "Interleaved schedule not supported for model with both encoder and decoder"
+        )
         model = []
+        has_vp_stage = inspect.signature(mpu.is_pipeline_first_stage).parameters.get("vp_stage", None) is not None
         for i in range(mpu.get_virtual_pipeline_model_parallel_world_size()):
             mpu.set_virtual_pipeline_model_parallel_rank(i)
             # Set pre_process and post_process only after virtual rank is set.
-            pre_process = mpu.is_pipeline_first_stage()
-            post_process = mpu.is_pipeline_last_stage()
-            this_model = model_provider_func(pre_process=pre_process, post_process=post_process)
+            extra_kwargs = {} if not has_vp_stage else {"ignore_virtual": False, "vp_stage": i}
+            pre_process = mpu.is_pipeline_first_stage(**extra_kwargs)
+            post_process = mpu.is_pipeline_last_stage(**extra_kwargs)
+            this_model = model_provider_func(pre_process=pre_process, post_process=post_process, vp_stage=i)
             this_model.model_type = model_type
             model.append(this_model)
+        mpu.set_virtual_pipeline_model_parallel_rank(0)
     else:
         pre_process = mpu.is_pipeline_first_stage()
         post_process = mpu.is_pipeline_last_stage()
@@ -70,7 +82,9 @@ def get_model(
         add_decoder = True
         if model_type == ModelType.encoder_and_decoder:
             if mpu.get_pipeline_model_parallel_world_size() > 1:
-                assert mpu.get_pipeline_model_parallel_split_rank() is not None, "Split rank needs to be specified for model with both encoder and decoder"
+                assert mpu.get_pipeline_model_parallel_split_rank() is not None, (
+                    "Split rank needs to be specified for model with both encoder and decoder"
+                )
                 rank = mpu.get_pipeline_model_parallel_rank()
                 split_rank = mpu.get_pipeline_model_parallel_split_rank()
                 world_size = mpu.get_pipeline_model_parallel_world_size()
@@ -78,7 +92,9 @@ def get_model(
                 post_process = (rank == (split_rank - 1)) or (rank == (world_size - 1))
                 add_encoder = mpu.is_pipeline_stage_before_split()
                 add_decoder = mpu.is_pipeline_stage_after_split()
-            model = model_provider_func(pre_process=pre_process, post_process=post_process, add_encoder=add_encoder, add_decoder=add_decoder)
+            model = model_provider_func(
+                pre_process=pre_process, post_process=post_process, add_encoder=add_encoder, add_decoder=add_decoder
+            )
         else:
             model = model_provider_func(pre_process=pre_process, post_process=post_process)
         model.model_type = model_type
@@ -119,16 +135,20 @@ def get_model(
 
     if wrap_with_ddp:
         ddp_models = []
+        ddp_config_dict = {
+            "use_distributed_optimizer": use_distributed_optimizer,
+            "grad_reduce_in_fp32": True,
+            "overlap_grad_reduce": False,
+        }
+        if override_ddp_config is not None:
+            ddp_config_dict.update(override_ddp_config)
+        ddp_config = DistributedDataParallelConfig(**ddp_config_dict)
         for model_chunk_idx, model_chunk in enumerate(model):
             ddp_model = DDP(
                 config=tfconfig,
                 module=model_chunk,
                 disable_bucketing=(model_chunk_idx > 0),
-                ddp_config=DistributedDataParallelConfig(
-                    overlap_grad_reduce=False,
-                    use_distributed_optimizer=use_distributed_optimizer,
-                    grad_reduce_in_fp32=True,  # [old] accumulate_allreduce_grads_in_fp32=True,
-                ),
+                ddp_config=ddp_config,
             )
             ddp_models.append(ddp_model)
         model = ddp_models
@@ -138,6 +158,63 @@ def get_model(
             model_module.broadcast_params()
     return model
 
+@dataclass
+class McoreModuleWrapperConfig:
+    """Configuration for Mcore module wrapper."""
+
+    is_value_model: bool = False
+    share_embeddings_and_output_weights: bool = False
+    wrap_with_ddp: bool = True
+    use_distributed_optimizer: bool = True
+
+
+def make_megatron_module(
+    wrap_config: McoreModuleWrapperConfig,
+    tf_config: TransformerConfig,
+    hf_config: PretrainedConfig,
+    bridge: Any = None,
+    override_model_config: dict[str, Any] = None,
+    override_ddp_config: dict[str, Any] = None,
+):
+    if override_model_config is None:
+        override_model_config = {}
+
+    if bridge is not None:
+        from siirl.models.mcore.mbridge import freeze_moe_router, make_value_model
+
+        post_model_creation_callbacks = []
+        if wrap_config.is_value_model:
+            post_model_creation_callbacks.append(make_value_model)
+        if override_model_config.get("moe_config", {}).get("freeze_moe_router", False):
+            post_model_creation_callbacks.append(freeze_moe_router)
+        return bridge.get_model(
+            post_model_creation_callbacks=post_model_creation_callbacks,
+            wrap_with_ddp=wrap_config.wrap_with_ddp,
+        )
+    else:
+
+        def megatron_model_provider(pre_process, post_process, vp_stage=None):
+            from siirl.models.mcore import init_mcore_model
+
+            parallel_model = init_mcore_model(
+                tf_config,
+                hf_config,
+                pre_process,
+                post_process,
+                share_embeddings_and_output_weights=wrap_config.share_embeddings_and_output_weights,
+                value=wrap_config.is_value_model,
+                freeze_moe_router=override_model_config.get("moe_config", {}).get("freeze_moe_router", False),
+                vp_stage=vp_stage,
+            )
+            parallel_model.to(get_device_name())
+            return parallel_model
+
+        return get_model(
+            megatron_model_provider,
+            wrap_with_ddp=wrap_config.wrap_with_ddp,
+            use_distributed_optimizer=wrap_config.use_distributed_optimizer,
+            override_ddp_config=override_ddp_config,
+        )
 
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
 
@@ -200,15 +277,25 @@ def convert_config(hf_config: PretrainedConfig, megatron_config) -> TransformerC
 
 
 def init_megatron_optim_config(optim_config: Dict) -> OptimizerConfig:
-    config = OptimizerConfig(
-        optimizer="adam",
-        lr=optim_config.get("lr"),
-        clip_grad=optim_config.get("clip_grad"),
-        weight_decay=optim_config.get("weight_decay"),
-        bf16=True,
-        params_dtype=torch.bfloat16,
-        use_distributed_optimizer=True,
-    )
+    optim_args = {
+        "optimizer": "adam",
+        "lr": optim_config.lr,
+        "min_lr": optim_config.min_lr,
+        "clip_grad": optim_config.clip_grad,
+        "weight_decay": optim_config.weight_decay,
+        "bf16": True,
+        "params_dtype": torch.bfloat16,
+        "use_distributed_optimizer": True,
+    }
+
+    override_config = optim_config.override_optimizer_config
+    if override_config:
+        for k, v in override_config.items():
+            optim_args[k] = v
+
+    print_rank_0(f"optimizer config after override: {optim_args}")
+
+    config = OptimizerConfig(**optim_args)
     return config
 
 
@@ -429,14 +516,26 @@ def print_rank_0(message):
         print(message, flush=True)
 
 
-def get_model_checkpoint_path(checkpoint_path):
-    os.makedirs(checkpoint_path, exist_ok=True)
-    return os.path.join(checkpoint_path, "model")
+def get_dist_checkpoint_path(checkpoint_path):
+    local_mkdir_safe(checkpoint_path)
+    local_mkdir_safe(os.path.join(checkpoint_path, "dist_ckpt"))
+    return os.path.join(checkpoint_path, "dist_ckpt")
 
 
 def get_hf_model_checkpoint_path(checkpoint_path):
-    os.makedirs(checkpoint_path, exist_ok=True)
+    local_mkdir_safe(checkpoint_path)
+    local_mkdir_safe(os.path.join(checkpoint_path, "huggingface"))
     return os.path.join(checkpoint_path, "huggingface")
+
+
+def get_transformer_config_checkpoint_path(checkpoint_path):
+    os.makedirs(checkpoint_path, exist_ok=True)
+    return os.path.join(checkpoint_path, "transformer_config.json")
+
+
+def get_model_checkpoint_path(checkpoint_path):
+    os.makedirs(checkpoint_path, exist_ok=True)
+    return os.path.join(checkpoint_path, "model")
 
 
 def get_hf_config_and_tokenizer_checkpoint_path(checkpoint_path):

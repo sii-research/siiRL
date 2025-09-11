@@ -18,6 +18,7 @@ Utilities to create common models from huggingface
 import os
 import warnings
 from typing import Dict, Optional, Type
+from dataclasses import dataclass
 import re
 import numpy as np
 import torch
@@ -30,7 +31,7 @@ from transformers import (
     PretrainedConfig,
     PreTrainedModel,
 )
-
+from transformers.modeling_outputs import CausalLMOutputWithPast
 from siirl.models.registry import ModelRegistry
 from loguru import logger
 
@@ -325,6 +326,17 @@ def _load_hf_model(config, model_config, is_value_model, local_cache_path):
 
     return architectures, model, state_dict, is_value_model
 
+def get_hf_model_path(config, local_cache_path="~/.cache/siirl/rlhf"):
+    local_cache_path = os.path.expanduser(local_cache_path)
+    if config.model.path.startswith("hdfs:"):
+        from siirl.utils.extras.fs import copy_to_local
+
+        local_model_path = copy_to_local(
+            src=config.model.path, cache_dir=local_cache_path, use_shm=config.model.use_shm
+        )
+    else:
+        local_model_path = config.model.path
+    return local_model_path
 
 def load_megatron_model_weights(config, model_config, parallel_model, params_dtype, is_value_model=False, local_cache_path="~/.cache/siirl/rlhf"):
     """Load weights for siirl customized model."""
@@ -469,3 +481,8 @@ def convert_weight_keys(state_dict: Dict[str, torch.Tensor], model: PreTrainedMo
         original_weights[key] = value
 
     return original_weights
+
+@dataclass
+class CausalLMOutputForPPO(CausalLMOutputWithPast):
+    log_probs: Optional[torch.FloatTensor] = None
+    entropy: Optional[torch.FloatTensor] = None
