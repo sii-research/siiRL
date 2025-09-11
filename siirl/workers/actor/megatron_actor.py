@@ -22,10 +22,10 @@ Note that our model doesn't have to be `MegatronModule` because we don't share e
 import itertools
 from functools import partial
 from typing import Iterable
-from loguru import logger
 
 import torch
 import torch.distributed
+from loguru import logger
 from megatron.core import parallel_state as mpu
 
 # from megatron.core.optimizer import DistributedOptimizer
@@ -34,17 +34,17 @@ from megatron.core.pipeline_parallel import get_forward_backward_func
 from torch import nn
 
 from siirl import DataProto
-from siirl.workers.dag_worker.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
-from siirl.utils.extras.device import get_device_id, get_torch_device
-from siirl.utils.megatron.pipeline_parallel import make_batch_generator
-from siirl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
-from siirl.utils.megatron.megatron_utils import get_model_config
 from siirl.utils.debug import GPUMemoryLogger
 from siirl.utils.debug.profile import Profiler
+from siirl.utils.extras.device import get_device_id, get_torch_device
 from siirl.utils.extras.py_functional import append_to_dict
+from siirl.utils.megatron.megatron_utils import get_model_config
+from siirl.utils.megatron.pipeline_parallel import make_batch_generator
+from siirl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
 from siirl.utils.model_utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from siirl.utils.model_utils.torch_functional import broadcast_dict_tensor
 from siirl.workers.actor import BasePPOActor
+from siirl.workers.dag_worker.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 
 __all__ = ["MegatronPPOActor"]
 
@@ -140,7 +140,7 @@ class MegatronPPOActor(BasePPOActor):
         if config.shuffle:
             assert config.data_loader_seed is not None, "If shuffle dataloader, seed must be manually set"
         if config.megatron.tensor_model_parallel_size == 1:
-            print("[Warining] Because actor tp size == 1, set sp to False")
+            print("[Warning] Because actor tp size == 1, set sp to False")
             config.megatron.sequence_parallel = False
         self.config = config
 
@@ -493,12 +493,6 @@ class MegatronPPOActor(BasePPOActor):
                     ret = {}
                     if calculate_entropy:
                         logits_bak = logits.clone()
-                        if torch.distributed.get_rank() == 0:
-                            logger.warning_once(
-                                "For memory-efficient computation, enable fused kernels via "
-                                "`actor_rollout_ref.model.use_fused_kernels=True`. "
-                                "The current `clone()` operation ensures correctness but increases memory usage."
-                            )
                         entropy = vocab_parallel_entropy(logits)
                         ret["entropy"] = entropy
                     else:
