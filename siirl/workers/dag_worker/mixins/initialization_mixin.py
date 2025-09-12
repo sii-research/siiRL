@@ -150,11 +150,9 @@ class InitializationMixin:
             self._gather_group = dist.new_group(backend=gather_backend)
         else:
             # For GPU, the original logic is preserved for backward compatibility.
-            # The gather group is only created if world_size < 256.
-            if self.world_size < 256:
-                self._gather_group = dist.new_group(backend="gloo")
-            else:
-                self._gather_group = None
+            # The gather group is only created if world_size < backend_threshold.
+            self._gather_group = dist.new_group(
+                backend="gloo") if self.world_size < self.config.dag.backend_threshold else None
         self._build_all_process_groups()
         self._resolve_taskgraph_process_groups()
 
