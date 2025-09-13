@@ -30,7 +30,6 @@ from siirl.utils.extras.device import get_device_name, get_nccl_backend
 from siirl.workers.base_worker import Worker
 from siirl.workers.dag.node import NodeRole, NodeType
 from siirl.workers.dag_worker.constants import DAGConstants
-from siirl.workers.multi_agent.multiagent_generate import MultiAgentLoop
 from siirl.utils.import_string import import_string
 
 device_name = get_device_name()
@@ -638,6 +637,7 @@ class InitializationMixin:
                     raise
         logger.info("All models and sharding managers initialized successfully.")
         if self._multi_agent:
+            from siirl.workers.multi_agent.multiagent_generate import MultiAgentLoop
             self.multi_agent_loop =  MultiAgentLoop(self, config = self.config.actor_rollout_ref, node_workers = self.workers, local_dag = self.taskgraph, databuffer = self.data_buffers, placement_mode = 'colocate')
         
     def _setup_sharding_manager(self, agent_group: int, worker_dict: Dict[NodeRole, Worker]):

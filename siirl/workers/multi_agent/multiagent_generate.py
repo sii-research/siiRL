@@ -109,8 +109,8 @@ class MultiAgentLoop(UtilitiesMixin):
         Returns:
             str: Unique key formatted as "{next_node_id}_{destination_dp_rank}" for data routing.
         """
-        cur_dp_size, cur_dp_rank, _, _ = self.dag._get_node_dp_info(cur_node)
-        next_dp_size, next_dp_rank, _, _ = self.dag._get_node_dp_info(next_node)
+        cur_dp_size, cur_dp_rank, *_ = self.dag._get_node_dp_info(cur_node)
+        next_dp_size, next_dp_rank, *_ = self.dag._get_node_dp_info(next_node)
         if cur_dp_size == cur_dp_size:
             return f"{next_node.node_id}_{next_dp_rank}"
         elif cur_dp_size > next_dp_size:
@@ -292,11 +292,11 @@ class MultiAgentLoop(UtilitiesMixin):
             global_bs: Global batch size (DP size × local batch size) for consistent data routing.
             timing_raw: Dictionary to record raw timing metrics (e.g., preprocessing, generation, environment step latency).
         """
-        cur_dp_size, cur_dp_rank, _, _ = self.dag._get_node_dp_info(cur_node)
+        cur_dp_size, cur_dp_rank, *_ = self.dag._get_node_dp_info(cur_node)
         node_worker:ActorRolloutRefWorker = self.workers[self._generate_node_worker_key(cur_node)]
         next_node = self.node_queue[node_idx + 1] if node_idx < len(self.node_queue) - 1  else self.node_queue[0]
         next_key = self._generate_key(cur_node, next_node, agent_output.batch_id, global_bs)
-        next_dp_size, _, _, _ = self.dag._get_node_dp_info(next_node)
+        next_dp_size, *_ = self.dag._get_node_dp_info(next_node)
         obs = None
         if agent_output.status !=  AgentOutputStatus.RUNNING:
             if cur_node.node_id not in finished_res:
@@ -417,7 +417,7 @@ class MultiAgentLoop(UtilitiesMixin):
             for i in range(agent_num):
                 visited_agentoutputs = set()
                 cur_node:Node = self.node_queue[i]  
-                cur_dp_size, cur_dp_rank, cur_tp_rank, _ = self.dag._get_node_dp_info(cur_node)
+                cur_dp_size, cur_dp_rank, cur_tp_rank, *_ = self.dag._get_node_dp_info(cur_node)
                 if i == 0:
                     global_bs = cur_dp_size * bs
                 node_worker :ActorRolloutRefWorker = self.workers[self._generate_node_worker_key(cur_node)]
@@ -587,7 +587,7 @@ class MultiAgentLoop(UtilitiesMixin):
         tasks = []
         for i in range(len(self.node_queue)):
             cur_node = self.node_queue[i]
-            _, cur_dp_rank, cur_tp_rank, _ = self.dag._get_node_dp_info(cur_node)
+            _, cur_dp_rank, cur_tp_rank, *_ = self.dag._get_node_dp_info(cur_node)
             if cur_tp_rank == 0:
                 tasks.append(_single_postprocess(agent_outputs = agent_outputs[cur_node.node_id], node = cur_node))
         loop = asyncio.get_event_loop()
@@ -632,7 +632,7 @@ class MultiAgentLoop(UtilitiesMixin):
                         tokenize=True,
                     )
             tasks = []
-            dp_size, dp_rank, tp_rank, _ = self.dag._get_node_dp_info(entry_node)
+            dp_size, dp_rank, tp_rank, *_ = self.dag._get_node_dp_info(entry_node)
             if tp_rank == 0:
                 for i in range(len(prompts_ids)):
                     key = self._generate_key(entry_node, entry_node, i)
