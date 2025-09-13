@@ -26,7 +26,6 @@ from siirl.workers.dag_worker.constants import DAGConstants
 from siirl.workers.dag_worker.dag_utils import add_prefix_to_dataproto, remove_prefix_from_dataproto, add_prefix_to_metrics
 from siirl.workers.dag_worker.data_structures import NodeOutput
 from siirl.workers.databuffer import DataProto
-from siirl.workers.multi_agent.multiagent_generate import MultiAgentLoop
 
 class ExecutionMixin:
     """Handles the core DAG execution and training loop logic."""
