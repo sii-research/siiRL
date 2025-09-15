@@ -77,13 +77,8 @@ class LIBEROAdapter(BaseVLAEnvironment):
         self.num_steps_wait = num_steps_wait
         self.model_family = model_family
         self.gpu_ids = gpu_ids
-        self.task_ids = []
 
         self.env: SubprocVectorEnv = None
-        self.tasks = []
-        self.task_descriptions = []
-        self.initial_states_list = []
-        self.initial_state_ids = []
         self.step_count = None
 
         self.benchmark_dict = benchmark.get_benchmark_dict()
@@ -91,8 +86,6 @@ class LIBEROAdapter(BaseVLAEnvironment):
 
     def _blocking_reset(self, task_ids: Optional[List[int]] = None, trial_ids: Optional[List[int]] = None) -> List[Dict[str, Any]]:
         """Synchronous implementation of the reset logic."""
-        if self.env is not None:
-            self.env.close()
 
         # Use provided task_ids or sample new ones
         if task_ids is None:
@@ -104,59 +97,69 @@ class LIBEROAdapter(BaseVLAEnvironment):
             assert len(
                 task_ids) <= self.env_num, "Provided task_ids length must less or equal num_envs"
         logger.info(f"Resetting with task IDs: {task_ids}")
+        
+        num_active_envs = len(task_ids)
+        active_env_ids = list(range(num_active_envs))
 
-        self.tasks = []
-        self.initial_states_list = []
+        task_descriptions = []
+        initial_states_list = []
         env_creators = []
         resolution = 256
 
         for i, task_id in enumerate(task_ids):
             task = self.task_suite.get_task(task_id)
-            self.tasks.append(task)
+            task_descriptions.append(task.language)
             task_initial_states = self.task_suite.get_task_init_states(task_id)
-            self.initial_states_list.append(task_initial_states)
+            initial_states_list.append(task_initial_states)
+
             assigned_gpu = self.gpu_ids[i % len(self.gpu_ids)]
             env_creators.append(
-                partial(self._get_libero_env, task, assigned_gpu, resolution))
+                partial(LIBEROAdapter._get_libero_env, task, assigned_gpu, resolution))
 
-        self.env = SubprocVectorEnv(env_creators)
-        self.env.reset()
+        if self.env is None:
+            # First time reset, create the SubprocVectorEnv
+            self.env = SubprocVectorEnv(env_creators)
+        else:
+            self.env.reinit_envs(env_creators, id=active_env_ids)
+
+        # Reset only the active environments.
+        self.env.reset(id=active_env_ids)
 
         initial_states_to_set = []
-        self.initial_state_ids = []
+        initial_state_ids = []
         # Use provided trial_ids or sample new ones
         if trial_ids is None:
             logger.warning(f"No trial_ids provided, sampling new trials.")
             trial_ids = [random.randint(
-                0, len(self.initial_states_list[i]) - 1) for i in range(self.env_num)]
+                0, len(initial_states_list[i]) - 1) for i in range(len(task_ids))]
         else:
             assert len(
                 trial_ids) == len(task_ids), "Provided trial_ids length must equal task_ids length"
 
         for i in range(len(trial_ids)):
             state_id = trial_ids[i]
-            self.initial_state_ids.append(state_id)
-            initial_states_to_set.append(self.initial_states_list[i][state_id])
+            initial_state_ids.append(state_id)
+            initial_states_to_set.append(initial_states_list[i][state_id])
 
-        obs_np_list = self.env.set_init_state(initial_states_to_set)
-        self.task_descriptions = [task.language for task in self.tasks]
+        # Set initial state only for the active environments.
+        obs_np_list = self.env.set_init_state(initial_states_to_set, id=active_env_ids)
 
         for _ in range(self.num_steps_wait):
             dummy_actions = [self._get_dummy_action()
-                             for _ in range(len(trial_ids))]
-            obs_np_list, _, _, _ = self.env.step(dummy_actions)
+                            for _ in range(len(trial_ids))]
+            # Step only the active environments.
+            obs_np_list, _, _, _ = self.env.step(dummy_actions, id=active_env_ids)
 
         self.step_count = np.zeros(len(trial_ids), dtype=int)
 
         results = []
-        for i in range(len(self.tasks)):
-            task = self.tasks[i]
+        for i in range(len(task_ids)):
             task_id = task_ids[i]
-            trial_id = self.initial_state_ids[i]
+            trial_id = initial_state_ids[i]
             results.append({
                 'type': 'init',
                 'obs': obs_np_list[i],
-                "task_description": self.task_descriptions[i],
+                "task_description": task_descriptions[i],
                 'valid_images': [obs_np_list[i]["agentview_image"][::-1, ::-1]],
                 'task_file_name': f"{self.task_suite_name}_task_{task_id}_trial_{trial_id}",
                 'active': True,
@@ -177,6 +180,8 @@ class LIBEROAdapter(BaseVLAEnvironment):
         batch_size = actions.shape[0]
         results = [None] * batch_size
         step_images = [None] * batch_size
+        
+        active_indices_list = sorted(list(active_indices_set))
 
         for j in range(actions.shape[1]):
             normalized_actions = []
@@ -215,7 +220,7 @@ class LIBEROAdapter(BaseVLAEnvironment):
                         'valid_images': step_images[act_idx]
                     }
                     active_indices_set.remove(act_idx)
-            
+
         for i in range(len(active_indices_list)):
             act_idx = active_indices_list[i]
             if results[act_idx] is None:
@@ -243,8 +248,9 @@ class LIBEROAdapter(BaseVLAEnvironment):
         if self.env is not None:
             self.env.close()
 
-    def _get_libero_env(self, task, gpu_id, resolution=256):
-        """Initializes and returns the LIBERO environment, along with the task description."""
+    @staticmethod
+    def _get_libero_env(task, gpu_id, resolution=256):
+        """Initializes and returns the LIBERO environment."""
         task_bddl_file = os.path.join(get_libero_path(
             "bddl_files"), task.problem_folder, task.bddl_file)
         env_args = {

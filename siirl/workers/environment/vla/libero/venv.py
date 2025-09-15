@@ -4,7 +4,6 @@ import cloudpickle
 import ctypes
 import gymnasium as gym
 import numpy as np
-import numpy as np
 import warnings
 import time
 
@@ -251,6 +250,10 @@ def _worker(
                     _encode_obs(env_return[0], obs_bufs)
                     env_return = (None, *env_return[1:])
                 p.send(env_return)
+            elif cmd == "reinit_env":
+                env.close()
+                env = data.data() # data is a CloudpickleWrapper with the new env_fn
+                p.send(True)
             elif cmd == "reset":
                 retval = env.reset(**data)
                 reset_returns_info = (
@@ -426,6 +429,22 @@ class SubprocEnvWorker(EnvWorker):
             ready_conns.extend(new_ready_conns)  # type: ignore
             remain_conns = [conn for conn in remain_conns if conn not in ready_conns]
         return [workers[conns.index(con)] for con in ready_conns]
+        
+    def send_reinit(self, env_fn: Callable[[], gym.Env]) -> None:
+        """
+        Sends a reinit command without waiting for a response.
+        This allows for parallel initialization.
+        """
+        self.parent_remote.send(("reinit_env", CloudpickleWrapper(env_fn)))
+
+    def recv_reinit(self) -> bool:
+        """
+        Waits for and receives the confirmation from a reinit command.
+        """
+        try:
+            return self.parent_remote.recv()
+        except (BrokenPipeError, EOFError):
+            return False
 
     def send(self, action: Optional[np.ndarray], **kwargs: Any) -> None:
         if action is None:
@@ -943,6 +962,33 @@ class SubprocVectorEnv(BaseVectorEnv):
             return SubprocEnvWorker(fn, share_memory=False)
 
         super().__init__(env_fns, worker_fn, **kwargs)
+
+    def reinit_envs(self, env_fns: List[Callable[[], gym.Env]], id: Optional[Union[int, List[int], np.ndarray]] = None) -> None:
+        """
+        Re-initializes the environments in parallel for a subset of workers.
+        """
+        self._assert_is_not_closed()
+
+        target_ids = self._wrap_id(id)
+        
+        if len(env_fns) != len(target_ids):
+            raise ValueError(f"Number of env_fns ({len(env_fns)}) must match the number of target ids ({len(target_ids)}).")
+
+        target_workers = [self.workers[i] for i in target_ids]
+
+        # Send reinit command to all target workers without waiting.
+        for i, (worker, env_fn) in enumerate(zip(target_workers, env_fns)):
+            if not isinstance(worker, SubprocEnvWorker):
+                raise TypeError(
+                    f"reinit_envs is only supported for SubprocEnvWorker, but worker {target_ids[i]} is type {type(worker).__name__}."
+                )
+            worker.send_reinit(env_fn)
+
+        # Wait for all target workers to confirm reinitialization.
+        results = [worker.recv_reinit() for worker in target_workers]
+        if not all(results):
+            failed_indices = [target_ids[i] for i, success in enumerate(results) if not success]
+            raise RuntimeError(f"Worker processes {failed_indices} failed to re-initialize environment.")
 
     def check_success(self):
         return [w.check_success() for w in self.workers]
