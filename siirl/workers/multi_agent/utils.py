@@ -16,7 +16,7 @@ class AgentOutput(BaseModel):
     response_mask: Optional[List[int]]
     env_obs: Optional[Union[str, List[int]]] = ""
     ground_truth: str = ''
-    rewards: int = -1
+    rewards: int = 0
     status: str = AgentOutputStatus.RUNNING
     turn: int = 0
     request_id: str = "None"

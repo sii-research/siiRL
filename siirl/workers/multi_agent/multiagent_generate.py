@@ -482,7 +482,7 @@ class MultiAgentLoop(UtilitiesMixin):
                     global_running = True
                 
         return agent_res   
-    def _postprocess(self, agent_outputs: Dict[str, List[AgentOutput]]) -> DataProto:
+    def _postprocess(self, agent_outputs: Dict[str, List[AgentOutput]], metrics: Dict) -> DataProto:
         """
         Postprocesses generated agent outputs into a structured DataProto object.
         
@@ -504,7 +504,7 @@ class MultiAgentLoop(UtilitiesMixin):
         #   Format: [0,0,0,0,1,1,1,1, | 1,1,1,0,0,0,0,0]
         # - position_ids: Sequential numbering for valid tokens (masked tokens get 0)
         #   Format: [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
-        async def _single_postprocess(agent_outputs: List[AgentOutput], node: Node):
+        async def _single_postprocess(agent_outputs: List[AgentOutput], node: Node, metrics: Dict):
             """
             Helper function to postprocess outputs for a single node in the DAG.
             
@@ -584,6 +584,8 @@ class MultiAgentLoop(UtilitiesMixin):
                     request_ids.append(step_output.request_id)
                     traj_len.append(traj)
                     traj_step.append(step)
+                    if self.rollout_config.agent.rewards_with_env:
+                        metrics[f"agent_{node.agent_group}_critic/step_{step}_rewards/mean"].append(step_output.rewards)
                     step = step + 1
             if pad_batch_size:
                 for _ in range(pad_batch_size):
@@ -629,14 +631,19 @@ class MultiAgentLoop(UtilitiesMixin):
             if node.agent_process.env:
                 node.agent_process.env_managers.clear()
                 node.agent_process.env_managers = [{}]
+            for step_id in range(self.rollout_config.multi_turn.max_assistant_turns):
+                step_key = f'agent_{node.agent_group}_critic/step_{step_id}_rewards/mean'
+                metrics[f"agent_{node.agent_group}_critic/step_{step_id}_rewards/mean"] = np.mean(metrics[f"agent_{node.agent_group}_critic/step_{step_id}_rewards/mean"]) / (step_id + 1)
             return DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info={"metrics": {}})
         
         tasks = []
         for i in range(len(self.node_queue)):
             cur_node = self.node_queue[i]
             _, cur_dp_rank, cur_tp_rank, *_ = self.dag._get_node_dp_info(cur_node)
+            for len_id in range(self.rollout_config.multi_turn.max_assistant_turns):
+                metrics[f"agent_{cur_node.agent_group}_critic/step_{len_id}_rewards/mean"] = []
             if cur_tp_rank == 0:
-                tasks.append(_single_postprocess(agent_outputs = agent_outputs[cur_node.node_id], node = cur_node))
+                tasks.append(_single_postprocess(agent_outputs = agent_outputs[cur_node.node_id], node = cur_node, metrics = metrics))
         loop = asyncio.get_event_loop()
         datas = loop.run_until_complete(asyncio.gather(*tasks))    
         dataproto = None
@@ -702,7 +709,7 @@ class MultiAgentLoop(UtilitiesMixin):
                 agent_outputs = loop.run_until_complete(self.generate_colocate(len(prompts_ids), sampling_params, timing_raw))
         delta_time = timer.last
         metrics["perf/delta_time/actor"] = delta_time
-        generated_proto = self._postprocess(agent_outputs) 
+        generated_proto = self._postprocess(agent_outputs, metrics) 
           
         # remove last node prefix, because it will be add in dagworker
         if generated_proto:
