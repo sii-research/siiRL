@@ -714,9 +714,19 @@ class InitializationMixin:
                     "inference_engine": rollout_worker.rollout.inference_engine,
                     "model_config": actor_worker.actor_model_config,
                     "rollout_config": rollout_worker.config.rollout,
+                    "transformer_config": actor_worker.tf_config,
                     "layer_name_mapping": layer_name_mapping,
                     "weight_converter": get_mcore_weight_converter(actor_worker.actor_model_config, actor_worker.dtype),
-                    "multi_stage_wake_up": rollout_worker.config.rollout.multi_stage_wake_up,
+                    "device_mesh": torch.distributed.init_device_mesh(
+                        device_name,
+                        mesh_shape=(
+                            parallel_config.get("rollout_world_size") // parallel_config.get("rollout_parallel_size"),
+                            parallel_config.get("rollout_parallel_size"),
+                        ),
+                        mesh_dim_names=["dp", "infer_tp"],
+                    ),
+                    "offload_param": getattr(actor_worker, "_is_offload_param", False),
+                    "bridge": actor_worker.bridge,
                 },
             ),
         }

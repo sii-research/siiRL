@@ -278,6 +278,7 @@ class ActorRolloutRefWorker(MegatronWorker):
                 tokenizer=self.tokenizer,
                 model_hf_config=self.actor_model_config,
                 trust_remote_code=trust_remote_code,
+                processing_class=self.processor if self.processor is not None else self.tokenizer,
                 device_mesh=rollout_device_mesh,
             )
             log_gpu_memory_usage(f"After building {self.config.rollout.name} rollout", logger=None)
@@ -303,6 +304,10 @@ class ActorRolloutRefWorker(MegatronWorker):
         
         self.param_dtype = torch.bfloat16
         log_gpu_memory_usage("Before init actor model and optimizer", logger=logger)
+        
+        # mainly use for sglang    
+        tokenizer_module = load_tokenizer(model_args=self.config.model)
+        self.tokenizer, self.processor = tokenizer_module["tokenizer"], tokenizer_module["processor"]
 
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
@@ -1259,6 +1264,7 @@ class RolloutWorker(MegatronWorker):
                 tokenizer=self.tokenizer,
                 model_hf_config=self.hf_config,
                 trust_remote_code=trust_remote_code,
+                processing_class=self.processor if self.processor is not None else self.tokenizer,
                 device_mesh=rollout_device_mesh,
             )
             log_gpu_memory_usage(f"After building {self.config.rollout.name} rollout", logger=None)
@@ -1279,6 +1285,11 @@ class RolloutWorker(MegatronWorker):
         
         # self.local_path = copy_to_local(self.config.model.path, use_shm=self.config.model.use_shm)
         # self.tokenizer = load_tokenizer(model_args=self.config.model)['tokenizer']
+        
+        # mainly use for sglang    
+        tokenizer_module = load_tokenizer(model_args=self.config.model)
+        self.tokenizer, self.processor = tokenizer_module["tokenizer"], tokenizer_module["processor"]
+        
         model_path = self.config.model.path
         model_override_config = self.config.model.override_config
         model_override_transformer_config = self.config.actor.megatron.override_transformer_config
