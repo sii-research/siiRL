@@ -29,7 +29,8 @@ def gptmodel_forward(
     pack_seqs=True,
     logits_processor=None,
     logits_processor_args: dict = None,
-):
+    **kwargs,
+):  
     """Default forward pass for GPT models with optional sequence packing."""
     pre_process = unwrap_model(model).pre_process
     post_process = unwrap_model(model).post_process
@@ -58,8 +59,3 @@ def gptmodel_forward(
     if value_model and post_process:
         output = output[..., 0]
     return output
-
-
-def gptmodel_forward_qwen2_5_vl(*args, **kwargs):
-    """Forward pass for Qwen2.5 VL model (not implemented)."""
-    raise NotImplementedError("VLM is not supported yet")

@@ -31,6 +31,7 @@ from siirl.workers.base_worker import Worker
 from siirl.workers.dag.node import NodeRole, NodeType
 from siirl.workers.dag_worker.constants import DAGConstants
 from siirl.workers.multi_agent.multiagent_generate import MultiAgentLoop
+from siirl.utils.import_string import import_string
 
 device_name = get_device_name()
 
@@ -149,11 +150,9 @@ class InitializationMixin:
             self._gather_group = dist.new_group(backend=gather_backend)
         else:
             # For GPU, the original logic is preserved for backward compatibility.
-            # The gather group is only created if world_size < 256.
-            if self.world_size < 256:
-                self._gather_group = dist.new_group(backend="gloo")
-            else:
-                self._gather_group = None
+            # The gather group is only created if world_size < backend_threshold.
+            self._gather_group = dist.new_group(
+                backend="gloo") if self.world_size < self.config.dag.backend_threshold else None
         self._build_all_process_groups()
         self._resolve_taskgraph_process_groups()
 
@@ -343,15 +342,24 @@ class InitializationMixin:
                 NodeRole.CRITIC: CriticWorker,
                 NodeRole.REWARD: RewardModelWorker,
             }
-        elif strategy == DAGConstants.MEGATRON_STRATEGY:
-            from siirl.workers.megatron_workers import ActorRolloutRefWorker, CriticWorker, RewardModelWorker
+        elif strategy in DAGConstants.MEGATRON_STRATEGYS:
+            from siirl.workers.megatron_workers import (
+                ActorWorker, 
+                RolloutWorker, 
+                AsyncRolloutWorker, 
+                ReferenceWorker, 
+                CriticWorker, 
+                RewardModelWorker
+            )
 
+            is_async_mode = self.config.actor_rollout_ref.rollout.mode == "async"
+            
             return {
-                NodeRole.ACTOR: ActorRolloutRefWorker,
-                NodeRole.ROLLOUT: ActorRolloutRefWorker,
-                NodeRole.REFERENCE: ActorRolloutRefWorker,
+                NodeRole.ACTOR: ActorWorker,
+                NodeRole.ROLLOUT: AsyncRolloutWorker if is_async_mode else RolloutWorker,
+                NodeRole.REFERENCE: ReferenceWorker,
                 NodeRole.CRITIC: CriticWorker,
-                NodeRole.REWARD: RewardModelWorker,
+                NodeRole.REWARD: RewardModelWorker
             }
         raise NotImplementedError(f"Strategy '{strategy}' is not supported.")
 
@@ -412,8 +420,12 @@ class InitializationMixin:
                 elif hasattr(config, "optim"):
                     config.optim.total_training_steps = self.dataloader.total_training_steps
                 worker_args = {"config": config, "process_group": node_process_group}
-                if node.node_role in DAGConstants.WORKER_ROLE_MAPPING:
-                    worker_args["role"] = DAGConstants.WORKER_ROLE_MAPPING[node.node_role]
+                
+                # For separated workers (Megatron backend), no role parameter is needed
+                # Only legacy ActorRolloutRefWorker needs the role parameter
+                if hasattr(worker_cls, '__name__') and 'ActorRolloutRefWorker' in worker_cls.__name__:
+                    if node.node_role in DAGConstants.WORKER_ROLE_MAPPING:
+                        worker_args["role"] = DAGConstants.WORKER_ROLE_MAPPING[node.node_role]
 
                 worker_instance = worker_cls(**worker_args)
                 self.workers[node_worker_key] = worker_instance
@@ -482,8 +494,13 @@ class InitializationMixin:
             raise RuntimeError(f"Could not find a node with role {role.name} for agent_group {agent_group}")
         return found_node
 
-    def _get_node_dp_info(self, node: Node) -> tuple[int, int, int, int]:
-        """Calculates Data Parallel (DP) and Tensor Parallel (TP) info for a node."""
+    def _get_node_dp_info(self, node: Node) -> tuple[int, int, int, int, int, int]:
+        """
+        Calculates Data Parallel (DP), Tensor Parallel (TP), and Pipeline Parallel (PP) info for a node.
+        
+        Returns:
+            tuple: (dp_size, dp_rank, tp_rank, tp_size, pp_rank, pp_size)
+        """
         reference_node = node
         if node.node_type == NodeType.COMPUTE:
             # If the node is a COMPUTE type, find its true data source ancestor.
@@ -492,10 +509,7 @@ class InitializationMixin:
                 reference_node = ancestor
             else:
                 # If no non-COMPUTE ancestor is found, it's a critical error.
-                raise RuntimeError(
-                    f"Could not find any non-COMPUTE ancestor for COMPUTE node '{node.node_id}'. Please check your"
-                    f" DAG graph configuration."
-                )
+                raise RuntimeError(f"Could not find any non-COMPUTE ancestor for COMPUTE node '{node.node_id}'. Please check your DAG graph configuration.")
 
         if reference_node.node_type == NodeType.COMPUTE:
             group_world_size = self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes
@@ -505,21 +519,81 @@ class InitializationMixin:
             group_world_size = dist.get_world_size(process_group)
             group_rank = dist.get_rank(process_group)
 
+        # Get parallelism configuration based on backend strategy
+        tp_size, pp_size = self._get_parallelism_config(reference_node)
+        
+        # Calculate total parallel size (TP * PP)
+        total_parallel_size = tp_size * pp_size
+        
+        if group_world_size % total_parallel_size != 0:
+            raise ValueError(f"Configuration error for node {node.node_id}: Group world size ({group_world_size}) is not divisible by total parallel size (TP={tp_size} * PP={pp_size} = {total_parallel_size}). Check your parallel configuration.")
+        
+        dp_size = group_world_size // total_parallel_size
+        
+        # Calculate ranks within the data parallel group
+        dp_rank = group_rank // total_parallel_size
+        
+        # Calculate position within the TP-PP grid
+        local_rank_in_tp_pp_group = group_rank % total_parallel_size
+        
+        # For 2D parallelism: ranks are arranged as [PP0_TP0, PP0_TP1, ..., PP0_TP(tp_size-1), PP1_TP0, ...]
+        pp_rank = local_rank_in_tp_pp_group // tp_size
+        tp_rank = local_rank_in_tp_pp_group % tp_size
+        
+        return dp_size, dp_rank, tp_rank, tp_size, pp_rank, pp_size
+    
+    def _get_parallelism_config(self, reference_node: Node) -> tuple[int, int]:
+        """
+        Extract tensor parallel and pipeline parallel sizes based on backend strategy.
+        Currently, only FSDP and Megatron backends are supported, in which Megatron supports PP.
+        
+        Args:
+            reference_node: The node to extract parallelism config from
+            
+        Returns:
+            tuple: (tp_size, pp_size)
+        """
         tp_size = 1
+        pp_size = 1
+        
         if intern_config := reference_node.config.get(DAGConstants.INTERN_CONFIG):
             if reference_node.node_type == NodeType.MODEL_INFERENCE:
-                tp_size = intern_config.rollout.tensor_model_parallel_size
-            # TODO: Add support for Megatron strategy, reading from its specific model config.
+                # For rollout nodes, only TP is supported currently.
+                # Pipeline parallelism is not typically used for inference
 
-        if group_world_size % tp_size != 0:
-            raise ValueError(
-                f"Configuration error for node {node.node_id}: Group world size ({group_world_size}) is not divisible "
-                f"by tensor parallel size ({tp_size}). Check your parallel configuration."
-            )
-        dp_size = group_world_size // tp_size
-        dp_rank = group_rank // tp_size
-        tp_rank = group_rank % tp_size
-        return dp_size, dp_rank, tp_rank, tp_size
+                # TODO(Ping Zhang): support PP for rollout nodes, which will be used for very large models
+                # that need multi-server inference.
+                tp_size = intern_config.rollout.tensor_model_parallel_size
+                pp_size = 1
+
+            elif reference_node.node_type == NodeType.MODEL_TRAIN:
+                # Extract strategy based on the specific config type
+                strategy = 'fsdp'  # default
+                
+                if hasattr(intern_config, 'actor') and hasattr(intern_config.actor, 'strategy'):
+                    # For ActorRolloutRefArguments, strategy is in actor
+                    strategy = intern_config.actor.strategy
+                elif hasattr(intern_config, 'strategy'):
+                    # For CriticArguments, RefArguments, RewardModelArguments, strategy is direct attribute
+                    strategy = intern_config.strategy
+                
+                if strategy in DAGConstants.MEGATRON_STRATEGYS:
+                    # Megatron backend supports both TP and PP
+                    if hasattr(intern_config, 'actor') and hasattr(intern_config.actor, 'megatron'):
+                        # ActorRolloutRefArguments case
+                        tp_size = intern_config.actor.megatron.tensor_model_parallel_size
+                        pp_size = intern_config.actor.megatron.pipeline_model_parallel_size
+                    elif hasattr(intern_config, 'megatron'):
+                        # CriticArguments, RefArguments, RewardModelArguments cases
+                        tp_size = intern_config.megatron.tensor_model_parallel_size
+                        pp_size = intern_config.megatron.pipeline_model_parallel_size
+                else:
+                    # FSDP's ZeRO-like parallelism is essentially DP; therefore,
+                    # For MODEL_TRAIN type, we should keep TP=PP=1.
+                    tp_size = 1
+                    pp_size = 1
+
+        return tp_size, pp_size
 
     def log_ray_actor_info(self):
         """Logs detailed information about the Ray actor's context for debugging."""
@@ -567,7 +641,7 @@ class InitializationMixin:
             self.multi_agent_loop =  MultiAgentLoop(self, config = self.config.actor_rollout_ref, node_workers = self.workers, local_dag = self.taskgraph, databuffer = self.data_buffers, placement_mode = 'colocate')
         
     def _setup_sharding_manager(self, agent_group: int, worker_dict: Dict[NodeRole, Worker]):
-        """Configures the sharding manager to sync weights between FSDP and vLLM."""
+        """Configures the sharding manager to sync weights between training backend and inference backend."""
         actor_worker = worker_dict[NodeRole.ACTOR]
         rollout_worker = worker_dict[NodeRole.ROLLOUT]
         rollout_pg = self.agent_group_process_group[agent_group][NodeRole.ROLLOUT]
@@ -578,39 +652,85 @@ class InitializationMixin:
             "rollout_rank": dist.get_rank(rollout_pg),
         }
 
-        if self.config.actor_rollout_ref.rollout.name == "vllm":
-            from siirl.workers.sharding_manager.fsdp_vllm import MultiAgentFSDPVLLMShardingManager
+        device_name = get_device_name()
+        layer_name_mapping = {
+            "qkv_layer_name": "self_attention.linear_qkv.",
+            "gate_proj_layer_name": "linear_fc1.weight",
+        }
 
-            sharding_manager_cls = MultiAgentFSDPVLLMShardingManager
-            sharding_manager = sharding_manager_cls(
-                module=actor_worker.actor_module_fsdp,
-                inference_engine=rollout_worker.rollout.inference_engine,
-                model_config=actor_worker.actor_model_config,
-                parallel_config=parallel_config,
-                full_params="hf" in rollout_worker.config.rollout.load_format,
-                offload_param=getattr(actor_worker, "_is_offload_param", False),
-            )
-        elif self.config.actor_rollout_ref.rollout.name == "sglang":
-            from siirl.workers.sharding_manager.fsdp_sglang import MultiAgentFSDPSGLangShardingManager
+        # Use lazy import and defer execution.
+        sharding_manager_map = {
+            ("fsdp", "vllm"): (
+                "siirl.workers.sharding_manager.fsdp_vllm.MultiAgentFSDPVLLMShardingManager",
+                lambda: {
+                    "module": actor_worker.actor_module_fsdp,
+                    "inference_engine": rollout_worker.rollout.inference_engine,
+                    "model_config": actor_worker.actor_model_config,
+                    "parallel_config": parallel_config,
+                    "full_params": "hf" in rollout_worker.config.rollout.load_format,
+                    "offload_param": getattr(actor_worker, "_is_offload_param", False),
+                },
+            ),
+            ("fsdp", "sglang"): (
+                "siirl.workers.sharding_manager.fsdp_sglang.MultiAgentFSDPSGLangShardingManager",
+                lambda: {
+                    "module": actor_worker.actor_module_fsdp,
+                    "inference_engine": rollout_worker.rollout.inference_engine,
+                    "model_config": actor_worker.actor_model_config,
+                    "device_mesh": torch.distributed.init_device_mesh(
+                        device_name,
+                        mesh_shape=(
+                            parallel_config.get("rollout_world_size") // parallel_config.get("rollout_parallel_size"),
+                            parallel_config.get("rollout_parallel_size"),
+                        ),
+                        mesh_dim_names=["dp", "infer_tp"],
+                    ),
+                    "rollout_config": rollout_worker.config.rollout,
+                    "full_params": "hf" in rollout_worker.config.rollout.load_format,
+                    "offload_param": getattr(actor_worker, "_is_offload_param", False),
+                    "multi_stage_wake_up": rollout_worker.config.rollout.multi_stage_wake_up,
+                },
+            ),
+            ("megatron", "vllm"): (
+                "siirl.workers.sharding_manager.megatron_vllm.MultiAgentMegatronVLLMShardingManager",
+                lambda: {
+                    "actor_module": actor_worker.actor_module,
+                    "inference_engine": rollout_worker.rollout.inference_engine,
+                    "model_config": actor_worker.actor_model_config,
+                    "rollout_config": rollout_worker.config.rollout,
+                    "transformer_config": actor_worker.tf_config,
+                    "layer_name_mapping": layer_name_mapping,
+                    "weight_converter": get_mcore_weight_converter(actor_worker.actor_model_config, actor_worker.dtype),
+                    "device_mesh": rollout_worker.device_mesh,
+                    "offload_param": actor_worker._is_offload_param,
+                    "bridge": actor_worker.bridge,
+                },
+            ),
+            # TODO(Ping Zhang): update for SGLang later
+            ("megatron", "sglang"): (
+                "siirl.workers.sharding_manager.megatron_sglang.MultiAgentMegatronSGLangShardingManager",
+                lambda: {
+                    "actor_module": actor_worker.actor_module,
+                    "inference_engine": rollout_worker.rollout.inference_engine,
+                    "model_config": actor_worker.actor_model_config,
+                    "rollout_config": rollout_worker.config.rollout,
+                    "layer_name_mapping": layer_name_mapping,
+                    "weight_converter": get_mcore_weight_converter(actor_worker.actor_model_config, actor_worker.dtype),
+                    "multi_stage_wake_up": rollout_worker.config.rollout.multi_stage_wake_up,
+                },
+            ),
+        }
 
-            sharding_manager_cls = MultiAgentFSDPSGLangShardingManager
-            tp_size = parallel_config.get("rollout_parallel_size")
-            world_size = parallel_config.get("rollout_world_size")
-            rollout_device_mesh = torch.distributed.init_device_mesh(
-                device_name, mesh_shape=(world_size // tp_size, tp_size), mesh_dim_names=["dp", "infer_tp"]
-            )
-            sharding_manager = sharding_manager_cls(
-                module=actor_worker.actor_module_fsdp,
-                inference_engine=rollout_worker.rollout.inference_engine,
-                model_config=actor_worker.actor_model_config,
-                device_mesh=rollout_device_mesh,
-                rollout_config=rollout_worker.config.rollout,
-                full_params="hf" in rollout_worker.config.rollout.load_format,
-                offload_param=getattr(actor_worker, "_is_offload_param", False),
-                multi_stage_wake_up=rollout_worker.config.rollout.multi_stage_wake_up,
-            )
-        else:
-            raise NotImplementedError(f"{self.config.actor_rollout_ref.rollout.name} not supported")
+        strategy = actor_worker.config.actor.strategy.lower()
+        if strategy == DAGConstants.MEGATRON_STRATEGY:
+            from siirl.models.mcore import get_mcore_weight_converter
+        rollout_name = self.config.actor_rollout_ref.rollout.name.lower()
+        if (strategy, rollout_name) not in sharding_manager_map:
+            raise NotImplementedError(f"Unsupported sharding manager configuration: {strategy=}, {rollout_name=}")
+
+        sharding_manager_cls_str, kwargs_builder = sharding_manager_map[(strategy, rollout_name)]
+        sharding_manager_cls = import_string(sharding_manager_cls_str)
+        sharding_manager = sharding_manager_cls(**kwargs_builder())
         rollout_worker.set_rollout_sharding_manager(sharding_manager)
         logger.debug(f"Set up {sharding_manager_cls.__name__}  for agent group {agent_group}.")
 

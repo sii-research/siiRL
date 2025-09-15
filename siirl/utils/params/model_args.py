@@ -1,5 +1,6 @@
 # Copyright 2025, Shanghai Innovation Institute. All rights reserved.
-#
+# Copyright 2025, Infrawaves. All rights reserved.
+# 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -61,6 +62,9 @@ class FSDPArguments:
 class MegatronArguments:
     tensor_model_parallel_size: int = field(default=1, metadata={"help": "Tensor parallelism size"})
     pipeline_model_parallel_size: int = field(default=1, metadata={"help": "Pipeline parallelism size"})
+    context_parallel_size: int = field(default=1, metadata={"help": "Context parallelism size"})
+    expert_model_parallel_size: int = field(default=1, metadata={"help": "Expert model parallelism size"})
+    expert_tensor_parallel_size: int = field(default=1, metadata={"help": "Expert tensor parallelism size"})
     virtual_pipeline_model_parallel_size: Optional[int] = field(default=None, metadata={"help": "Virtual pipeline model parallel size"})
     sequence_parallel: bool = field(default=False, metadata={"help": "Whether the sequence parallel is enabled."})
     use_distributed_optimizer: bool = field(
@@ -69,6 +73,15 @@ class MegatronArguments:
     )
     param_dtype: str = field(default="bfloat16", metadata={"help": "parameter data dtype"})
     seed: int = field(default=1, metadata={"help": "The random seed"})
+    param_offload: bool = field(default=False, metadata={"help": "Offload parameters to CPU"})
+    grad_offload: bool = field(default=False, metadata={"help": "Offload gradients to CPU"})
+    optimizer_offload: bool = field(default=False, metadata={"help": "Offload optimizer states to CPU"})
+    extra: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Extra settings"})
+    override_transformer_config: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Override transformer config"})
+    use_dist_checkpointing: bool = field(default=False, metadata={"help": "Whether to use distributed checkpointing"})
+    dist_checkpointing_path: str = field(default="", metadata={"help": "Path to save distributed checkpointing"})
+    override_ddp_config: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Override ddp config"})
+    use_mbridge: bool = field(default=False, metadata={"help": "Whether to use mbridge"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -78,8 +91,16 @@ class MegatronArguments:
 class OptimizerArguments:
     lr: float = field(default=1e-6, metadata={"help": "Learning rate"})
     lr_warmup_steps_ratio: float = field(default=0.0, metadata={"help": "Warmup steps ratio"})
+    min_lr: float = field(default=0.0, metadata={"help": "Min learning rate"})
     min_lr_ratio: Optional[float] = field(default=None, metadata={"help": "Min learning rate ratio"})
     warmup_style: str = field(default="constant", metadata={"help": "Warmup strategy"})
+    lr_warmup_init: float = field(default=0.0, metadata={"help": "Learning rate warmup init"})
+    lr_decay_steps: Optional[int] = field(default=None, metadata={"help": "Learning rate decay steps"})
+    lr_decay_style: str = field(default="linear", metadata={"help": "Learning rate decay style"})
+    weight_decay_incr_style: str = field(default="constant", metadata={"help": "Weight decay increase style"})
+    lr_wsd_decay_style: str = field(default="exponential", metadata={"help": "Learning rate warmup decay style"})
+    lr_wsd_decay_steps: Optional[int] = field(default=None, metadata={"help": "Learning rate warmup decay steps"})
+    use_checkpoint_opt_param_scheduler: bool = field(default=False, metadata={"help": "Whether to use checkpoint opt param scheduler"})
     total_training_steps: int = field(default=0, metadata={"help": "Total training steps"})
     betas: tuple[float, float] = field(default=(0.9, 0.999), metadata={"help": "Beta params Of Optimizer"})
     weight_decay: float = field(default=1e-2, metadata={"help": "Weight decay params of Optimizer"})
@@ -89,6 +110,7 @@ class OptimizerArguments:
     )
     clip_grad: float = field(default=1.0, metadata={"help": "gradient clip"})
     num_cycles: float = field(default=0.5, metadata={"help": "num cycles"})
+    override_optimizer_config: Optional[dict] = field(default=None, metadata={"help": "Override optimizer config"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -135,6 +157,7 @@ class ModelArguments(ProcessorArguments):
     external_lib: Optional[str] = field(default=None, metadata={"help": "External model library"})
     override_config: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Model config overrides"})
     enable_gradient_checkpointing: bool = field(default=True, metadata={"help": "Gradient checkpointing"})
+    gradient_checkpointing_kwargs: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Gradient checkpointing kwargs"})
     use_remove_padding: bool = field(default=False, metadata={"help": "Padding removal optimization"})
     use_fused_kernels: bool = field(default=False, metadata={"help": "Kernels fuse optimization"})
     cache_dir: Optional[str] = field(
@@ -203,7 +226,20 @@ class ModelArguments(ProcessorArguments):
 
 @dataclass
 class CheckpointArguments:
-    contents: List[str] = field(default_factory=["model", "hf_model", "optimizer", "extra"], metadata={"help": "The contents to save in the checkpoint."})
+    contents: List[str] = field(default_factory=["model", "hf_model", "optimizer", "extra"], metadata={"help": "The contents to save and load in the checkpoint."})
+    save_contents: List[str] = field(default_factory=["model", "optimizer", "extra"], metadata={"help": "The contents to save in the checkpoint."})
+    load_contents: List[str] = field(default_factory=["model", "optimizer", "extra"], metadata={"help": "The contents to load in the checkpoint."})
+    async_save: bool = field(default=False, metadata={"help": "Async checkpoint save mode"})
+
+
+@dataclass
+class PolicyLossArguments:
+    loss_mode: str = field(default="vanilla", metadata={"help": "Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg'."})
+    clip_cov_ratio: float = field(default=0.0002, metadata={"help": "Ratio of tokens to be clipped for clip-cov loss."})
+    clip_cov_lb: float = field(default=1.0, metadata={"help": "Lower bound for clip-cov loss."})
+    clip_cov_ub: float = field(default=5.0, metadata={"help": "Upper bound for clip-cov loss."})
+    kl_cov_ratio: float = field(default=0.0002, metadata={"help": "Ratio of tokens to be applied KL penalty for kl-cov loss."})
+    ppo_kl_coef: float = field(default=0.1, metadata={"help": "KL divergence penalty coefficient."})
 
 
 @dataclass
@@ -226,6 +262,8 @@ class ActorArguments:
     ppo_epochs: int = field(default=1, metadata={"help": "PPO epochs"})
     shuffle: bool = field(default=False, metadata={"help": "Data shuffling"})
     ulysses_sequence_parallel_size: int = field(default=1, metadata={"help": "Sequence parallel size"})
+    policy_loss: PolicyLossArguments = field(default_factory=PolicyLossArguments, metadata={"help": "Policy loss settings"})
+    tis_imp_ratio_cap: float = field(default=-1, metadata={"help": "Truncated importance sampling ratio cap"})
     optim: OptimizerArguments = field(default_factory=OptimizerArguments, metadata={"help": "Optimizer settings"})
     fsdp_config: FSDPArguments = field(default_factory=FSDPArguments, metadata={"help": "FSDP settings"})
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
@@ -241,6 +279,8 @@ class ActorArguments:
     recompute_old_log_prob: bool = field(default=True, metadata={"help": "recompute old log prob"})
     use_cpgd_loss: bool = field(default=False, metadata={"help": "use cpgd loss"})
     policy_drift_coeff: float = field(default=0.0, metadata={"help": "policy drift coeff for CPGD"})
+    data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
+    profile: dict[str, Any] = field(default_factory=dict, metadata={"help": "Actor Profile settings"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -388,6 +428,10 @@ class RefArguments:
     grad_offload: bool = field(default=False, metadata={"help": "Enable grad offload or not"})
     optimizer_offload: bool = field(default=False, metadata={"help": "Enable optimizer offload or not"})
     load_weight: bool = field(default=True)
+    profile: dict[str, Any] = field(default_factory=dict, metadata={"help": "Reference Profile settings"})
+    shuffle: bool = field(default=False, metadata={"help": "Data shuffling"})
+    data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
+    recompute_old_log_prob: bool = field(default=True, metadata={"help": "recompute old log prob"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -435,6 +479,8 @@ class CriticArguments:
     checkpoint: CheckpointArguments = field(default_factory=CheckpointArguments, metadata={"help": "Checkpoint configuration"})
     ppo_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU"})
     loss_agg_mode: str = field(default="token-mean", metadata={"help": "token-mean, seq-mean-token-sum, seq-mean-token-mean"})
+    profile: dict[str, Any] = field(default_factory=dict, metadata={"help": "Critic Profile settings"})
+    data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -480,6 +526,9 @@ class RewardModelArguments:
     reward_kwargs: Dict[str, Any] = field(default_factory=lambda: {})
     sandbox_fusion: Optional[Dict[str, Any]] = field(default=None)
     overlong_buffer: OverlongBufferArguments = field(default_factory=OverlongBufferArguments, metadata={"help": "DAPO overlong buffer configuration"})
+    profile: dict[str, Any] = field(default_factory=dict, metadata={"help": "Reward Model Profile settings"})
+    shuffle: bool = field(default=False, metadata={"help": "Data shuffling"})
+    data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -518,6 +567,8 @@ class AlgorithmArguments:
     weight_factor_in_cpgd: str = field(default="STD_weight", metadata={"help": "The weighting methods for advantage {STD_weight, clip_filter_like_weight, naive}"})
     algorithm_name: str = field(default="grpo", metadata={"help": "Algorithm name, e.g., grpo, ppo, dapo"})
     filter_groups: FilterGroupsArguments = field(default_factory=FilterGroupsArguments, metadata={"help": "DAPO filter groups configuration"})
+    use_pf_ppo: bool = field(default=False, metadata={"help": "Whether to enable preference feedback PPO."})
+    pf_ppo: dict[str, Any] = field(default_factory=dict, metadata={"help": " Preference feedback PPO settings."})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

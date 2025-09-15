@@ -26,17 +26,16 @@ from megatron.core.transformer.module import Float16Module
 from torch import nn
 from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
 
-from siirl import DataProto
 from siirl.models.mcore.weight_converter import McoreToHFWeightConverterBase
-from siirl.workers.databuffer import all_gather_data_proto
 from vllm import LLM
-from vllm.distributed import parallel_state as vllm_ps
 from siirl.utils.debug import GPUMemoryLogger
-from siirl.utils.extras.device import get_torch_device
+from siirl.utils.extras.device import get_torch_device, set_expandable_segments
 from siirl.utils.megatron.megatron_utils import (
     get_model,
     per_tensor_generator,
     unwrap_model,
+    load_megatron_model_to_gpu,
+    offload_megatron_model_to_cpu,
 )
 from siirl.utils.megatron.memory_buffer import (
     build_memory_buffer,
@@ -45,6 +44,7 @@ from siirl.utils.megatron.memory_buffer import (
 )
 from siirl.utils.model_utils.torch_functional import check_device_is_available
 from siirl.utils.model_utils.vllm_utils import patch_vllm_moe_model_weight_loader
+from siirl.utils.memory_utils import aggressive_empty_cache
 
 from siirl.workers.sharding_manager.base import BaseShardingManager
 
@@ -261,19 +261,26 @@ Megatron Hybrid Engine:
 _MICRO_DATA_PARALLEL_GROUP = None
 
 
-class MegatronVLLMShardingManager(BaseShardingManager):
+class MultiAgentMegatronVLLMShardingManager(BaseShardingManager):
     @check_device_is_available()
     def __init__(
         self,
         actor_module: nn.ModuleList,
         inference_engine: LLM,
         model_config,
+        rollout_config,
         transformer_config,
         layer_name_mapping,
         weight_converter: McoreToHFWeightConverterBase,
+        device_mesh,
         module: AllGatherPPModel = None,
+        offload_param: bool = False,
+        bridge=None,
     ):
         from megatron.core import parallel_state as mpu
+
+        self.device_mesh = device_mesh
+        self.rollout_config = rollout_config
 
         self.actor_module = actor_module
         self.inference_engine = inference_engine
@@ -285,10 +292,8 @@ class MegatronVLLMShardingManager(BaseShardingManager):
         # initialize groups for vllm inference
         self.rank = torch.distributed.get_rank()
         self.world_size = torch.distributed.get_world_size()
-        self.infer_tp_size = vllm_ps.get_tensor_model_parallel_world_size()
-        self.infer_tp_rank = vllm_ps.get_tensor_model_parallel_rank()
-        self.infer_tp_group = vllm_ps.get_tensor_model_parallel_group()
-        self.infer_tp_group = self.infer_tp_group.device_group
+        self.infer_tp_size = self.device_mesh["infer_tp"].size()
+
         self.train_tp_size = mpu.get_tensor_model_parallel_world_size()
         self.train_tp_rank = mpu.get_tensor_model_parallel_rank()
         self.train_tp_group = mpu.get_tensor_model_parallel_group()
@@ -300,30 +305,66 @@ class MegatronVLLMShardingManager(BaseShardingManager):
         self.train_etp_group = mpu.get_expert_tensor_parallel_group()
         self.need_tp_reshard = self.train_tp_size != self.infer_tp_size
         self.train_tp_larger = self.train_tp_size > self.infer_tp_size
+        self.offload_param = offload_param
+        self.bridge = bridge
+
+        self.torch_random_states = get_torch_device().get_rng_state()
+        if self.device_mesh is not None:
+            gen_dp_rank = self.device_mesh["dp"].get_local_rank()
+            get_torch_device().manual_seed(gen_dp_rank + 1000)  # make sure all tp ranks have the same random states
+            self.gen_random_states = get_torch_device().get_rng_state()
+            get_torch_device().set_rng_state(self.torch_random_states)
+        else:
+            self.gen_random_states = None
 
     @GPUMemoryLogger(role="megatron vllm sharding_manager", logger=logger)
     def __enter__(self):
-        # vllm > 0.7.2
-        if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
-            self.inference_engine.wake_up(tags=["weights"])
+        aggressive_empty_cache(force_sync=True)
+
+        if self.offload_param:
+            load_megatron_model_to_gpu(self.actor_module, load_grad=False)
+        
+        set_expandable_segments(False)
+
+        if self.rollout_config.free_cache_engine:
+            # vllm > 0.7.2
+            if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
+                self.inference_engine.wake_up(tags=["weights"])
+            else:
+                self.inference_engine.wake_up()
+        if self.bridge is not None:
+            per_tensor_param = self.bridge.export_weights(self.actor_module)
         else:
-            self.inference_engine.wake_up()
-        per_tensor_param = per_tensor_generator(
-            self.actor_module,
-            self.model_config,
-            self.weight_converter,
-            self.transformer_config,
-            self.layer_name_mapping,
-        )
+            per_tensor_param = per_tensor_generator(
+                self.actor_module,
+                self.model_config,
+                self.weight_converter,
+                self.transformer_config,
+                self.layer_name_mapping,
+            )
+        
         model = self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
         patch_vllm_moe_model_weight_loader(model)
         loaded_params = model.load_weights(per_tensor_param)
         info = f"vLLM load weights, loaded_params: {len(loaded_params)}"
         logger.info(info)
 
+        if self.offload_param:
+            offload_megatron_model_to_cpu(self.actor_module)
+        aggressive_empty_cache(force_sync=True)
+        
         # (vermouth1992) We move wake up kv cache after we release model weights. Need refactor to make API cleaner
-        # if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
-        #     self.inference_engine.wake_up(tags=["kv_cache"])
+
+        if (
+            self.rollout_config.free_cache_engine 
+            and "tags" in inspect.signature(self.inference_engine.wake_up).parameters
+        ):
+            self.inference_engine.wake_up(tags=["kv_cache"])
+        
+        # important: need to manually set the random states of each tp to be identical.
+        if self.device_mesh is not None:
+            self.torch_random_states = get_torch_device().get_rng_state()
+            get_torch_device().set_rng_state(self.gen_random_states)
 
     @GPUMemoryLogger(role="megatron vllm sharding_manager", logger=logger)
     def __exit__(self, exc_type, exc_value, traceback):
@@ -333,17 +374,9 @@ class MegatronVLLMShardingManager(BaseShardingManager):
 
         get_torch_device().empty_cache()
 
-    @GPUMemoryLogger(role="megatron vllm sharding_manager", logger=logger)
-    def preprocess_data(self, data: DataProto) -> DataProto:
-        # DP_COMPUTE_PROTO: all training ranks are dp, the same as fsdp
-        if self.infer_tp_size == 1:
-            return data
-        all_gather_data_proto(data, self.infer_tp_group)
-        return data
+        set_expandable_segments(True)
 
-    @GPUMemoryLogger(role="megatron vllm sharding_manager", logger=logger)
-    def postprocess_data(self, data: DataProto) -> DataProto:
-        # DP_COMPUTE_PROTO: all training ranks are dp, the same as fsdp
-        if self.infer_tp_size == 1:
-            return data
-        return data.chunk(chunks=self.infer_tp_size)[self.infer_tp_rank]
+        # restore random states
+        if self.device_mesh is not None:
+            self.gen_random_states = get_torch_device().get_rng_state()
+            get_torch_device().set_rng_state(self.torch_random_states)
