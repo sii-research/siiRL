@@ -44,5 +44,6 @@ siiRL documentation
    :maxdepth: 1
    :caption: Hardware Support
 
-   ascend_tutorial/ascend_quickstart
-   ascend_tutorial/ascend_profiling_en
+   hardware_tutorial/ascend_quickstart
+   hardware_tutorial/ascend_profiling_en
+   hardware_tutorial/metax_quickstart
