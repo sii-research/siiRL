@@ -587,7 +587,7 @@ def compute_marft_gae_advantage_return(
                         advantages[agent_idx][traj_bs_id, t] = gae
                         returns[agent_idx][traj_bs_id, t] = gae + v
         for agent_idx in pre_agent_group_ids: 
-            advantages[agent_idx] = F.masked_whiten(advantages[agent_idx], response_mask[agent_idx])
+            advantages[agent_idx] = siirl_F.masked_whiten(advantages[agent_idx], response_mask[agent_idx])
             if agent_idx != pre_agent_group_ids[-1]:
                 data.batch[key_prefix + str(agent_group) + "_advantages"] = advantages[agent_idx]
                 data.batch[key_prefix + str(agent_group) + "_returns"] = returns[agent_idx]

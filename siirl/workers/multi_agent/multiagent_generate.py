@@ -337,7 +337,7 @@ class MultiAgentLoop(UtilitiesMixin):
                     
                     
                     pre_agent_actions = [data for data in list(pre_agent_actions.values()) if data is not None]
-                    next_obs, rewards, should_stop = env_instance.step(actions = pre_agent_actions + [agent_output.original_prompt], ground_truth = agent_output.ground_truth)
+                    next_obs, rewards, should_stop = await env_instance.step(actions = pre_agent_actions + [agent_output.original_prompt], ground_truth = agent_output.ground_truth)
                     
                     agent_output.rewards = rewards
                     agent_output.original_prompt = next_obs[-1]
@@ -373,8 +373,10 @@ class MultiAgentLoop(UtilitiesMixin):
             agent_res[cur_node.node_id][agent_output.request_id] = []
         if agent_output.request_id not in agent_res[cur_node.node_id]:
             agent_res[cur_node.node_id][agent_output.request_id] = []
-        agent_res[cur_node.node_id][agent_output.request_id].append(copy.deepcopy(agent_output))
-        # agent_res[cur_node.node_id][agent_output.request_id]=[copy.deepcopy(agent_output)]
+        if self.rollout_config.multi_turn.use_all_traj:
+            agent_res[cur_node.node_id][agent_output.request_id].append(copy.deepcopy(agent_output))
+        else:
+            agent_res[cur_node.node_id][agent_output.request_id]=[copy.deepcopy(agent_output)]
         # last node need to add turn
         if node_idx == len(self.node_queue) - 1:
             agent_output.turn = agent_output.turn + 1
@@ -708,7 +710,7 @@ class MultiAgentLoop(UtilitiesMixin):
                 # if in same GPUWorker
                 agent_outputs = loop.run_until_complete(self.generate_colocate(len(prompts_ids), sampling_params, timing_raw))
         delta_time = timer.last
-        metrics["perf/delta_time/actor"] = delta_time
+        metrics["perf/delta_time/multi_agent_generate"] = delta_time
         generated_proto = self._postprocess(agent_outputs, metrics) 
           
         # remove last node prefix, because it will be add in dagworker
@@ -723,7 +725,6 @@ class MultiAgentLoop(UtilitiesMixin):
                 tasks = [databuffer.reset.remote() for databuffer in self.data_buffers]
                 ray.get(tasks)
         self.internal_data_cache.clear()
-        # logger.info(f"batch keys :{batch.batch.keys()} ||| {batch.non_tensor_batch.keys()} ||| {batch.meta_info.keys()}")
         return generated_proto
     
 

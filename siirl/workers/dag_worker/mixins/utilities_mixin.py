@@ -1160,48 +1160,7 @@ class UtilitiesMixin:
         with self._timer(f"put_proto_data_{key}", timing_raw):
             loop = asyncio.get_event_loop()
             loop.run_until_complete(asyncio.gather(*put_futures))
-        # if self._multi_agent:
-        #     if source_dp_size > dest_dp_size:
-        #         with self._timer(f"put_ray_proto_data_{key}", timing_raw):
-        #             assert source_dp_size % dest_dp_size == 0, f"source dp size {source_dp_size} should div by dest dp size {dest_dp_size}"
-        #             dp_range = source_dp_size // dest_dp_size
-        #             dest_dp_rank =  source_dp_rank // dp_range
-        #             key = key + f"_{dest_dp_rank}"
-        #             put_futures = []
-        #             bs = 0
-        #             while bs < len(data):
-        #                 traj = data.non_tensor_batch[f'agent_group_{agent_group}_traj_len'][bs]
-        #                 next_bs = bs + traj
-        #                 buf = random.choice(self.data_buffers)
-        #                 put_futures.append(buf.put.remote(key, data[bs: next_bs]))
-        #                 bs = next_bs
-        #         with self._timer(f"put_proto_data_{key}", timing_raw):
-        #             loop.run_until_complete(asyncio.gather(*put_futures))
-        #     else:
-        #         with self._timer(f"put_ray_proto_data_{key}", timing_raw):
-        #             assert dest_dp_size % source_dp_size == 0, f"source dp size {source_dp_size} should div by dest dp size {dest_dp_size}"
-        #             dp_range = dest_dp_size // source_dp_size
-        #             dest_dp_rank_start = source_dp_rank * dp_range
-        #             total_batch_size = 0
-        #             tmp_idx = 0
-        #             total_prompts = len(data.non_tensor_batch[f'agent_group_{agent_group}_traj_len'])
-        #             while tmp_idx < total_prompts:
-        #                 total_batch_size += 1
-        #                 tmp_idx = tmp_idx + data.non_tensor_batch[f'agent_group_{agent_group}_traj_len'][tmp_idx]
-        #             dp_total_bs = total_batch_size // dest_dp_size
-        #             put_futures = []
-        #             bs = 0
-        #             dp_bs_idx = 0
-        #             while bs < len(data):
-        #                 bs_key = key + f"_{dest_dp_rank_start + dp_bs_idx // dp_total_bs}"
-        #                 traj = data.non_tensor_batch[f'agent_group_{agent_group}_traj_len'][bs]
-        #                 next_bs = bs + traj
-        #                 buf = random.choice(self.data_buffers)
-        #                 put_futures.append(buf.put.remote(bs_key, data[bs: next_bs]))
-        #                 bs = next_bs     
-        #                 dp_bs_idx = dp_bs_idx + 1                   
-        #         with self._timer(f"put_proto_data_{key}", timing_raw):
-        #             loop.run_until_complete(asyncio.gather(*put_futures)) 
+
         
     
     def multi_agent_get_log(self, key: str, cur_dp_rank: int, agent_group: int, timing_raw):
@@ -1218,19 +1177,3 @@ class UtilitiesMixin:
             dataproto = collate_fn(sorted_datas)
             dataproto.meta_info = meta_info
         return dataproto
-        # if self._multi_agent:
-        #     with self._timer(f"get_ref_data_{key}", timing_raw):
-        #         key = key + f"_{my_current_dp_rank}"
-        #         tasks = [buf.get.remote(key) for buf in self.data_buffers]
-        #         temp_data =loop.run_until_complete(asyncio.gather(*tasks))
-        #         # temp_data = self.data_buffers.get(key) 
-        #         datas = [item for t in temp_data if t is not None for item in t]
-        #     with self._timer(f"get_proto_data_concat_chunks_{key}", timing_raw):
-        #         dataproto = collate_fn(datas)
-        #     with self._timer(f"get_proto_data_sort_{key}", timing_raw):
-        #         original_batch_idx = dataproto.non_tensor_batch[f"agent_group_{agent_group}_batch_id"]
-        #         for key,value in dataproto.batch.items():
-        #             dataproto.batch[key] = sort_by_other_list(value, original_batch_idx)
-        #         for key,value in dataproto.non_tensor_batch.items():
-        #             dataproto.non_tensor_batch[key] = np.array(sort_by_other_list(value, original_batch_idx))
-        #     return dataproto

@@ -1,0 +1,163 @@
+# Copyright 2025, Shanghai Innovation Institute. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+dag_id: "marft_ppo_training_pipeline"
+description: "This is MARFT DAG workflow configured via YAML."
+
+actor_1_config: &actor1_config
+  rollout.log_prob_micro_batch_size_per_gpu: 16
+  rollout.tensor_model_parallel_size: 4
+  rollout.gpu_memory_utilization: 0.3
+  rollout.n: 1
+  
+
+
+actor_2_config: &actor2_config
+  rollout.log_prob_micro_batch_size_per_gpu: 16
+  rollout.tensor_model_parallel_size: 4
+  rollout.gpu_memory_utilization: 0.3
+  rollout.n: 1
+  
+nodes:
+  - node_id: "rollout_reasoner"
+    node_type: "MODEL_INFERENCE"
+    node_role: "ROLLOUT"
+    config: *actor1_config
+    agent_group: 0
+    dependencies: []
+    agent_options:
+      obs_with_env: true
+      process_path: examples/experimental/marft/config/process.py
+      pre_process_kwargs: 
+        pre_chat_template: "Two LLM agents (Reasoner → Coder) collaborate to solve Codeforces Python coding problems.\nYou are the **Reasoner**: Analyze the problem statement, constraints, and expected behavior.\nIdentify edge cases, break the problem into logical steps, and suggest a high-level algorithmic plan.\nYou may include helpful pseudocode and edge case analysis, but do **not** write actual Python code.\n<|im_start|>problem: ${prompt}\n reasoner: "
+      post_process_kwargs:
+        post_chat_template: " reasoner: "
+
+  - node_id: "rollout_actor"
+    node_type: "MODEL_INFERENCE"
+    node_role: "ROLLOUT"
+    config: *actor2_config
+    agent_group: 1
+    dependencies: 
+     - "rollout_reasoner"
+    agent_options:
+      obs_with_env: true
+      process_path: examples/experimental/marft/config/process.py
+      pre_process_kwargs: 
+        pre_chat_template: "Two LLM agents (Reasoner → Coder) collaborate to solve Codeforces Python coding problems.\nYou are the **Coder**: Implement the Reasoner's plan using efficient and correct Python code.\nHandle edge cases, follow the provided strategy, and ensure clarity and correctness.\nAlways use Python.\nPlace your complete solution below the line starting with '```python```'.\n${prompt} coder: "
+      post_process_kwargs:
+        post_chat_template: " coder: "
+      env_path: [examples/experimental/marft/config/code_env.py:CodeEnv]
+
+
+  - node_id: "function_reward"
+    node_type: "COMPUTE"
+    node_role: "REWARD"
+    agent_group: 1
+    dependencies:
+      - "rollout_actor"
+
+  - node_id: "actor_1_old_log_prob"
+    node_type: "MODEL_TRAIN"
+    node_role: "ACTOR"
+    only_forward_compute: true
+    agent_group: 0
+    config: *actor1_config    
+    dependencies:
+      - "function_reward"
+
+  - node_id: "actor_2_old_log_prob"
+    node_type: "MODEL_TRAIN"
+    node_role: "ACTOR"
+    only_forward_compute: true
+    agent_group: 1
+    config: *actor2_config    
+    dependencies:
+      - "actor_1_old_log_prob"
+
+  - node_id: "reference_1_log_prob"
+    node_type: "MODEL_TRAIN"
+    node_role: "REFERENCE"
+    agent_group: 0
+    dependencies:
+      - "actor_2_old_log_prob"
+
+  - node_id: "reference_2_log_prob"
+    node_type: "MODEL_TRAIN"
+    node_role: "REFERENCE"
+    agent_group: 1
+    dependencies:
+      - "reference_1_log_prob"
+
+  - node_id: "critic_1_value"
+    node_type: "MODEL_TRAIN"
+    node_role: "CRITIC"
+    agent_group: 0
+    only_forward_compute: true
+    dependencies:
+      - "reference_2_log_prob"
+
+  - node_id: "critic_2_value"
+    node_type: "MODEL_TRAIN"
+    node_role: "CRITIC"
+    agent_group: 1
+    only_forward_compute: true
+    dependencies:
+      - "critic_1_value"
+    agent_options:
+      share_instance: 0
+  
+  - node_id: "calculate_2_advantages"
+    node_type: "COMPUTE"
+    node_role: "ADVANTAGE"
+    agent_group: 1
+    dependencies:
+      - "critic_2_value"
+
+  - node_id: "critic_1_train"
+    node_type: "MODEL_TRAIN"
+    node_role: "CRITIC"
+    agent_group: 0
+    dependencies:
+      - "calculate_2_advantages"
+
+  - node_id: "critic_2_train"
+    node_type: "MODEL_TRAIN"
+    node_role: "CRITIC"
+    agent_group: 1
+    dependencies:
+      - "critic_1_train"
+    agent_options:
+      share_instance: 0
+
+  - node_id: "actor_1_train"
+    node_type: "MODEL_TRAIN"
+    node_role: "ACTOR"
+    agent_group: 0
+    config: *actor1_config
+    agent_options:
+      train_cycle: 15
+    dependencies:
+      - "critic_2_train"
+
+  - node_id: "actor_2_train"
+    node_type: "MODEL_TRAIN"
+    node_role: "ACTOR"
+    agent_group: 1
+    config: *actor2_config
+    agent_options:
+      train_cycle: 15
+    dependencies:
+      - "actor_1_train"
+

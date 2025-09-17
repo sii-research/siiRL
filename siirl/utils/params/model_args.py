@@ -306,6 +306,7 @@ class LayerNameMapArguments:
 
 @dataclass
 class MultiTurnArguments:
+    use_all_traj: bool = field(default=False, metadata={"help": "Set to True for multi-agent generation when trajectories from each round of multi-turn are needed for training."})
     enable: bool = field(default=False, metadata={"help": "should set rollout.name to sglang_async if True"})
     max_assistant_turns: Optional[int] = field(default=None, metadata={"help": "null for no limit (default max_length // 3)"})
     tool_config_path: Optional[str] = field(default=None, metadata={"help": "null for no tool"})
