@@ -27,9 +27,15 @@ import torch
 import torch.distributed
 from codetiming import Timer
 from loguru import logger
-from megatron.core import parallel_state as mpu
+
 from omegaconf import DictConfig, OmegaConf
 
+try:
+    from mindspeed.megatron_adaptor import repatch
+except ImportError:
+    repatch = None
+
+from megatron.core import parallel_state as mpu
 
 from siirl import DataProto
 from siirl.workers.base_worker.megatron.worker import MegatronWorker
@@ -83,6 +89,9 @@ class ActorRolloutRefWorker(MegatronWorker):
     def __init__(self, config: DictConfig, role: str, process_group=None):
         super().__init__()
         self.config = config
+        if repatch is not None:
+            # NPU MindSpeed patch, will be refactored with MindSpeedEngine.
+            repatch(self.config.actor.megatron.get("override_transformer_config", {}))
         # self.process_group = process_group
 
         # NOTE(sgm): We utilize colocate WorkerGroup by default.
@@ -964,7 +973,9 @@ class ActorWorker(MegatronWorker):
         assert isinstance(config, ActorRolloutRefArguments), "config of ActorWorker must be ActorRolloutRefArguments"
         super().__init__()
         self.config = config
-
+        if repatch is not None:
+            # NPU MindSpeed patch, will be refactored with MindSpeedEngine.
+            repatch(self.config.actor.megatron.to_dict().get("override_transformer_config", {}))
         global_initialize_model_parallel(self.config)
 
         self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
@@ -1339,7 +1350,9 @@ class ReferenceWorker(MegatronWorker):
         assert isinstance(config, ActorRolloutRefArguments), "config must be ActorRolloutRefArguments"
         super().__init__()
         self.config = config
-
+        if repatch is not None:
+            # NPU MindSpeed patch, will be refactored with MindSpeedEngine.
+            repatch(self.config.actor.megatron.to_dict().get("override_transformer_config", {}))
         global_initialize_model_parallel(self.config)
 
         # normalize ref config
