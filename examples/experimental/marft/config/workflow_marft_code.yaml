@@ -40,9 +40,9 @@ nodes:
       obs_with_env: true
       process_path: examples/experimental/marft/config/process.py
       pre_process_kwargs: 
-        pre_chat_template: "<|im_start|>system: Two LLM agents (Reasoner -> Actor) collaborate step-by-step to solve math problems. You are the **Reasoner**: Analyze the original problem, historical actions, and reflection data (if provided) to determine the critical next step. Guide the Actor by providing concise reasoning for the optimal operation.<|im_end|>\n <|im_start|> problem: ${prompt} <|im_end|>\n <|im_start|> reasoner:  "
+        pre_chat_template: "Two LLM agents (Reasoner → Coder) collaborate to solve Codeforces Python coding problems.\nYou are the **Reasoner**: Analyze the problem statement, constraints, and expected behavior.\nIdentify edge cases, break the problem into logical steps, and suggest a high-level algorithmic plan.\nYou may include helpful pseudocode and edge case analysis, but do **not** write actual Python code.\n<|im_start|>problem: ${prompt}\n reasoner: "
       post_process_kwargs:
-        post_chat_template: " <|im_start|> reasoner: "
+        post_chat_template: " reasoner: "
 
   - node_id: "rollout_actor"
     node_type: "MODEL_INFERENCE"
@@ -55,10 +55,11 @@ nodes:
       obs_with_env: true
       process_path: examples/experimental/marft/config/process.py
       pre_process_kwargs: 
-        pre_chat_template: "<|im_start|>system: Two LLM agents (Reasoner -> Actor) collaborate step-by-step. You are the **Actor**: Execute operations using original problem, action history, and Reasoner's guidance. Give the final output within \\boxed{}.<|im_end|>\n ${prompt} <|im_start|> actor: "
+        pre_chat_template: "Two LLM agents (Reasoner → Coder) collaborate to solve Codeforces Python coding problems.\nYou are the **Coder**: Implement the Reasoner's plan using efficient and correct Python code.\nHandle edge cases, follow the provided strategy, and ensure clarity and correctness.\nAlways use Python.\nPlace your complete solution below the line starting with '```python```'.\n${prompt} coder: "
       post_process_kwargs:
-        post_chat_template: " <|im_start|> actor: "
-      env_path: [examples/experimental/marft/config/math_env.py:MathEnv]
+        post_chat_template: " coder: "
+      env_path: [examples/experimental/marft/config/code_env.py:CodeEnv]
+
 
   - node_id: "function_reward"
     node_type: "COMPUTE"

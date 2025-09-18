@@ -71,6 +71,7 @@ class RayTrainer:
             AdvantageEstimator.RLOO,
             AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE,
             AdvantageEstimator.CPGD,
+            AdvantageEstimator.GAE_MARFT,
         ]:
             self.use_critic = False
         else:

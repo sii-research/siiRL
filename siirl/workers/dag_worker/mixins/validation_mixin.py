@@ -171,6 +171,9 @@ class ValidationMixin:
                 output = self._async_rollout_manager.generate_sequences(gen_batch)
         else:
             output = self.multi_agent_loop.generate_sequence(gen_batch)
+            if output:
+                return output
+            return batch_proto
         if output:
             batch_proto.union(output)
         return batch_proto
@@ -181,7 +184,11 @@ class ValidationMixin:
             return []
         if self._multi_agent and 'responses' not in generated_proto.batch:
             return []
-        reward_result = self.val_reward_fn(generated_proto, return_dict=True)
+        if "token_level_rewards" in generated_proto.batch:
+            reward_result = {"reward_tensor": generated_proto.batch["token_level_rewards"],
+                             "reward_extra_info": {}}
+        else:    
+            reward_result = self.val_reward_fn(generated_proto, return_dict=True)
         scores = reward_result["reward_tensor"].sum(-1).cpu()
 
         input_texts = generated_proto.non_tensor_batch.get("prompt_texts")

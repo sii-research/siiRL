@@ -306,6 +306,7 @@ class LayerNameMapArguments:
 
 @dataclass
 class MultiTurnArguments:
+    use_all_traj: bool = field(default=False, metadata={"help": "Set to True for multi-agent generation when trajectories from each round of multi-turn are needed for training."})
     enable: bool = field(default=False, metadata={"help": "should set rollout.name to sglang_async if True"})
     max_assistant_turns: Optional[int] = field(default=None, metadata={"help": "null for no limit (default max_length // 3)"})
     tool_config_path: Optional[str] = field(default=None, metadata={"help": "null for no tool"})
@@ -358,7 +359,7 @@ class AgentArguments:
     env_path: list = field(default_factory=list, metadata={"help": "Env path list"})
     obs_with_env: bool = field(default=False, metadata={"help": "Rollout wiht obs from Env"})
     rewards_with_env: bool = field(default=False, metadata={"help": "Use rewards from Env"})
-    
+    share_instance: int = field(default=None, metadata={"help": "Use the same instance with the target agent group"})
 @dataclass
 class EngineArguments:
     vllm: Dict[str, Any] = field(default_factory=lambda: {})

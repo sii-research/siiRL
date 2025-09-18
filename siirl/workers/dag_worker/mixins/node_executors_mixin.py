@@ -29,6 +29,7 @@ from siirl.workers.dag_worker.algorithms import apply_kl_penalty, compute_advant
 from siirl.workers.dag_worker.core_algos import agg_loss
 from siirl.workers.dag_worker.data_structures import NodeOutput
 from siirl.workers.databuffer import DataProto
+from siirl.scheduler.enums import AdvantageEstimator
 
 
 class NodeExecutorsMixin:
@@ -95,12 +96,12 @@ class NodeExecutorsMixin:
         gen_output = self.multi_agent_loop.generate_sequence(gen_batch)
         if gen_output:
             metrics = gen_output.meta_info.get("metrics", {})
-            gen_output.meta_info = {}
-            batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))])
-            batch = batch.repeat(self.config.actor_rollout_ref.rollout.n, interleave=True).union(gen_output)
-            if "response_mask" not in batch.batch:
-                batch.batch["response_mask"] = compute_response_mask(batch)
-            return NodeOutput(batch=batch, metrics=metrics) 
+            # gen_output.meta_info = {}
+            # batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))])
+            # batch = batch.repeat(self.config.actor_rollout_ref.rollout.n, interleave=True).union(gen_output)
+            # if "response_mask" not in batch.batch:
+            #     batch.batch["response_mask"] = compute_response_mask(batch)
+            return NodeOutput(batch=gen_output, metrics=metrics) 
         return NodeOutput(batch=batch, metrics={})
     
     @DistProfiler.annotate(role="generate")
@@ -175,13 +176,13 @@ class NodeExecutorsMixin:
         return NodeOutput(batch=processed_data)
 
     @DistProfiler.annotate(role="compute_advantage")
-    def compute_advantage(self, batch: DataProto, **kwargs) -> NodeOutput:
-        """Computes advantages and returns for PPO using GAE."""
+    def compute_multi_agent_advantage(self, batch: DataProto, **kwargs) -> NodeOutput:
         adv_config = self.config.algorithm
         rollout_config = self.config.actor_rollout_ref.rollout
-        if "token_level_rewards" not in batch.batch:
+        cur_node = kwargs["cur_node"]
+        if "token_level_rewards" not in batch.batch :
             # make sure rewards of angentB has been compute
-            cur_node = kwargs["cur_node"]
+            # GAE_MARFT adv need make sure only last agent has adv node
             if depend_nodes := self.taskgraph.get_dependencies(cur_node.node_id):
                 depend_node = depend_nodes[0]
                 if adv_config.share_reward_in_agent:
@@ -189,16 +190,42 @@ class NodeExecutorsMixin:
                 else:    
                     batch.batch["token_level_rewards"] = torch.zeros_like(batch.batch[f"agent_group_{depend_node.agent_group}_token_level_rewards"])
                 batch.batch["token_level_scores"] = batch.batch[f"agent_group_{depend_node.agent_group}_token_level_scores"].clone()
-                node_output = self.compute_value(batch, cur_node.agent_group)
-                node_output.batch.batch["pre_values"] = batch.batch[f"agent_group_{depend_node.agent_group}_values"]
-                node_output.batch.batch["pre_advantages"] = batch.batch[f"agent_group_{depend_node.agent_group}_advantages"]
-
-                batch = node_output.batch
             else:
                 raise RuntimeError(f"cur_node {cur_node.node_id} have no rewards with can't find it's dependencies reward")
+        if adv_config.adv_estimator == AdvantageEstimator.GAE_MARFT:
+            # make sure adv node define in last agent node
+            cur_agent_id = len(self.agent_group_worker) - 1
+            agent_groups_ids = list(range(cur_agent_id))
+            kwargs["agent_group_ids"] = agent_groups_ids
+            # pre_agent may have no reward token
+            for agent_id in reversed(agent_groups_ids):
+                key_prefix = f"agent_group_{agent_id}_token_level_rewards"
+                if key_prefix not in batch.batch:
+                    pre_key_prefix = f"agent_group_{agent_id + 1}_token_level_rewards" if agent_id != cur_agent_id -1 else "token_level_rewards"
+                    if adv_config.share_reward_in_agent:
+                        batch.batch[key_prefix] = batch.batch[pre_key_prefix].clone()
+                    else:
+                        batch.batch[key_prefix] = torch.zeros_like(batch.batch[pre_key_prefix])
+                batch.batch[f"agent_group_{agent_id}_token_level_scores"] = batch.batch[key_prefix].clone()
+                    
         return NodeOutput(
             batch=compute_advantage(
-                batch, adv_estimator=adv_config.adv_estimator, gamma=adv_config.gamma, lam=adv_config.lam, num_repeat=rollout_config.n, norm_adv_by_std_in_grpo=adv_config.norm_adv_by_std_in_grpo, weight_factor_in_cpgd=adv_config.weight_factor_in_cpgd, multi_turn=rollout_config.multi_turn.enable
+                batch, adv_estimator=adv_config.adv_estimator, gamma=adv_config.gamma, lam=adv_config.lam, num_repeat=rollout_config.n, norm_adv_by_std_in_grpo=adv_config.norm_adv_by_std_in_grpo, weight_factor_in_cpgd=adv_config.weight_factor_in_cpgd, multi_turn=rollout_config.multi_turn.enable,
+                **kwargs
+            )
+        )        
+        
+    @DistProfiler.annotate(role="compute_advantage")
+    def compute_advantage(self, batch: DataProto, **kwargs) -> NodeOutput:
+        """Computes advantages and returns for PPO using GAE."""
+        if self._multi_agent:
+            return self.compute_multi_agent_advantage(batch, **kwargs)
+        adv_config = self.config.algorithm
+        rollout_config = self.config.actor_rollout_ref.rollout
+        return NodeOutput(
+            batch=compute_advantage(
+                batch, adv_estimator=adv_config.adv_estimator, gamma=adv_config.gamma, lam=adv_config.lam, num_repeat=rollout_config.n, norm_adv_by_std_in_grpo=adv_config.norm_adv_by_std_in_grpo, weight_factor_in_cpgd=adv_config.weight_factor_in_cpgd, multi_turn=rollout_config.multi_turn.enable,
+                **kwargs
             )
         )
 

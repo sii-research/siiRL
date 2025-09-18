@@ -419,25 +419,23 @@ class InitializationMixin:
                 elif hasattr(config, "optim"):
                     config.optim.total_training_steps = self.dataloader.total_training_steps
                 worker_args = {"config": config, "process_group": node_process_group}
-                
+               
                 # For separated workers (Megatron backend), no role parameter is needed
                 # Only legacy ActorRolloutRefWorker needs the role parameter
                 if hasattr(worker_cls, '__name__') and 'ActorRolloutRefWorker' in worker_cls.__name__:
                     if node.node_role in DAGConstants.WORKER_ROLE_MAPPING:
                         worker_args["role"] = DAGConstants.WORKER_ROLE_MAPPING[node.node_role]
-
-                worker_instance = worker_cls(**worker_args)
-                self.workers[node_worker_key] = worker_instance
-                self.agent_group_worker[node.agent_group][node.node_role] = worker_instance
-                self.agent_group_process_group[node.agent_group][node.node_role] = node_process_group
-                logger.success(
-                    f"Rank {self._rank}: Successfully created worker '{worker_cls.__name__}' for node: {node.node_id}"
-                )
-
-                # note all agents share same critic in multi-agent(Marft)
-                if node.node_role == NodeRole.CRITIC and node.agent_group != 0:
-                    for agent in range(node.agent_group):
-                        self.agent_group_worker[agent][node.node_role] = worker_instance
+                if node.agent_options and node.agent_options.share_instance:
+                    # cur agent share same critic with target agent
+                    self.agent_group_worker[node.agent_group][node.node_role] = self.agent_group_worker[node.agent_options.share_instance][node.node_role]
+                else:
+                    worker_instance = worker_cls(**worker_args)
+                    self.workers[node_worker_key] = worker_instance
+                    self.agent_group_worker[node.agent_group][node.node_role] = worker_instance
+                    self.agent_group_process_group[node.agent_group][node.node_role] = node_process_group
+                    logger.success(
+                        f"Rank {self._rank}: Successfully created worker '{worker_cls.__name__}' for node: {node.node_id}"
+                    )
 
             except Exception as e:
                 #  Explicitly log the failing node and worker class, then re-raise
@@ -459,10 +457,10 @@ class InitializationMixin:
 
     def _should_create_worker(self, node: Node) -> bool:
         """Determines if a worker instance should be created for a given graph node."""
-        return (
-            node.node_type in [NodeType.MODEL_TRAIN, NodeType.MODEL_INFERENCE]
-            and node.node_role in self.role_worker_mapping
-        )
+        if node.agent_options and node.agent_options.share_instance:
+            # has been initialized in target agent node
+            return False
+        return node.node_type in [NodeType.MODEL_TRAIN, NodeType.MODEL_INFERENCE] and node.node_role in self.role_worker_mapping
 
     def _get_node_process_group(self, node: Node) -> ProcessGroup:
         """Retrieves the PyTorch ProcessGroup assigned to a specific graph node."""

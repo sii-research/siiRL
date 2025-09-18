@@ -199,6 +199,13 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+    elif adv_estimator == AdvantageEstimator.GAE_MARFT:
+        core_algos.compute_marft_gae_advantage_return(
+            data,
+            pre_agent_group_ids=kwargs["agent_group_ids"],
+            gamma=gamma,
+            lam=lam,
+        )
     else:
         raise NotImplementedError
     return data

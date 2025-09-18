@@ -77,6 +77,7 @@ class ExecutionMixin:
     _get_node_dp_info: Any
     get_data_from_buffers: Any
     put_data_to_buffers: Any
+    multi_agent_put_log: Any
     reset_data_buffer: Any
     _collect_final_metrics: Any
     _collect_multi_final_metrics: Any
@@ -265,11 +266,17 @@ class ExecutionMixin:
                         cur_dp_size, cur_dp_rank, cur_tp_rank, cur_tp_size, cur_pp_rank, cur_pp_size = self._get_node_dp_info(cur_node)
                         logger.debug(f"current node({cur_node.node_id}) dp_size: {cur_dp_size}, dp_rank: {cur_dp_rank}, tp_rank: {cur_tp_rank}, pp_rank: {cur_pp_rank}, pp_size: {cur_pp_size}")
                     from siirl.workers.dag.node import NodeRole
-
+                
                     # --- 3. Get Input Data ---
                     if cur_node.node_id != entry_node_id:
                         with self._timer("get_data_from_buffer", timing_raw):
-                            batch = self.get_data_from_buffers(key=cur_node.node_id, my_current_dp_rank=cur_dp_rank, my_current_dp_size=cur_dp_size, timing_raw=timing_raw)
+                            if self._multi_agent and cur_node.node_role == NodeRole.ADVANTAGE:
+                                batch = self.multi_agent_get_log(key=cur_node.node_id, cur_dp_rank = cur_dp_rank, agent_group = cur_node.agent_group,timing_raw = timing_raw)
+                            else:
+                                batch = self.get_data_from_buffers(key=cur_node.node_id, my_current_dp_rank=cur_dp_rank, my_current_dp_size=cur_dp_size, timing_raw=timing_raw)
+                            if batch is None:
+                                logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
+                                return None  # Abort the entire step
                             batch = remove_prefix_from_dataproto(batch, cur_node)
                             if batch is None:
                                 logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
@@ -296,7 +303,7 @@ class ExecutionMixin:
                                 node_output = self.compute_advantage(batch, cur_node = cur_node)
                         elif cur_node.executable:
                             if cur_node.agent_options and cur_node.agent_options.train_cycle:
-                                cycle_round = epoch // cur_node.agent_options.train_cycle
+                                cycle_round = self.global_steps // cur_node.agent_options.train_cycle
                                 agent_num = len(self.agent_group_worker)
                                 if cycle_round % agent_num == cur_node.agent_group:
                                     node_output = cur_node.run(batch=batch, worker_group_index=cur_node.agent_group, siirl_args=self.config)
@@ -338,7 +345,11 @@ class ExecutionMixin:
                             is_current_last_pp_tp_rank0 = (cur_pp_rank == cur_pp_size - 1 and cur_tp_rank == 0)
                             if self._whether_put_data(is_current_last_pp_tp_rank0, next_dp_size, cur_dp_size, cur_node, next_node):
                                 with self._timer("put_data_to_buffer", timing_raw):
-                                    self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch, source_dp_size=cur_dp_size, dest_dp_size=next_dp_size, timing_raw=timing_raw)
+                                    if self._multi_agent and next_node.node_role == NodeRole.ADVANTAGE:
+                                        self.multi_agent_put_log(key=next_node.node_id, data=node_output.batch, next_dp_size = next_dp_size, agent_group = next_node.agent_group, timing_raw = timing_raw)
+                                    else:
+                                        enforce_buffer = (self._multi_agent) and (cur_node.node_role == NodeRole.ADVANTAGE)
+                                        self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch, source_dp_size=cur_dp_size, dest_dp_size=next_dp_size, enforce_buffer = enforce_buffer,timing_raw=timing_raw)
                         elif self._multi_agent:
                             # last_node add prefix for metrics
                             node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node) 
