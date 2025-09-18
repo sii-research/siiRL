@@ -21,6 +21,7 @@ import torch_npu
 from torch_npu import npu_rotary_mul as apply_rotary_emb
 from transformers.models.qwen2_5_vl import modeling_qwen2_5_vl
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2RMSNorm
+from transformers.models.qwen2 import modeling_qwen2
 
 
 # This patch takes effect when using apply_rotary_pos_emb_flashatt on qwen2_5_vl and will be removed in subsequent versions
@@ -35,6 +36,14 @@ def apply_rotary_pos_emb_flashatt_npu(q: torch.Tensor, k: torch.Tensor, cos: tor
     return q_embed, k_embed
 
 
+def apply_rotary_pos_emb_npu(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    q_embed = torch_npu.npu_rotary_mul(q, cos, sin)
+    k_embed = torch_npu.npu_rotary_mul(k, cos, sin)
+    return q_embed, k_embed
+
+
 # This api can improve performance on ASCEND NPU
 def rms_norm_forward(self, x):
     return torch_npu.npu_rms_norm(x, self.weight, epsilon=self.variance_epsilon)[0]
@@ -42,3 +51,5 @@ def rms_norm_forward(self, x):
 
 Qwen2RMSNorm.forward = rms_norm_forward
 modeling_qwen2_5_vl.apply_rotary_pos_emb_flashatt = apply_rotary_pos_emb_flashatt_npu
+modeling_qwen2.Qwen2RMSNorm.forward = rms_norm_forward
+modeling_qwen2.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
