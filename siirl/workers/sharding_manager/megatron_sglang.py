@@ -205,18 +205,3 @@ class MultiAgentMegatronSGLangShardingManager(BaseShardingManager):
         if self.device_mesh is not None:
             self.gen_random_states = get_torch_device().get_rng_state()
             get_torch_device().set_rng_state(self.torch_random_states)
-
-    @GPUMemoryLogger(role="MultiAgentmegatron sglang sharding_manager", logger=logger)
-    def preprocess_data(self, data: DataProto) -> DataProto:
-        # DP_COMPUTE_PROTO: all training ranks are dp, the same as fsdp
-        if self.infer_tp_size == 1:
-            return data
-        all_gather_data_proto(data, self.device_mesh["infer_tp"].get_group())
-        return data
-
-    @GPUMemoryLogger(role="MultiAgentmegatron sglang sharding_manager", logger=logger)
-    def postprocess_data(self, data: DataProto) -> DataProto:
-        # DP_COMPUTE_PROTO: all training ranks are dp, the same as fsdp
-        if self.infer_tp_size == 1:
-            return data
-        return data.chunk(chunks=self.infer_tp_size)[self.device_mesh["infer_tp"].get_local_rank()]
