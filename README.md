@@ -44,6 +44,7 @@ By eliminating the centralized controller common in other frameworks, siiRL deli
 ---
 
 ## 📰 News
+* **[2025/09]**: Added an explanation of the siiRL [code implementation](/docs/code_explained/siiRL-code-explained.md) for interested users and developers. A [Chinese version](https://zhuanlan.zhihu.com/p/1951768778875605883) is also available on Zhihu.
 
 * **[2025/09]**:siiRL now integrates Megatron training backend with support for MoE training. Performance has been validated on Qwen3-MoE models (30B, 235B).
 
