@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Any
 
 class AgentOutputStatus:
     RUNNING = 0
@@ -15,8 +15,8 @@ class AgentOutput(BaseModel):
     should_stop: bool = False
     response_mask: Optional[List[int]]
     env_obs: Optional[Union[str, List[int]]] = ""
-    ground_truth: str = ''
-    rewards: int = -1
+    ground_truth: Any = ''
+    rewards: int = 0
     status: str = AgentOutputStatus.RUNNING
     turn: int = 0
     request_id: str = "None"
