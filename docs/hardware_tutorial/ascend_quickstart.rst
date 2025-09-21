@@ -13,18 +13,19 @@ Core Environment Requirements
 
 Ensure your environment meets these core software version requirements:
 
-+-----------+-------------+
-| Software  | Version     |
-+-----------+-------------+
-| Python    | == 3.10     |
-+-----------+-------------+
-| CANN      | == 8.1.RC1  |
-+-----------+-------------+
-| PyTorch   | == 2.5.1    |
-+-----------+-------------+
-| torch_npu | == 2.5.1.RC1|
-+-----------+-------------+
-
++---------------------+------------+
+| Software            | Version    |
++---------------------+------------+
+| Python              | == 3.10    |
++---------------------+------------+
+| CANN                | == 8.1.RC1 |
++---------------------+------------+
+| PyTorch             | == 2.5.1   |
++---------------------+------------+
+| torch_npu           | == 2.5.1   |
++---------------------+------------+
+| mindspeed(Optional) | == 0.12.1  |
++---------------------+------------+
 Recommended Base Image
 ^^^^^^^^^^^^^^^^^^^^^^
 
@@ -158,3 +159,19 @@ To ensure your setup is correct, we recommend performing a quick test run. The f
         trainer.total_epochs=300 \
         trainer.device=npu $@
 
+(Optional) Setting Up MindSpeed Training Backend Guide
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Refer to the MindSpeed README <https://gitee.com/ascend/MindSpeed>_ for instructions on installing the MindSpeed acceleration library, recommended versions: MindSpeed Core 0.12.1, Megatron-LM 0.12.2.
+
+.. warning::
+
+   Please Be sure to install **megatron-core** via ``pip install``.  
+   Using ``PYTHONPATH`` to point to megatron will crash the program.
+
+Enable siirl worker model ``strategy`` and set it to ``megatron``. For example: ``actor_rollout_ref.actor.strategy=megatron``.
+
+Custom MindSpeed parameters can be passed through the override_transformer_config option. For instance, to enable FA for the actor model, you can use:
+``+actor_rollout_ref.actor.megatron.override_transformer_config.use_flash_attn=True``.
+
+MindSpeed provides the same support for siiRL and verl. For more feature details, please refer to the MindSpeed+verl documentation. <https://gitee.com/ascend/MindSpeed/blob/master/docs/user-guide/verl.md>_.

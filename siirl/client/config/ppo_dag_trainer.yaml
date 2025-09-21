@@ -208,6 +208,8 @@ actor_rollout_ref:
       n: 1
       do_sample: False # default eager for validation
     multi_turn:
+      # Set to True for multi-agent generation when trajectories from each round of multi-turn are needed for training.
+      use_all_traj: False
       # set to True for multi-turn tool interaction tasks; should set rollout.name to sglang as well
       enable: False
       # null for no limit (default max_length // 3)

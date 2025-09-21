@@ -39,6 +39,8 @@ siiRL documentation
    examples/deepscaler_example
    examples/mm_eureka_example
    examples/cpgd_example
+   examples/multi_agent
+   examples/megatron_backend_example
 
 .. toctree::
    :maxdepth: 1

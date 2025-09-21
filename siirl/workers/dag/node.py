@@ -69,9 +69,15 @@ class NodeStatus(Enum):
 class AgentProcess():
     def __init__(self, agent_options: AgentArguments, node_config):
         from siirl.workers.dag_worker.constants import DAGConstants
+        self.env = None
+        self.post_process = None
+        self.pre_process = None
         intern_config = node_config.get(DAGConstants.INTERN_CONFIG)
         if intern_config is None:
             return
+        # init tokenizer for each node
+        tokenizer_module = load_tokenizer(model_args=intern_config.model)
+        self.tokenizer = tokenizer_module.get("tokenizer")
         if agent_options is None:
             return
         process_path: str = agent_options.process_path
@@ -81,12 +87,9 @@ class AgentProcess():
         
         self.env_path = agent_options.env_path
         self.env_managers = [{}] # map str to env instance
-        self.env = None
+        
         if self.env_path:
             self.init_env_class()
-        # init tokenizer for each node
-        tokenizer_module = load_tokenizer(model_args=intern_config.model)
-        self.tokenizer = tokenizer_module.get("tokenizer")
         
         self.env_handles = None
     def load_attr(self, file_path, attr_name):
@@ -238,8 +241,7 @@ class Node:
                 config=dacite.Config(strict=False)    # 允许 YAML 比 dataclass 字段多
             )
         self.agent_options = agent_options
-        if self.agent_options is not None:
-            self.agent_process = AgentProcess(agent_options, self.config)
+        self.agent_process = AgentProcess(agent_options, self.config)
         if self.executable_ref:
             self._resolve_executable()
 
