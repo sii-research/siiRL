@@ -2,6 +2,7 @@ Ascend NPU
 ==========
 
 SiiRL is also supports for Huawei's Ascend NPU devices. This guide has been tested with the following hardware:
+
 - Atlas 200T A2 Box16
 
 Installation Process
@@ -126,7 +127,7 @@ To ensure your setup is correct, we recommend performing a quick test run. The f
         data.max_response_length=1024 \
         data.filter_overlong_prompts=True \
         data.truncation='error' \
-        actor_rollout_ref.model.path=/models/Qwen2.5-7B-Instruct \
+        actor_rollout_ref.model.path=/models/Qwen2.5-0.5B-Instruct \
         actor_rollout_ref.actor.optim.lr=5e-8 \
         actor_rollout_ref.model.use_remove_padding=False \
         actor_rollout_ref.actor.ppo_mini_batch_size=32 \
@@ -150,7 +151,7 @@ To ensure your setup is correct, we recommend performing a quick test run. The f
         trainer.critic_warmup=0 \
         trainer.logger=['console'] \
         trainer.project_name='siirl_grpo_example_gsm8k' \
-        trainer.experiment_name='qwen2_7b_function_rm' \
+        trainer.experiment_name='qwen2_05b_function_rm' \
         trainer.n_gpus_per_node=16 \
         trainer.nnodes=$NNODES \
         trainer.save_freq=-1 \
