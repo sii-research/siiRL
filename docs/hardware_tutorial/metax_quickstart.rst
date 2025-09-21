@@ -15,7 +15,7 @@ For a smoother setup, we strongly recommend using our pre-built Docker image, wh
 
 .. code-block:: bash
 
-    docker pull cr.metax-tech.com/public-ai-release/maca/verl:maca.ai3.1.0.1-torch2.6-py310-ubuntu22.04-amd64
+    docker pull siiai/siirl-metax:maca.ai3.1.0.1-torch2.6-py310-ubuntu22.04-amd64
 
 Start docker container
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -27,7 +27,7 @@ Start docker container
     --security-opt apparmor=unconfined --device=/dev/dri --device=/dev/mxcd --device=/dev/infiniband \
     -v /data/:/data/ \
     --name siirl \
-    cr.metax-tech.com/public-ai-release/maca/verl:maca.ai3.1.0.1-torch2.6-py310-ubuntu22.04-amd64 bash
+    siiai/siirl-metax:maca.ai3.1.0.1-torch2.6-py310-ubuntu22.04-amd64 bash
 
 SiiRL Installation
 ^^^^^^^^^^^^^^^^^^
