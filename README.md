@@ -48,7 +48,7 @@ By eliminating the centralized controller common in other frameworks, siiRL deli
 
 * **[2025/09]**:siiRL now integrates Megatron training backend with support for MoE training. Performance has been validated on Qwen3-MoE models (30B, 235B).
 
-* **[2025/09]**:siiRL now supports stable scaling on GPU clusters from 32 GPUs up to 1024 GPUs, with over 90% linear scalability efficiency, through collaboration with major manufacturers including Huawei Ascend, MetaX, and Alibaba Cloud.
+* **[2025/09]**:siiRL now supports stable scaling on GPU clusters from 32 GPUs up to 1024 GPUs, with over 90% linear scalability efficiency, through collaboration with major manufacturers including Huawei Ascend, MetaX, and Alibaba PPU.
 
 * **[2025/09]**:siiRL supports multi-turn interactions among multi-agents with the environment.
 
