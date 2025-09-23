@@ -452,9 +452,7 @@ class ActorRolloutRefWorker(MegatronWorker):
                 if "tags" in inspect.signature(self.rollout.inference_engine.wake_up).parameters:
                     self.rollout.inference_engine.wake_up(tags=["kv_cache"])
 
-            prompts = self.sharding_manager.preprocess_data(prompts)
             output = self.rollout.generate_sequences(prompts=prompts)
-            output = self.sharding_manager.postprocess_data(output)
 
         output = output.to("cpu")
         # clear kv cache
@@ -1270,6 +1268,7 @@ class RolloutWorker(MegatronWorker):
                 tokenizer=self.tokenizer,
                 model_hf_config=self.hf_config,
                 trust_remote_code=trust_remote_code,
+                processing_class=self.processor if self.processor is not None else self.tokenizer,
                 device_mesh=rollout_device_mesh,
             )
             log_gpu_memory_usage(f"After building {self.config.rollout.name} rollout", logger=None)
