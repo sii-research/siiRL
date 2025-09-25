@@ -15,7 +15,7 @@
 
 from siirl.workers.base_worker.base.worker import DistGlobalInfo, DistRankInfo, Worker
 from siirl.utils.params import ActorRolloutRefArguments
-
+from siirl.utils.extras.device import is_npu_available
 
 class MegatronWorker(Worker):
     def __init__(self, cuda_visible_devices=None) -> None:
@@ -111,6 +111,10 @@ class MegatronWorker(Worker):
         add_optimization_config_to_tf_config(tf_config)
 
         if use_mbridge:
+            if is_npu_available:
+                if self.rank == 0:
+                    print(f"Patching mbridge for NPU ......")
+                from . import npu_mbridge_patch
             from siirl.models.mcore.mbridge import AutoBridge
 
             bridge = AutoBridge.from_config(hf_config)
