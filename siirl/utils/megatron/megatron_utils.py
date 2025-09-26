@@ -376,6 +376,8 @@ def load_megatron_model_to_gpu(models, load_grad=True):
                         buffer.param_data.storage().resize_(buffer.param_data_size)
                         # copy data from cpu to cuda
                         buffer.param_data.copy_(buffer.param_data.cpu_data, non_blocking=True)
+                        # gc might free the cpu_data, but we manually do this for sure to avoid potential memory leak
+                        del buffer.param_data.cpu_data
         else:
             # we need this for ref module
             device_id = get_device_id()

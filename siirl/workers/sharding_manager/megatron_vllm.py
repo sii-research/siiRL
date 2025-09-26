@@ -16,6 +16,7 @@ This file contains a Megatron style Hybrid Engine that shares the weights of the
 """
 
 import inspect
+import gc
 
 import torch
 import torch.distributed
@@ -349,6 +350,11 @@ class MultiAgentMegatronVLLMShardingManager(BaseShardingManager):
         info = f"vLLM load weights, loaded_params: {len(loaded_params)}"
         logger.info(info)
 
+        # (Ping Zhang) Explicitly delete the generator and collected params to free memory
+        del per_tensor_param
+        del loaded_params
+        gc.collect()
+
         if self.offload_param:
             offload_megatron_model_to_cpu(self.actor_module)
         aggressive_empty_cache(force_sync=True)
@@ -368,12 +374,12 @@ class MultiAgentMegatronVLLMShardingManager(BaseShardingManager):
 
     @GPUMemoryLogger(role="megatron vllm sharding_manager", logger=logger)
     def __exit__(self, exc_type, exc_value, traceback):
-        self.inference_engine.sleep(level=1)
+        if self.rollout_config.free_cache_engine:
+            self.inference_engine.sleep(level=2)
         for model in self.actor_module:
             model.train()
 
-        get_torch_device().empty_cache()
-
+        aggressive_empty_cache(force_sync=True)
         set_expandable_segments(True)
 
         # restore random states
