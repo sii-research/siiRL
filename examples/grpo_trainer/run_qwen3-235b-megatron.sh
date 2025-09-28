@@ -31,7 +31,7 @@ export MAX_PROMPT_LENGTH=$((1024 * 2))
 export MAX_RESPONSE_LENGTH=$((1024 * 8))
 export MAX_MODEL_LENGTH=$((1024 * 10))
 
-export ROLLOUT_GPU_MEMORY_UTILIZATION=0.6
+export ROLLOUT_GPU_MEMORY_UTILIZATION=0.4
 
 export ROLLOUT_TP=16
 export ROLLOUT_N=16
@@ -107,6 +107,9 @@ TRAINING_CMD=(
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
     +actor_rollout_ref.actor.megatron.override_transformer_config.account_for_embedding_in_pipeline_split=True
     +actor_rollout_ref.actor.megatron.override_transformer_config.account_for_loss_in_pipeline_split=True
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
     actor_rollout_ref.actor.policy_drift_coeff=0.001
     actor_rollout_ref.actor.ppo_mini_batch_size=\$PPO_MINI_BATCH_SIZE
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
