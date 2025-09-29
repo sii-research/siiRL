@@ -60,29 +60,29 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, Processor
 
 from siirl import DataProto
 
-from siirl.multiturn.interactions.base import BaseInteraction
-from siirl.multiturn.interactions.utils.interaction_registry import initialize_interactions_from_config
+from siirl.execution.rollout_flow.multiturn.interactions.base import BaseInteraction
+from siirl.execution.rollout_flow.multiturn.interactions.utils.interaction_registry import initialize_interactions_from_config
 from siirl.third_party.sglang import parallel_state as sglang_ps
-from siirl.multiturn.tools.base_tool import BaseTool
-from siirl.multiturn.tools.schemas import OpenAIFunctionCallSchema, OpenAIFunctionParsedSchema, OpenAIFunctionToolCall
-from siirl.multiturn.tools.utils.tool_registry import initialize_tools_from_config
+from siirl.execution.rollout_flow.multiturn.tools.base_tool import BaseTool
+from siirl.execution.rollout_flow.multiturn.tools.schemas import OpenAIFunctionCallSchema, OpenAIFunctionParsedSchema, OpenAIFunctionToolCall
+from siirl.execution.rollout_flow.multiturn.tools.utils.tool_registry import initialize_tools_from_config
 
 
 from siirl.utils.extras.net_utils import is_ipv6
 from siirl.utils.debug import GPUMemoryLogger
 from siirl.utils.model_utils.torch_functional import get_response_mask, pad_sequence_to_length
-from siirl.workers.rollout.base import BaseRollout
+from siirl.engine.rollout.base import BaseRollout
 
 
-from siirl.workers.rollout.schemas import (
+from siirl.engine.rollout.schemas import (
     AsyncRolloutRequest,
     AsyncRolloutRequestStateEnum,
     FinishReasonTypeEnum,
     Message,
 )
 
-from siirl.utils.params import RolloutArguments
-from siirl.workers.rollout.sglang_rollout.utils import broadcast_pyobj
+from siirl.global_config.params import RolloutArguments
+from siirl.engine.rollout.sglang_rollout.utils import broadcast_pyobj
 from loguru import logger
 
 try:

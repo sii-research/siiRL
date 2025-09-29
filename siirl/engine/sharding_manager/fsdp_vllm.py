@@ -36,7 +36,7 @@ from siirl.utils.extras.device import get_device_id, get_device_name, get_torch_
 from siirl.utils.model_utils.fsdp_utils import fsdp_version, layered_summon_lora_params, load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
 from siirl.utils.model_utils.torch_functional import check_device_is_available
 from siirl.utils.model_utils.vllm_utils import TensorLoRARequest, VLLMHijack, patch_vllm_moe_model_weight_loader
-from siirl.workers.sharding_manager.base import BaseShardingManager
+from siirl.engine.sharding_manager.base import BaseShardingManager
 
 
 class MultiAgentFSDPVLLMShardingManager(BaseShardingManager):

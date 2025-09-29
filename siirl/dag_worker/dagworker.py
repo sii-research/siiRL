@@ -21,12 +21,12 @@ from loguru import logger
 from torch.distributed import ProcessGroup
 
 from siirl.models.loader import TokenizerModule
-from siirl.scheduler.process_group_manager import ProcessGroupManager
-from siirl.utils.params import SiiRLArguments
-from siirl.workers.base_worker import Worker
-from siirl.workers.dag import TaskGraph
-from siirl.workers.dag.node import NodeRole
-from siirl.workers.databuffer import DataProto
+from siirl.execution.scheduler.process_group_manager import ProcessGroupManager
+from siirl.global_config.params import SiiRLArguments
+from siirl.engine.base_worker import Worker
+from siirl.execution.dag import TaskGraph
+from siirl.execution.dag.node import NodeRole
+from siirl.data_coordinator import DataProto
 
 from .constants import DAGInitializationError
 from .mixins.execution_mixin import ExecutionMixin

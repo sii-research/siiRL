@@ -28,9 +28,9 @@ import ray
 from loguru import logger
 
 from siirl import DataProto
-from siirl.utils.params import SiiRLArguments
+from siirl.global_config.params import SiiRLArguments
 from siirl.utils.reward_score import default_compute_score
-from siirl.workers.reward_manager import (
+from siirl.engine.reward_manager import (
     DAPORewardManager,
     BatchRewardManager,
     NaiveRewardManager,

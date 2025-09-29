@@ -95,11 +95,11 @@ def async_server_class(
         # importlib.import_module and from ... import ... have subtle differences in ray
 
         if rollout_backend == "vllm":
-            from siirl.workers.rollout.vllm_rollout.vllm_async_server import AsyncvLLMServer
+            from siirl.engine.rollout.vllm_rollout.vllm_async_server import AsyncvLLMServer
 
             return AsyncvLLMServer
         elif rollout_backend == "sglang":
-            from siirl.workers.rollout.sglang_rollout.async_sglang_server import AsyncSglangServer
+            from siirl.engine.rollout.sglang_rollout.async_sglang_server import AsyncSglangServer
 
             raise NotImplementedError(f"async sglang has not supported")
             return AsyncSglangServer

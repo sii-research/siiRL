@@ -23,15 +23,15 @@ from torch import nn, optim
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from siirl import DataProto
-from siirl.workers.dag_worker import core_algos
+from siirl.dag_worker import core_algos
 from siirl.utils.extras.device import get_device_id, get_device_name, is_cuda_available, is_npu_available
 from siirl.utils.model_utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from siirl.utils.extras.py_functional import append_to_dict
 from siirl.utils.model_utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from siirl.utils.model_utils.torch_functional import masked_mean
 from siirl.utils.model_utils.ulysses import gather_outpus_and_unpad, ulysses_pad_and_slice_inputs
-from siirl.workers.critic import BasePPOCritic
-from siirl.utils.params.model_args import CriticArguments
+from siirl.engine.critic import BasePPOCritic
+from siirl.global_config.params.model_args import CriticArguments
 
 if is_cuda_available:
     from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input

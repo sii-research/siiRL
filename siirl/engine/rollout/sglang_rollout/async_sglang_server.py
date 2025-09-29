@@ -23,8 +23,8 @@ from omegaconf import DictConfig
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from siirl.workers.rollout.async_server import AsyncServerBase
-from siirl.utils.params.model_args import ActorRolloutRefArguments
+from siirl.engine.rollout.async_server import AsyncServerBase
+from siirl.global_config.params.model_args import ActorRolloutRefArguments
 logger = logging.getLogger(__file__)
 
 

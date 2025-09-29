@@ -18,7 +18,7 @@ from typing import Callable, Optional
 import torch
 import torch.distributed
 
-from siirl.utils.params import ProfilerArguments
+from siirl.global_config.params import ProfilerArguments
 from siirl.utils.extras.import_utils import is_nvtx_available
 from loguru import logger
 

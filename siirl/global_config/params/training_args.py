@@ -14,15 +14,15 @@
 
 from dataclasses import asdict, dataclass, field
 from typing import Optional, Dict, List, Any
-from siirl.utils.params.data_args import DataArguments
-from siirl.utils.params.model_args import (
+from siirl.global_config.params.data_args import DataArguments
+from siirl.global_config.params.model_args import (
     ActorRolloutRefArguments,
     CriticArguments,
     RewardModelArguments,
     AlgorithmArguments,
 )
-from siirl.utils.params.dag_args import DagArguments
-from siirl.utils.params.profiler_args import ProfilerArguments
+from siirl.global_config.params.dag_args import DagArguments
+from siirl.global_config.params.profiler_args import ProfilerArguments
 
 
 @dataclass

@@ -17,8 +17,8 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from loguru import logger
 
-from siirl.utils.params import log_dict_formatted
-from siirl.utils.params.model_args import AgentArguments
+from siirl.global_config.params import log_dict_formatted
+from siirl.global_config.params.model_args import AgentArguments
 from siirl.models.loader import load_tokenizer
 import dacite
 class NodeType(Enum):
@@ -68,7 +68,7 @@ class NodeStatus(Enum):
 
 class AgentProcess():
     def __init__(self, agent_options: AgentArguments, node_config):
-        from siirl.workers.dag_worker.constants import DAGConstants
+        from siirl.dag_worker.constants import DAGConstants
         self.env = None
         self.post_process = None
         self.pre_process = None

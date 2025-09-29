@@ -29,14 +29,14 @@ from omegaconf import OmegaConf
 from torch import nn
 
 from siirl import DataProto
-from siirl.workers.dag_worker import core_algos
+from siirl.dag_worker import core_algos
 from siirl.utils.debug import GPUMemoryLogger
 from siirl.utils.extras.device import get_device_id, get_torch_device
 from siirl.utils.megatron.pipeline_parallel import make_batch_generator
 from siirl.utils.extras.py_functional import append_to_dict
 from siirl.utils.model_utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from siirl.utils.model_utils.torch_functional import broadcast_dict_tensor, masked_mean
-from siirl.workers.critic import BasePPOCritic
+from siirl.engine.critic import BasePPOCritic
 
 
 class MegatronPPOCritic(BasePPOCritic):

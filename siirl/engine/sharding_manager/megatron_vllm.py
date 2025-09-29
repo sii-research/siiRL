@@ -47,7 +47,7 @@ from siirl.utils.model_utils.torch_functional import check_device_is_available
 from siirl.utils.model_utils.vllm_utils import patch_vllm_moe_model_weight_loader
 from siirl.utils.memory_utils import aggressive_empty_cache
 
-from siirl.workers.sharding_manager.base import BaseShardingManager
+from siirl.engine.sharding_manager.base import BaseShardingManager
 
 from loguru import logger
 

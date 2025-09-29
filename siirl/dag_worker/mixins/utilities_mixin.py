@@ -33,17 +33,17 @@ from loguru import logger
 from tensordict import TensorDict
 from zoneinfo import ZoneInfo
 
-from siirl.dataloader import DataLoaderNode
+from siirl.data_coordinator.dataloader import DataLoaderNode
 from siirl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from siirl.utils.extras.device import device_synchronize, get_device_id, get_device_name
 from siirl.utils.metrics.metric_utils import compute_throughout_metrics, compute_timing_metrics
-from siirl.utils.params import SiiRLArguments
-from siirl.workers.base_worker import Worker
-from siirl.workers.dag import TaskGraph
-from siirl.workers.dag.node import Node, NodeRole, NodeType
-from siirl.workers.databuffer import DataProto
-from siirl.workers.dag_worker.dag_utils import add_prefix_to_dataproto, remove_prefix_from_dataproto, add_prefix_to_metrics
-from siirl.workers.databuffer.protocol import collate_fn
+from siirl.global_config.params import SiiRLArguments
+from siirl.engine.base_worker import Worker
+from siirl.execution.dag import TaskGraph
+from siirl.execution.dag.node import Node, NodeRole, NodeType
+from siirl.data_coordinator import DataProto
+from siirl.dag_worker.dag_utils import add_prefix_to_dataproto, remove_prefix_from_dataproto, add_prefix_to_metrics
+from siirl.data_coordinator.protocol import collate_fn
 
 
 class _ReduceOp(Enum):
@@ -319,7 +319,7 @@ class UtilitiesMixin:
         - A barrier ensures all file writes are complete before committing.
         - Only Rank 0 updates the tracker file, effectively "committing" the checkpoint atomically.
         """
-        from siirl.workers.dag.node import NodeType
+        from siirl.execution.dag.node import NodeType
 
         step_dir = os.path.join(self.config.trainer.default_local_dir, f"global_step_{self.global_steps}")
         os.makedirs(step_dir, exist_ok=True)
@@ -384,7 +384,7 @@ class UtilitiesMixin:
           decision. This is essential to prevent inconsistencies from filesystem latency.
         - It constructs agent-specific paths to load the correct state for each agent.
         """
-        from siirl.workers.dag.node import NodeType
+        from siirl.execution.dag.node import NodeType
 
         if self.config.trainer.resume_mode == "disable":
             if self._rank == 0:

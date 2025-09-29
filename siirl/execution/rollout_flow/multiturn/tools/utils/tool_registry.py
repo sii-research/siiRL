@@ -21,7 +21,7 @@ from enum import Enum
 
 from omegaconf import OmegaConf
 
-from siirl.multiturn.tools.schemas import OpenAIFunctionToolSchema
+from siirl.execution.rollout_flow.multiturn.tools.schemas import OpenAIFunctionToolSchema
 
 from loguru import logger
 
@@ -32,7 +32,7 @@ class ToolType(Enum):
 
 
 async def initialize_mcp_tool(tool_cls, tool_config) -> list:
-    from siirl.multiturn.tools.utils.mcp_clients.McpClientManager import ClientManager
+    from siirl.execution.rollout_flow.multiturn.tools.utils.mcp_clients.McpClientManager import ClientManager
 
     tool_list = []
     mcp_servers_config_path = tool_config.mcp.mcp_servers_config_path

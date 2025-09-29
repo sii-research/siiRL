@@ -43,13 +43,13 @@ from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataP
 from torch.distributed.tensor import DTensor
 
 from siirl import DataProto
-from siirl.workers.databuffer.protocol import all_gather_data_proto
+from siirl.data_coordinator.protocol import all_gather_data_proto
 from siirl.utils.debug import log_gpu_memory_usage
 from siirl.utils.extras.device import get_device_id, get_device_name, get_torch_device
 from siirl.utils.model_utils.fsdp_utils import fsdp_version, load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
 from siirl.utils.model_utils.torch_functional import broadcast_dict_tensor, check_device_is_available
 from loguru import logger
-from siirl.workers.sharding_manager.base import BaseShardingManager
+from siirl.engine.sharding_manager.base import BaseShardingManager
 from siirl.utils.extras.device import get_device_id, get_torch_device
 from siirl.utils.model_utils.model import convert_weight_keys
 # from vllm.distributed import parallel_state as sglang_ps

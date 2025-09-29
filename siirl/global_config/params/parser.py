@@ -17,7 +17,7 @@ from typing import Any
 import transformers
 from omegaconf import OmegaConf, DictConfig
 
-from siirl.utils.params.training_args import SiiRLArguments
+from siirl.global_config.params.training_args import SiiRLArguments
 
 
 def _set_transformers_logging() -> None:

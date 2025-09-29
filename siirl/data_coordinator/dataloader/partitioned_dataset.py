@@ -31,7 +31,7 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 
 import siirl.utils.model_utils.torch_functional as F
 from siirl.utils.model_utils.model import compute_position_id_with_mask
-from siirl.utils.params import SiiRLArguments
+from siirl.global_config.params import SiiRLArguments
 
 
 def collate_fn(data_list: list[dict]) -> dict:
@@ -313,7 +313,7 @@ class PartitionedRLHFDataset(Dataset):
         if self.processor is not None:
             # Note: Vision processing is kept here for simplicity.
             # For extreme performance, you might consider pre-serializing images/videos.
-            from siirl.dataloader.vision_utils import process_image, process_video
+            from siirl.data_coordinator.dataloader.vision_utils import process_image, process_video
 
             raw_prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
 

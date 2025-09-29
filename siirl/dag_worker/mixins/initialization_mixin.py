@@ -21,15 +21,15 @@ import torch
 import torch.distributed as dist
 from loguru import logger
 
-from siirl.dataloader import DataLoaderNode
+from siirl.data_coordinator.dataloader import DataLoaderNode
 from siirl.models.loader import load_tokenizer
-from siirl.scheduler.enums import AlgorithmType
-from siirl.scheduler.reward import create_reward_manager
+from siirl.execution.scheduler.enums import AlgorithmType
+from siirl.execution.scheduler.reward import create_reward_manager
 from siirl.utils.debug import DistProfiler
 from siirl.utils.extras.device import get_device_name, get_nccl_backend
-from siirl.workers.base_worker import Worker
-from siirl.workers.dag.node import NodeRole, NodeType
-from siirl.workers.dag_worker.constants import DAGConstants
+from siirl.engine.base_worker import Worker
+from siirl.execution.dag.node import NodeRole, NodeType
+from siirl.dag_worker.constants import DAGConstants
 from siirl.utils.import_string import import_string
 
 device_name = get_device_name()
@@ -43,12 +43,12 @@ class InitializationMixin:
     from torch.distributed import ProcessGroup
 
     from siirl.models.loader import TokenizerModule
-    from siirl.scheduler.process_group_manager import ProcessGroupManager
+    from siirl.execution.scheduler.process_group_manager import ProcessGroupManager
     from siirl.utils.logger.tracking import Tracking
-    from siirl.utils.params import SiiRLArguments
-    from siirl.workers.base_worker import Worker
-    from siirl.workers.dag import TaskGraph
-    from siirl.workers.dag.node import Node, NodeRole
+    from siirl.global_config.params import SiiRLArguments
+    from siirl.engine.base_worker import Worker
+    from siirl.execution.dag import TaskGraph
+    from siirl.execution.dag.node import Node, NodeRole
 
     # Attributes from DAGWorker's __init__
     config: SiiRLArguments
@@ -116,7 +116,7 @@ class InitializationMixin:
         if self._rank not in taskgraph_mapping:
             raise ValueError(f"Rank {self._rank} not found in the provided taskgraph_mapping.")
         taskgraph = taskgraph_mapping[self._rank]
-        from siirl.workers.dag import TaskGraph
+        from siirl.execution.dag import TaskGraph
 
         if not isinstance(taskgraph, TaskGraph):
             raise TypeError(f"Object for rank {self._rank} must be a TaskGraph, but got {type(taskgraph).__name__}.")
@@ -313,7 +313,7 @@ class InitializationMixin:
         )
 
         if self.config.algorithm.use_kl_in_reward:
-            from siirl.workers.dag_worker import core_algos
+            from siirl.dag_worker import core_algos
 
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
@@ -322,7 +322,7 @@ class InitializationMixin:
     def _get_worker_classes(self, strategy: str) -> Dict[NodeRole, Type[Worker]]:
         """Dynamically imports worker classes based on the specified strategy."""
         if strategy in DAGConstants.FSDP_STRATEGIES:
-            from siirl.workers.fsdp_workers import (
+            from siirl.engine.fsdp_workers import (
                 ActorRolloutRefWorker,
                 AsyncActorRolloutRefWorker,
                 CriticWorker,
@@ -342,7 +342,7 @@ class InitializationMixin:
                 NodeRole.REWARD: RewardModelWorker,
             }
         elif strategy in DAGConstants.MEGATRON_STRATEGYS:
-            from siirl.workers.megatron_workers import (
+            from siirl.engine.megatron_workers import (
                 ActorWorker, 
                 RolloutWorker, 
                 AsyncRolloutWorker, 
@@ -635,7 +635,7 @@ class InitializationMixin:
                     raise
         logger.info("All models and sharding managers initialized successfully.")
         if self._multi_agent:
-            from siirl.workers.multi_agent.multiagent_generate import MultiAgentLoop
+            from siirl.engine.multi_agent.multiagent_generate import MultiAgentLoop
             self.multi_agent_loop =  MultiAgentLoop(self, config = self.config.actor_rollout_ref, node_workers = self.workers, local_dag = self.taskgraph, databuffer = self.data_buffers, placement_mode = 'colocate')
         
     def _setup_sharding_manager(self, agent_group: int, worker_dict: Dict[NodeRole, Worker]):
@@ -659,7 +659,7 @@ class InitializationMixin:
         # Use lazy import and defer execution.
         sharding_manager_map = {
             ("fsdp", "vllm"): (
-                "siirl.workers.sharding_manager.fsdp_vllm.MultiAgentFSDPVLLMShardingManager",
+                "siirl.engine.sharding_manager.fsdp_vllm.MultiAgentFSDPVLLMShardingManager",
                 lambda: {
                     "module": actor_worker.actor_module_fsdp,
                     "inference_engine": rollout_worker.rollout.inference_engine,
@@ -670,7 +670,7 @@ class InitializationMixin:
                 },
             ),
             ("fsdp", "sglang"): (
-                "siirl.workers.sharding_manager.fsdp_sglang.MultiAgentFSDPSGLangShardingManager",
+                "siirl.engine.sharding_manager.fsdp_sglang.MultiAgentFSDPSGLangShardingManager",
                 lambda: {
                     "module": actor_worker.actor_module_fsdp,
                     "inference_engine": rollout_worker.rollout.inference_engine,
@@ -690,7 +690,7 @@ class InitializationMixin:
                 },
             ),
             ("megatron", "vllm"): (
-                "siirl.workers.sharding_manager.megatron_vllm.MultiAgentMegatronVLLMShardingManager",
+                "siirl.engine.sharding_manager.megatron_vllm.MultiAgentMegatronVLLMShardingManager",
                 lambda: {
                     "actor_module": actor_worker.actor_module,
                     "inference_engine": rollout_worker.rollout.inference_engine,
@@ -706,7 +706,7 @@ class InitializationMixin:
             ),
             # TODO(Ping Zhang): update for SGLang later
             ("megatron", "sglang"): (
-                "siirl.workers.sharding_manager.megatron_sglang.MultiAgentMegatronSGLangShardingManager",
+                "siirl.engine.sharding_manager.megatron_sglang.MultiAgentMegatronSGLangShardingManager",
                 lambda: {
                     "actor_module": actor_worker.actor_module,
                     "inference_engine": rollout_worker.rollout.inference_engine,

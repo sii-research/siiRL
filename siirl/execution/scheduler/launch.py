@@ -17,10 +17,10 @@ from typing import Any, Dict, List
 import ray
 from loguru import logger
 
-from siirl.workers.dag import Node, NodeRole, NodeType, TaskGraph
+from siirl.execution.dag import Node, NodeRole, NodeType, TaskGraph
 
-from siirl.utils.params import ActorRolloutRefArguments, ActorArguments, RefArguments, RolloutArguments, CriticArguments, RewardModelArguments, SiiRLArguments
-from siirl.scheduler.enums import AdvantageEstimator
+from siirl.global_config.params import ActorRolloutRefArguments, ActorArguments, RefArguments, RolloutArguments, CriticArguments, RewardModelArguments, SiiRLArguments
+from siirl.execution.scheduler.enums import AdvantageEstimator
 
 from .process_group_manager import ProcessGroupManager
 from .ray_actor_manager import RayActorManager

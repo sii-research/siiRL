@@ -21,11 +21,11 @@ from loguru import logger
 from tqdm import tqdm
 
 from siirl.utils.debug import DistProfiler
-from siirl.workers.dag.node import Node, NodeType
-from siirl.workers.dag_worker.constants import DAGConstants
-from siirl.workers.dag_worker.dag_utils import add_prefix_to_dataproto, remove_prefix_from_dataproto, add_prefix_to_metrics
-from siirl.workers.dag_worker.data_structures import NodeOutput
-from siirl.workers.databuffer import DataProto
+from siirl.execution.dag.node import Node, NodeType
+from siirl.dag_worker.constants import DAGConstants
+from siirl.dag_worker.dag_utils import add_prefix_to_dataproto, remove_prefix_from_dataproto, add_prefix_to_metrics
+from siirl.dag_worker.data_structures import NodeOutput
+from siirl.data_coordinator import DataProto
 
 class ExecutionMixin:
     """Handles the core DAG execution and training loop logic."""
@@ -35,11 +35,11 @@ class ExecutionMixin:
     import torch.distributed as dist
     from tqdm import tqdm
 
-    from siirl.dataloader import DataLoaderNode
+    from siirl.data_coordinator.dataloader import DataLoaderNode
     from siirl.utils.logger.tracking import Tracking
-    from siirl.utils.params import SiiRLArguments
-    from siirl.workers.dag import TaskGraph
-    from siirl.workers.databuffer import DataProto
+    from siirl.global_config.params import SiiRLArguments
+    from siirl.execution.dag import TaskGraph
+    from siirl.data_coordinator import DataProto
 
     _rank: int
     global_steps: int
@@ -265,7 +265,7 @@ class ExecutionMixin:
 
                         cur_dp_size, cur_dp_rank, cur_tp_rank, cur_tp_size, cur_pp_rank, cur_pp_size = self._get_node_dp_info(cur_node)
                         logger.debug(f"current node({cur_node.node_id}) dp_size: {cur_dp_size}, dp_rank: {cur_dp_rank}, tp_rank: {cur_tp_rank}, pp_rank: {cur_pp_rank}, pp_size: {cur_pp_size}")
-                    from siirl.workers.dag.node import NodeRole
+                    from siirl.execution.dag.node import NodeRole
                 
                     # --- 3. Get Input Data ---
                     if cur_node.node_id != entry_node_id:

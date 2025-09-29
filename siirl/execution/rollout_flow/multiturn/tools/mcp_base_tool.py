@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from fastmcp.exceptions import ClientError
 
-from siirl.multiturn.tools.utils.mcp_clients.McpClientManager import ClientManager
+from siirl.execution.rollout_flow.multiturn.tools.utils.mcp_clients.McpClientManager import ClientManager
 
 from .base_tool import BaseTool
 from .schemas import OpenAIFunctionToolSchema

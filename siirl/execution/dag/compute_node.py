@@ -16,12 +16,12 @@ from typing import Any, Dict, Optional
 
 from loguru import logger
 
-from siirl.scheduler.enums import AdvantageEstimator
-from siirl.scheduler.reward import compute_reward
-from siirl.utils.params import SiiRLArguments
-from siirl.workers.dag import Node, NodeRole, NodeStatus, NodeType
-from siirl.workers.dag_worker import core_algos
-from siirl.workers.databuffer import DataProto
+from siirl.execution.scheduler.enums import AdvantageEstimator
+from siirl.execution.scheduler.reward import compute_reward
+from siirl.global_config.params import SiiRLArguments
+from siirl.execution.dag import Node, NodeRole, NodeStatus, NodeType
+from siirl.dag_worker import core_algos
+from siirl.data_coordinator import DataProto
 
 
 class ComputeNode(Node):

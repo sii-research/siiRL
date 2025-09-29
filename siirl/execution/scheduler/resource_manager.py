@@ -23,7 +23,7 @@
 
 import time
 import ray
-from siirl.workers.base_worker import RayResourcePool
+from siirl.engine.base_worker import RayResourcePool
 from dataclasses import dataclass, field
 from loguru import logger
 

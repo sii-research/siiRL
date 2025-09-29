@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from siirl.workers.base_worker.base.worker import DistGlobalInfo, DistRankInfo, Worker
-from siirl.utils.params import ActorRolloutRefArguments
+from siirl.engine.base_worker.base.worker import DistGlobalInfo, DistRankInfo, Worker
+from siirl.global_config.params import ActorRolloutRefArguments
 from siirl.utils.extras.device import is_npu_available
 
 class MegatronWorker(Worker):

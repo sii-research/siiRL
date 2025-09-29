@@ -31,7 +31,7 @@ from siirl import DataProto
 from siirl.utils.extras.device import get_device_name, get_torch_device
 from siirl.utils.model_utils.torch_functional import get_response_mask
 
-from siirl.workers.rollout.base import BaseRollout
+from siirl.engine.rollout.base import BaseRollout
 
 __all__ = ["HFRollout"]
 

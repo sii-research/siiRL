@@ -22,7 +22,7 @@ import torch
 from pydantic import BaseModel, ConfigDict, model_validator
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin
 
-from siirl.multiturn.tools.schemas import OpenAIFunctionToolCall, OpenAIFunctionToolSchema
+from siirl.execution.rollout_flow.multiturn.tools.schemas import OpenAIFunctionToolCall, OpenAIFunctionToolSchema
 from siirl.utils.model_utils.model import compute_position_id_with_mask
 from loguru import logger
 

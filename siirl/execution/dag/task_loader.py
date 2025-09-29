@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Tuple, Set
 import itertools
 
 from loguru import logger
-from siirl.workers.dag import Node, NodeType, TaskGraph
+from siirl.execution.dag import Node, NodeType, TaskGraph
 
 
 def generate_structural_signature(graph: TaskGraph) -> str:

@@ -18,8 +18,8 @@ from typing import Any, Dict, List, Optional
 import yaml
 from loguru import logger
 
-from siirl.workers.dag.node import Node, NodeRole, NodeType
-from siirl.workers.dag.task_graph import TaskGraph
+from siirl.execution.dag.node import Node, NodeRole, NodeType
+from siirl.execution.dag.task_graph import TaskGraph
 
 
 class Ref:

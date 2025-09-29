@@ -119,7 +119,7 @@ class Worker(WorkerHelper):
             }
 
             if os.getenv("WG_BACKEND", None) == "ray":
-                from siirl.workers.base_worker.register_center.register_center import create_worker_group_register_center
+                from siirl.engine.base_worker.register_center.register_center import create_worker_group_register_center
 
                 self.register_center = create_worker_group_register_center(name=register_center_name, info=rank_zero_info)
 

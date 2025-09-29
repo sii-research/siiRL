@@ -16,9 +16,9 @@ import collections
 import re
 from typing import List, Dict, Callable, Optional, Tuple, Set
 from loguru import logger
-from siirl.workers.dag.node import Node, NodeType
-from siirl.workers.dag.task_graph import TaskGraph
-from siirl.workers.dag.task_loader import discover_and_split_parallel_paths
+from siirl.execution.dag.node import Node, NodeType
+from siirl.execution.dag.task_graph import TaskGraph
+from siirl.execution.dag.task_loader import discover_and_split_parallel_paths
 
 
 def _parse_model_params_string(params_value: any) -> float:

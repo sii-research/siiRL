@@ -28,7 +28,7 @@ from siirl.utils.extras.device import get_device_id, get_device_name, get_torch_
 from siirl.utils.megatron.pipeline_parallel import make_batch_generator
 from siirl.utils.model_utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from siirl.utils.model_utils.torch_functional import broadcast_dict_tensor, pad_sequence_to_length
-from siirl.workers.reward_model.base import BasePPORewardModel
+from siirl.engine.reward_model.base import BasePPORewardModel
 
 
 class MegatronRewardModel(BasePPORewardModel):

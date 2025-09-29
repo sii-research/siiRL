@@ -17,9 +17,9 @@ from typing import Any, Dict
 
 import numpy as np
 
-from siirl.utils.params import SiiRLArguments
-from siirl.workers.dag_worker.data_structures import NodeOutput
-from siirl.workers.databuffer import DataProto
+from siirl.global_config.params import SiiRLArguments
+from siirl.dag_worker.data_structures import NodeOutput
+from siirl.data_coordinator import DataProto
 
 
 def dynamic_sampling(siirl_args: SiiRLArguments, batch: DataProto, node_config: Dict[str, Any], **kwargs: Any) -> NodeOutput:

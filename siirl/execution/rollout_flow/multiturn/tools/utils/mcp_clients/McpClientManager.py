@@ -20,7 +20,7 @@ from typing import Any
 from fastmcp import Client
 from fastmcp.client.transports import SSETransport
 
-from siirl.multiturn.tools.utils.mcp_clients.utils import TokenBucket, mcp2openai
+from siirl.execution.rollout_flow.multiturn.tools.utils.mcp_clients.utils import TokenBucket, mcp2openai
 
 logger = logging.getLogger(__name__)
 

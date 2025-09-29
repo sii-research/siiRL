@@ -31,7 +31,7 @@ from transformers import AutoTokenizer
 from siirl import DataProto
 from siirl.models.loader import load_tokenizer
 from siirl.utils.extras.fs import copy_to_local
-from siirl.workers.rollout.async_server import async_server_class
+from siirl.engine.rollout.async_server import async_server_class
 from loguru import logger
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("siirl_LOGGING_LEVEL", "WARN"))
@@ -244,8 +244,8 @@ class AgentLoopWorker:
 
     def get_agent_loop_class(self, agent_name: str) -> Type[AgentLoopBase]:
         # TODO: add tool agent registrary
-        from siirl.multiturn.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
-        from siirl.multiturn.agent_loop.tool_agent_loop import ToolAgentLoop
+        from siirl.execution.rollout_flow.multiturn.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
+        from siirl.execution.rollout_flow.multiturn.agent_loop.tool_agent_loop import ToolAgentLoop
 
         if agent_name == "single_turn_agent":
             return SingleTurnAgentLoop

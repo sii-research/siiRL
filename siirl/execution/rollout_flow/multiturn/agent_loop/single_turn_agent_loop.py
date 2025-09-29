@@ -16,7 +16,7 @@ import os
 from typing import Any, Dict, List
 from uuid import uuid4
 
-from siirl.multiturn.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput
+from siirl.execution.rollout_flow.multiturn.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput
 from contextlib import contextmanager
 import time
 import torch

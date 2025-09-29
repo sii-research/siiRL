@@ -31,9 +31,9 @@ from vllm.v1.executor.abstract import Executor
 from vllm.worker.worker_base import WorkerWrapperBase
 from siirl.utils.debug import GPUMemoryLogger
 from siirl.utils.extras.fs import copy_to_local
-from siirl.workers.rollout.async_server import AsyncServerBase
+from siirl.engine.rollout.async_server import AsyncServerBase
 from siirl import DataProto
-from siirl.utils.params.model_args import ActorRolloutRefArguments
+from siirl.global_config.params.model_args import ActorRolloutRefArguments
 
 logger = logging.getLogger(__file__)
 

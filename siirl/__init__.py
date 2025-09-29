@@ -18,7 +18,7 @@ from importlib.metadata import version
 from packaging.version import parse as parse_version
 from importlib.metadata import PackageNotFoundError
 
-from siirl.workers.databuffer import DataProto
+from siirl.data_coordinator import DataProto
 from siirl.utils.extras.device import is_npu_available
 from siirl.utils.logger.logging_utils import set_basic_config
 

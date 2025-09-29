@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
-from siirl.workers.dag.node import Node, NodeRole, NodeStatus, NodeType
+from siirl.execution.dag.node import Node, NodeRole, NodeStatus, NodeType
 
 
 class TaskGraph:

@@ -30,18 +30,18 @@ from typing import Dict, List, Any, Tuple, Optional, Union
 from codetiming import Timer
 
 from loguru import logger
-from siirl.workers.rollout.sglang_rollout.async_sglang_server import AsyncSglangServer
-from siirl.workers.fsdp_workers import ActorRolloutRefWorker
-from siirl.workers.dag import TaskGraph, Node, NodeRole, NodeType
-from siirl.workers.databuffer.protocol import DataProto
-from siirl.utils.params import RolloutArguments, ActorRolloutRefArguments
-from siirl.workers.dag_worker.mixins.utilities_mixin import UtilitiesMixin
-from siirl.workers.dag_worker.dag_utils import remove_prefix_from_dataproto
+from siirl.engine.rollout.sglang_rollout.async_sglang_server import AsyncSglangServer
+from siirl.engine.fsdp_workers import ActorRolloutRefWorker
+from siirl.execution.dag import TaskGraph, Node, NodeRole, NodeType
+from siirl.data_coordinator.protocol import DataProto
+from siirl.global_config.params import RolloutArguments, ActorRolloutRefArguments
+from siirl.dag_worker.mixins.utilities_mixin import UtilitiesMixin
+from siirl.dag_worker.dag_utils import remove_prefix_from_dataproto
 
 class MultiAgentLoop(UtilitiesMixin):
     def __init__(self, dag, config: ActorRolloutRefArguments, node_workers:Dict, local_dag:TaskGraph, databuffer:List["ray.actor.ActorHandle"], placement_mode: str = 'colocate'):
         # dely import Dag after dagworker finish init
-        from siirl.workers.dag_worker.dagworker import DAGWorker
+        from siirl.dag_worker.dagworker import DAGWorker
         assert config.rollout.name == 'sglang', "MultiAgent only support sglang because vllm can't sleep in multi times"
         self.dag:DAGWorker = dag
         self.graph = local_dag

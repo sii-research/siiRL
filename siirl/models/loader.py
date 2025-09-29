@@ -15,7 +15,7 @@ from loguru import logger
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer, ProcessorMixin
 
-    from siirl.utils.params import ModelArguments
+    from siirl.global_config.params import ModelArguments
 
 
 class TokenizerModule(TypedDict):

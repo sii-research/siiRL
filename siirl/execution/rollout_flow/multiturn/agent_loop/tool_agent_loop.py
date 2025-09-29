@@ -22,8 +22,8 @@ from uuid import uuid4
 import regex as re
 from pydantic import BaseModel
 
-from siirl.multiturn.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput
-from siirl.multiturn.tools.utils.tool_registry import initialize_tools_from_config
+from siirl.execution.rollout_flow.multiturn.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput
+from siirl.execution.rollout_flow.multiturn.tools.utils.tool_registry import initialize_tools_from_config
 from contextlib import contextmanager
 import time
 import torch

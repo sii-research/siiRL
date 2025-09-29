@@ -19,11 +19,11 @@ from loguru import logger
 from torch.utils.data import RandomSampler, SequentialSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 
-from siirl.workers.dag import Node, NodeRole, NodeStatus, NodeType
+from siirl.execution.dag import Node, NodeRole, NodeStatus, NodeType
 from siirl.models.loader import load_tokenizer
-from siirl.utils.params import SiiRLArguments
+from siirl.global_config.params import SiiRLArguments
 
-from siirl.dataloader.partitioned_dataset import PartitionedRLHFDataset
+from siirl.data_coordinator.dataloader.partitioned_dataset import PartitionedRLHFDataset
 
 
 class RepeatDataset(torch.utils.data.Dataset):
@@ -170,7 +170,7 @@ class DataLoaderNode(Node):
             sampler = SequentialSampler(data_source=self.train_dataset)
 
         # Create the training dataloader with the specified batch size, workers, sampler, and collator
-        from siirl.dataloader.partitioned_dataset import collate_fn as default_collate_fn
+        from siirl.data_coordinator.dataloader.partitioned_dataset import collate_fn as default_collate_fn
 
         self.train_dataloader = StatefulDataLoader(dataset=self.train_dataset, batch_size=train_batch_size, num_workers=self.num_loader_workers, drop_last=True, collate_fn=default_collate_fn, sampler=sampler)
 

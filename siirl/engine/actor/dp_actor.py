@@ -27,7 +27,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 import siirl.utils.model_utils.torch_functional as F
 from siirl import DataProto
-from siirl.workers.dag_worker.core_algos import agg_loss, compute_policy_loss, kl_penalty
+from siirl.dag_worker.core_algos import agg_loss, compute_policy_loss, kl_penalty
 from siirl.utils.debug import GPUMemoryLogger
 from siirl.utils.extras.device import get_device_id, get_device_name, is_cuda_available, is_npu_available
 from siirl.utils.model_utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
@@ -35,8 +35,8 @@ from siirl.utils.extras.py_functional import append_to_dict
 from siirl.utils.model_utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from siirl.utils.model_utils.torch_functional import logprobs_from_logits
 from siirl.utils.model_utils.ulysses import gather_outpus_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
-from siirl.utils.params import ActorArguments, RefArguments
-from siirl.workers.actor import BasePPOActor
+from siirl.global_config.params import ActorArguments, RefArguments
+from siirl.engine.actor import BasePPOActor
 
 if is_cuda_available:
     from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input

@@ -25,9 +25,9 @@ from loguru import logger
 import torch
 
 from siirl.utils.metrics.metric_utils import aggregate_validation_metrics
-from siirl.workers.dag.node import NodeRole
-from siirl.workers.dag_worker.data_structures import ValidationPayload, ValidationResult
-from siirl.workers.databuffer import DataProto, pad_dataproto_to_divisor, unpad_dataproto
+from siirl.execution.dag.node import NodeRole
+from siirl.dag_worker.data_structures import ValidationPayload, ValidationResult
+from siirl.data_coordinator import DataProto, pad_dataproto_to_divisor, unpad_dataproto
 
 
 class ValidationMixin:
@@ -36,10 +36,10 @@ class ValidationMixin:
     from typing import Any, Dict, List, Optional
     from collections import defaultdict
     import torch.distributed as dist
-    from siirl.utils.params import SiiRLArguments
-    from siirl.dataloader import DataLoaderNode
-    from siirl.workers.dag.node import Node, NodeRole
-    from siirl.workers.base_worker import Worker
+    from siirl.global_config.params import SiiRLArguments
+    from siirl.data_coordinator.dataloader import DataLoaderNode
+    from siirl.execution.dag.node import Node, NodeRole
+    from siirl.engine.base_worker import Worker
 
     timers: defaultdict
     _rank: int

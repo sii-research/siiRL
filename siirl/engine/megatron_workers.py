@@ -38,7 +38,7 @@ except ImportError:
 from megatron.core import parallel_state as mpu
 
 from siirl import DataProto
-from siirl.workers.base_worker.megatron.worker import MegatronWorker
+from siirl.engine.base_worker.megatron.worker import MegatronWorker
 from siirl.models.loader import load_tokenizer
 from siirl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
 from siirl.utils.debug import GPUMemoryLogger, log_gpu_memory_usage
@@ -54,10 +54,10 @@ from siirl.utils.extras.import_utils import import_external_libs
 from siirl.utils.extras.device import get_device_id, get_device_name, get_nccl_backend, get_torch_device
 from siirl.utils.model_utils.model import get_hf_model_path, load_mcore_dist_weights, load_megatron_gptmodel_weights
 from siirl.utils.model_utils.torch_dtypes import PrecisionType
-from siirl.utils.params.model_args import ActorRolloutRefArguments
-from siirl.workers.actor.megatron_actor import MegatronPPOActor
-from siirl.workers.critic.megatron_critic import MegatronPPOCritic
-from siirl.workers.reward_model.megatron.reward_model import MegatronRewardModel
+from siirl.global_config.params.model_args import ActorRolloutRefArguments
+from siirl.engine.actor.megatron_actor import MegatronPPOActor
+from siirl.engine.critic.megatron_critic import MegatronPPOCritic
+from siirl.engine.reward_model.megatron.reward_model import MegatronRewardModel
 
 
 def set_random_seed(seed):
@@ -229,7 +229,7 @@ class ActorRolloutRefWorker(MegatronWorker):
         if self.config.rollout.name == "vllm":
             from torch.distributed.device_mesh import init_device_mesh
 
-            from siirl.workers.rollout.vllm_rollout import vllm_mode, vLLMRollout
+            from siirl.engine.rollout.vllm_rollout import vllm_mode, vLLMRollout
             # NOTE(sgm): If the QKV and gate_up projection layer are concate together in actor,
             # we will reorganize their weight format when resharding from actor to rollout.
 
@@ -265,14 +265,14 @@ class ActorRolloutRefWorker(MegatronWorker):
                     DeprecationWarning,
                     stacklevel=2,
                 )
-            from siirl.workers.rollout.sglang_rollout import SGLangRollout
+            from siirl.engine.rollout.sglang_rollout import SGLangRollout
 
             # NOTE(linjunrong): Due to recent fp8 support in SGLang. Now importing any symbol relate to SGLang's model_runner would check CUDA device capability.
             # However, due to siirl's setting, the main process of ray can not find any CUDA device, which would potentially lead to:
             # "RuntimeError: No CUDA GPUs are available".
             # For this reason, sharding_manager.__init__ should not import FSDPSGLangShardingManager and we import it here use the abs path.
             # check: https://github.com/sgl-project/sglang/blob/00f42707eaddfc2c0528e5b1e0094025c640b7a0/python/sglang/srt/layers/quantization/fp8_utils.py#L76
-            from siirl.workers.sharding_manager.megatron_sglang import MegatronSGLangShardingManager
+            from siirl.engine.sharding_manager.megatron_sglang import MegatronSGLangShardingManager
 
             infer_tp = self.config.rollout.tensor_model_parallel_size
             dp = self.world_size // infer_tp
@@ -1233,7 +1233,7 @@ class RolloutWorker(MegatronWorker):
         assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
 
         if self.config.rollout.name == "vllm":
-            from siirl.workers.rollout.vllm_rollout import vLLMRollout
+            from siirl.engine.rollout.vllm_rollout import vLLMRollout
             # NOTE(sgm): If the QKV and gate_up projection layer are concate together in actor,
             # we will reorganize their weight format when resharding from actor to rollout.
             rollout_device_mesh = init_device_mesh(get_device_name(), mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
@@ -1251,7 +1251,7 @@ class RolloutWorker(MegatronWorker):
             log_gpu_memory_usage("After building vllm rollout", logger=logger)
 
         elif self.config.rollout.name in ["sglang", "sglang_async"]:
-            from siirl.workers.rollout.sglang_rollout import SGLangRollout
+            from siirl.engine.rollout.sglang_rollout import SGLangRollout
             if self.config.rollout.name == "sglang_async":
                 warnings.warn(
                     "'sglang_async' has been deprecated and merged into 'sglang'. Please use 'sglang' going forward.",

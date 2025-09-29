@@ -1,5 +1,5 @@
-from siirl.workers.databuffer import DataProto
-from siirl.workers.dag.node import Node
+from siirl.data_coordinator import DataProto
+from siirl.execution.dag.node import Node
 from tensordict import TensorDict
 
 

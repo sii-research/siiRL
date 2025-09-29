@@ -20,9 +20,9 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import torch
 from siirl import DataProto
-from siirl.workers.dag_worker import core_algos
+from siirl.dag_worker import core_algos
 from siirl.utils.model_utils.torch_functional import masked_mean
-from siirl.scheduler.enums import AdvantageEstimator
+from siirl.execution.scheduler.enums import AdvantageEstimator
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl", multi_turn=False):

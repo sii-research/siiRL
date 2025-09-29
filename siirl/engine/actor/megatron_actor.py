@@ -43,8 +43,8 @@ from siirl.utils.megatron.pipeline_parallel import make_batch_generator
 from siirl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
 from siirl.utils.model_utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from siirl.utils.model_utils.torch_functional import broadcast_dict_tensor
-from siirl.workers.actor import BasePPOActor
-from siirl.workers.dag_worker.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
+from siirl.engine.actor import BasePPOActor
+from siirl.dag_worker.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
 
 __all__ = ["MegatronPPOActor"]
 

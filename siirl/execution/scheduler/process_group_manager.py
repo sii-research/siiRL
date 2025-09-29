@@ -16,7 +16,7 @@ import collections
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from loguru import logger
-from siirl.workers.dag import NodeType, TaskGraph
+from siirl.execution.dag import NodeType, TaskGraph
 
 
 class ProcessGroupManager:

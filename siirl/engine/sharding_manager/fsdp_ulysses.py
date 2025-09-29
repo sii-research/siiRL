@@ -18,10 +18,10 @@ Contains a resharding manager that binds weights from FSDP zero3 to XPerfGPT
 from torch.distributed.device_mesh import DeviceMesh
 
 from siirl import DataProto
-from siirl.workers.databuffer.protocol import all_gather_data_proto
+from siirl.data_coordinator.protocol import all_gather_data_proto
 from siirl.utils.model_utils.ulysses import get_ulysses_sequence_parallel_group, set_ulysses_sequence_parallel_group
 
-from siirl.workers.sharding_manager.base import BaseShardingManager
+from siirl.engine.sharding_manager.base import BaseShardingManager
 
 
 class FSDPUlyssesShardingManager(BaseShardingManager):

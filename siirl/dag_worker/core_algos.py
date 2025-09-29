@@ -32,7 +32,7 @@ import torch
 from omegaconf import DictConfig
 
 import siirl.utils.model_utils.torch_functional as siirl_F
-from siirl.utils.params.model_args import AlgorithmArguments, ActorArguments
+from siirl.global_config.params.model_args import AlgorithmArguments, ActorArguments
 
 PolicyLossFn = Callable[
     [

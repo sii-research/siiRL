@@ -20,15 +20,15 @@ import ray
 from loguru import logger
 from omegaconf import DictConfig
 
-from siirl.scheduler.enums import AdvantageEstimator, AlgorithmType
-from siirl.scheduler.graph_updater import display_node_config, update_task_graph_node_configs
-from siirl.scheduler.launch import RayTrainer
-from siirl.scheduler.process_group_manager import ProcessGroupManager, log_process_group_manager_details
-from siirl.scheduler.task_scheduler import TaskScheduler, log_schedule_assignments
+from siirl.execution.scheduler.enums import AdvantageEstimator, AlgorithmType
+from siirl.execution.scheduler.graph_updater import display_node_config, update_task_graph_node_configs
+from siirl.execution.scheduler.launch import RayTrainer
+from siirl.execution.scheduler.process_group_manager import ProcessGroupManager, log_process_group_manager_details
+from siirl.execution.scheduler.task_scheduler import TaskScheduler, log_schedule_assignments
 from siirl.utils.logger.logging_utils import set_basic_config
-from siirl.utils.params import SiiRLArguments, log_dict_formatted, parse_config
-from siirl.workers.dag import DAGConfigLoader
-from siirl.workers.databuffer import init_data_buffer
+from siirl.global_config.params import SiiRLArguments, log_dict_formatted, parse_config
+from siirl.execution.dag import DAGConfigLoader
+from siirl.data_coordinator import init_data_buffer
 
 
 
@@ -48,7 +48,7 @@ def determine_workflow_config(self, siirl_args: SiiRLArguments) -> str:
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
     if siirl_args.algorithm.adv_estimator == AdvantageEstimator.GAE:
-        return os.path.join(current_dir, "config/workflow_ppo.yaml")
+        return os.path.join(current_dir, "./global_config/config/workflow_ppo.yaml")
     elif siirl_args.algorithm.adv_estimator in [
         AdvantageEstimator.GRPO,
         AdvantageEstimator.GRPO_PASSK,
@@ -60,8 +60,8 @@ def determine_workflow_config(self, siirl_args: SiiRLArguments) -> str:
         AdvantageEstimator.CPGD,
     ]:
         if siirl_args.algorithm.algorithm_name == AlgorithmType.DAPO.value:
-            return os.path.join(current_dir, "config/workflow_dapo.yaml")
-        return os.path.join(current_dir, "config/workflow_grpo.yaml")
+            return os.path.join(current_dir, "./global_config/config/workflow_dapo.yaml")
+        return os.path.join(current_dir, "./global_config/config/workflow_grpo.yaml")
     else:
         raise NotImplementedError
 
@@ -159,7 +159,7 @@ class MainRunner:
         logger.info(f"Workflow setup and worker launch complete. Time cost: {setup_duration:.2f}s")
 
 
-@hydra.main(config_path="config", config_name="ppo_dag_trainer", version_base=None)
+@hydra.main(config_path="./global_config/config", config_name="ppo_dag_trainer", version_base=None)
 def main(siirl_config: DictConfig) -> None:
     """
     Main entry point for launching the PPO DAG training job.

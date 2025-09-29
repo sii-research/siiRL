@@ -30,12 +30,12 @@ from ray.experimental.state.api import get_actor
 from ray.util import list_named_actors
 
 from siirl.utils.extras.device import get_device_name
-from siirl.scheduler.process_group_manager import ProcessGroupManager
-from siirl.utils.params import SiiRLArguments
-from siirl.workers.base_worker import RayClassWithInitArgs, RayResourcePool, WorkerGroup, get_random_string, sort_placement_group_by_node_ip
-from siirl.workers.dag import TaskGraph
-from siirl.workers.dag_worker.dagworker import DAGWorker
-from siirl.multiturn.agent_loop import AgentLoopManager
+from siirl.execution.scheduler.process_group_manager import ProcessGroupManager
+from siirl.global_config.params import SiiRLArguments
+from siirl.engine.base_worker import RayClassWithInitArgs, RayResourcePool, WorkerGroup, get_random_string, sort_placement_group_by_node_ip
+from siirl.execution.dag import TaskGraph
+from siirl.dag_worker.dagworker import DAGWorker
+from siirl.execution.rollout_flow.multiturn.agent_loop import AgentLoopManager
 
 
 class DistributedEnv(Enum):

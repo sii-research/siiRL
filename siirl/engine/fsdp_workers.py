@@ -37,8 +37,8 @@ import siirl.utils.model_utils.torch_functional as F
 from siirl import DataProto
 from siirl.models.loader import load_tokenizer
 from siirl.models.transformers.monkey_patch import apply_monkey_patch
-from siirl.workers.base_worker import Worker
-from siirl.scheduler.enums import Role
+from siirl.engine.base_worker import Worker
+from siirl.execution.scheduler.enums import Role
 from siirl.utils.model_utils.activation_offload import enable_activation_offloading
 from siirl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
 from siirl.utils.debug import log_gpu_memory_usage
@@ -63,8 +63,8 @@ from siirl.utils.model_utils.fsdp_utils import (
 from siirl.utils.extras.import_utils import import_external_libs
 from siirl.utils.model_utils.model import compute_position_id_with_mask
 from siirl.utils.extras.py_functional import convert_to_regular_types
-from siirl.utils.params.model_args import ActorRolloutRefArguments, CriticArguments, FSDPArguments, OptimizerArguments, RewardModelArguments
-from siirl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
+from siirl.global_config.params.model_args import ActorRolloutRefArguments, CriticArguments, FSDPArguments, OptimizerArguments, RewardModelArguments
+from siirl.engine.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
 device_name = get_device_name()
 
@@ -459,15 +459,15 @@ class ActorRolloutRefWorker(Worker):
         # TODO(sgm): support FSDP hybrid shard for larger model
         rollout_name = self.config.rollout.name
         if rollout_name == "hf":
-            from siirl.workers.rollout import HFRollout
-            from siirl.workers.sharding_manager.base import BaseShardingManager
+            from siirl.engine.rollout import HFRollout
+            from siirl.engine.sharding_manager.base import BaseShardingManager
 
             rollout = HFRollout(module=self.actor_module_fsdp, config=self.config.rollout)
             rollout_sharding_manager = BaseShardingManager()
             # TODO: a sharding manager that do nothing?
 
         elif rollout_name == "vllm":
-            from siirl.workers.rollout.vllm_rollout import vllm_mode, vLLMRollout
+            from siirl.engine.rollout.vllm_rollout import vllm_mode, vLLMRollout
 
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
             local_path = copy_to_local(self.config.model.path, use_shm=self.config.model.use_shm)
@@ -476,7 +476,7 @@ class ActorRolloutRefWorker(Worker):
             if vllm_mode == "customized":
                 rollout = vLLMRollout(actor_module=self.actor_module_fsdp, config=self.config.rollout, tokenizer=self.tokenizer, model_hf_config=self.actor_model_config, trust_remote_code=trust_remote_code, **lora_kwargs)
             elif vllm_mode == "spmd":
-                from siirl.workers.rollout.vllm_rollout import vLLMAsyncRollout
+                from siirl.engine.rollout.vllm_rollout import vLLMAsyncRollout
 
                 vllm_rollout_cls = vLLMRollout if self.config.rollout.mode == "sync" else vLLMAsyncRollout
                 rollout = vllm_rollout_cls(model_path=local_path, config=self.config.rollout, tokenizer=self.tokenizer, model_hf_config=self.actor_model_config, trust_remote_code=trust_remote_code, **lora_kwargs)
@@ -489,7 +489,7 @@ class ActorRolloutRefWorker(Worker):
             log_gpu_memory_usage("After building sharding manager", logger=logger)
 
         elif rollout_name == "sglang":
-            from siirl.workers.rollout.sglang_rollout import SGLangRollout
+            from siirl.engine.rollout.sglang_rollout import SGLangRollout
 
             # NOTE(linjunrong): Due to recent fp8 support in SGLang. Now importing any symbol relate to
             # SGLang's model_runner would check CUDA device capability. However, due to siirl's setting,
@@ -498,7 +498,7 @@ class ActorRolloutRefWorker(Worker):
             # For this reason, sharding_manager.__init__ should not import FSDPSGLangShardingManager and
             # we import it here use the abs path.
             # check: https://github.com/sgl-project/sglang/blob/00f42707eaddfc2c0528e5b1e0094025c640b7a0/python/sglang/srt/layers/quantization/fp8_utils.py#L76
-            # from siirl.workers.sharding_manager.fsdp_sglang import MultiAgentFSDPSGLangShardingManager
+            # from siirl.engine.sharding_manager.fsdp_sglang import MultiAgentFSDPSGLangShardingManager
 
             local_path = copy_to_local(self.config.model.path)
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
@@ -518,7 +518,7 @@ class ActorRolloutRefWorker(Worker):
         return rollout, None
 
     def init_model(self):
-        from siirl.workers.actor import DataParallelPPOActor
+        from siirl.engine.actor import DataParallelPPOActor
 
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.external_lib)
@@ -662,7 +662,7 @@ class ActorRolloutRefWorker(Worker):
             log_gpu_memory_usage("After entering rollout sharding manager", logger=logger)
 
             if self.config.rollout.name == "sglang_async":
-                from siirl.workers.rollout.sglang_rollout import AsyncSGLangRollout
+                from siirl.engine.rollout.sglang_rollout import AsyncSGLangRollout
 
                 if isinstance(self.rollout, AsyncSGLangRollout) and hasattr(self.rollout, "_tool_schemas") and len(self.rollout._tool_schemas) > 0:
                     output = self.rollout.generate_sequences_with_tools(prompts=prompts)
@@ -1051,7 +1051,7 @@ class CriticWorker(Worker):
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.external_lib)
 
-        from siirl.workers.critic import DataParallelPPOCritic
+        from siirl.engine.critic import DataParallelPPOCritic
 
         self.critic_module, self.critic_optimizer, self.critic_lr_scheduler = self._build_critic_model_optimizer(self.config)
 

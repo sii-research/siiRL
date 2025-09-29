@@ -16,7 +16,7 @@ if TYPE_CHECKING:
         ProcessorMixin,
     )
 
-    from siirl.utils.params import ModelArguments
+    from siirl.global_config.params import ModelArguments
 
 transformers_logger = transformers.utils.logging.get_logger(__name__)
 

@@ -24,7 +24,7 @@ import ray
 import ray.actor
 import ray.util.multiprocessing
 
-from siirl.multiturn.tools.base_tool import BaseTool
+from siirl.execution.rollout_flow.multiturn.tools.base_tool import BaseTool
 from siirl.utils.reward_score.sandbox_fusion.utils import _process_single_case
 
 from .schemas import OpenAIFunctionToolSchema

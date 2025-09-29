@@ -23,8 +23,8 @@ from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 import time
 from asyncio import Queue
-from siirl.workers.databuffer.protocol import DataProto
-from siirl.workers.multi_agent.utils import AgentOutput
+from siirl.data_coordinator.protocol import DataProto
+from siirl.execution.rollout_flow.multi_agent.utils import AgentOutput
 # ====================================================================
 # Sequence Balancing Utility Functions
 # ====================================================================

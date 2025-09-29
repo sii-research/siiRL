@@ -17,7 +17,7 @@ from typing import Any, Dict
 
 import torch
 
-from siirl.workers.databuffer import DataProto
+from siirl.data_coordinator import DataProto
 
 
 @dataclass

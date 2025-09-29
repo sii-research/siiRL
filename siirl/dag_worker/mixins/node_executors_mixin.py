@@ -21,15 +21,15 @@ import torch
 from loguru import logger
 from torch import distributed as dist
 
-from siirl.scheduler.reward import compute_reward
+from siirl.execution.scheduler.reward import compute_reward
 from siirl.utils.debug import DistProfiler
 from siirl.utils.extras.device import get_device_id, get_device_name
-from siirl.workers.dag.node import NodeRole, NodeType
-from siirl.workers.dag_worker.algorithms import apply_kl_penalty, compute_advantage, compute_response_mask
-from siirl.workers.dag_worker.core_algos import agg_loss
-from siirl.workers.dag_worker.data_structures import NodeOutput
-from siirl.workers.databuffer import DataProto
-from siirl.scheduler.enums import AdvantageEstimator
+from siirl.execution.dag.node import NodeRole, NodeType
+from siirl.dag_worker.algorithms import apply_kl_penalty, compute_advantage, compute_response_mask
+from siirl.dag_worker.core_algos import agg_loss
+from siirl.dag_worker.data_structures import NodeOutput
+from siirl.data_coordinator import DataProto
+from siirl.execution.scheduler.enums import AdvantageEstimator
 
 
 class NodeExecutorsMixin:
@@ -37,9 +37,9 @@ class NodeExecutorsMixin:
 
     from typing import Any, Dict
 
-    from siirl.utils.params import SiiRLArguments
-    from siirl.workers.base_worker import Worker
-    from siirl.workers.dag.node import NodeRole
+    from siirl.global_config.params import SiiRLArguments
+    from siirl.engine.base_worker import Worker
+    from siirl.execution.dag.node import NodeRole
 
     agent_group_worker: Dict[int, Dict[NodeRole, Worker]]
     config: SiiRLArguments

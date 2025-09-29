@@ -28,7 +28,7 @@ from sglang.srt.model_executor.model_runner import LocalSerializedTensor
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 
-from siirl.workers.databuffer.protocol import  all_gather_data_proto
+from siirl.data_coordinator.protocol import  all_gather_data_proto
 from siirl import DataProto
 from siirl.utils.debug import GPUMemoryLogger, log_gpu_memory_usage
 from siirl.utils.extras.device import get_device_id, get_device_name, get_torch_device, set_expandable_segments
@@ -39,7 +39,7 @@ from siirl.utils.megatron.megatron_utils import (
 )
 from siirl.utils.memory_utils import aggressive_empty_cache
 
-from siirl.workers.sharding_manager.base import BaseShardingManager
+from siirl.engine.sharding_manager.base import BaseShardingManager
 from loguru import logger
 
 

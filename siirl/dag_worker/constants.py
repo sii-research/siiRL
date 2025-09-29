@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from typing import Dict, List
-from siirl.workers.dag.node import NodeRole
+from siirl.execution.dag.node import NodeRole
 
 
 class DAGInitializationError(Exception):
