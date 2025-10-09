@@ -83,8 +83,11 @@ class InitializationMixin:
         """Orchestrates the ordered initialization of all worker components."""
         self._rank = self._get_and_validate_rank()
         self.taskgraph = self._get_taskgraph_for_rank(self.taskgraph_mapping)
+        
         self._setup_distributed_environment()
-        self._initialize_core_components()
+        self._setup_tokenizers()
+        self._setup_dataloader_and_reward()
+        self._setup_role_worker_mapping()
         self._initialize_node_workers()
         self._profiler = DistProfiler(rank=self._rank, config=self.config.profiler)
 
@@ -227,12 +230,6 @@ class InitializationMixin:
             self.taskgraph.graph_id, NodeType.MODEL_TRAIN.value
         )
 
-    def _initialize_core_components(self):
-        """Initializes shared components like tokenizers, data loaders, and reward functions."""
-        self._setup_tokenizers()
-        self._setup_dataloader_and_reward()
-        self._setup_role_worker_mapping()
-
     def _setup_tokenizers(self):
         """Initializes and caches tokenizers for all models in the task graph."""
         model_nodes = [
@@ -314,10 +311,7 @@ class InitializationMixin:
 
         if self.config.algorithm.use_kl_in_reward:
             from siirl.dag_worker import core_algos
-
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
-
-        # TODO: support multi-agent environment
 
     def _get_worker_classes(self, strategy: str) -> Dict[NodeRole, Type[Worker]]:
         """Dynamically imports worker classes based on the specified strategy."""
@@ -447,6 +441,7 @@ class InitializationMixin:
         
         if len(self.agent_group_worker) > 1:
             self._multi_agent = True
+            
     def _generate_node_worker_key(self, node: Node) -> str:
         """Generates a unique string key for a node's worker instance."""
         return f"{node.agent_group}_{node.node_type.value}_{node.node_role.value}"
