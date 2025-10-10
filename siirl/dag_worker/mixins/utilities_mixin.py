@@ -303,7 +303,6 @@ class UtilitiesMixin:
             (NodeRole.ACTOR, False): self.train_actor,
             (NodeRole.CRITIC, True): self.compute_value,
             (NodeRole.CRITIC, False): self.train_critic,
-            (NodeRole.POSTPROCESS_SAMPLING, False): self.postprocess_sampling,
         }
         for node in self.taskgraph.nodes.values():
             if node.node_role in [NodeRole.REWARD, NodeRole.ADVANTAGE]:
@@ -713,7 +712,6 @@ class UtilitiesMixin:
         # All ranks return the final metrics. Ranks other than 0 can use them if needed,
         # or just ignore them. This is cleaner than returning an empty dict.
         return final_metrics
-
 
     def _collect_multi_final_metrics(self, batch: DataProto, ordered_metrics: dict, timing_raw: dict) -> Dict[str, float]:
         node_queue = self.taskgraph.get_entry_nodes()
@@ -1135,11 +1133,9 @@ class UtilitiesMixin:
                     f"cur_node_role={cur_node.node_role}, next_node_role={next_node.node_role}")
         return result
 
-
     def check_spmd_mode(self):
         return self.rollout_mode == 'sync' and self._multi_agent == False
     
-
     def multi_agent_put_log(self, key: str, data: DataProto, agent_group: int, next_dp_size: int, timing_raw):
         def uuid_hex_to_bucket(uuid_hex: str, num_buckets: int = 8) -> int:
             return consistent_hash(uuid_hex) % num_buckets
@@ -1161,8 +1157,6 @@ class UtilitiesMixin:
             loop = asyncio.get_event_loop()
             loop.run_until_complete(asyncio.gather(*put_futures))
 
-        
-    
     def multi_agent_get_log(self, key: str, cur_dp_rank: int, agent_group: int, timing_raw):
         loop = asyncio.get_event_loop()
         key = key + f"_{cur_dp_rank}"
