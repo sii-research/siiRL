@@ -15,18 +15,20 @@ import os
 import random
 import shutil
 import tempfile
+from pathlib import Path
 from typing import Optional, Union
 
 import numpy as np
 import torch
 import torch.distributed
 from filelock import FileLock
-from transformers import PreTrainedTokenizer, ProcessorMixin
 from loguru import logger
 from omegaconf import DictConfig
+from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from siirl.utils.extras.device import is_cuda_available, is_npu_available
 from siirl.utils.params.model_args import CheckpointArguments
+
 
 class BaseCheckpointManager:
     """
@@ -148,10 +150,14 @@ class BaseCheckpointManager:
             path = [path]
         for p in path:
             abs_path = os.path.abspath(p)
-            logger.info(f"Checkpoint manager remove previous save local path: {abs_path}")
             if not os.path.exists(abs_path):
                 continue
-            shutil.rmtree(abs_path, ignore_errors=True)
+            global_step_path = Path(path).parent
+            delete_path = abs_path
+            if "global_step_" in str(global_step_path) and os.path.exists(global_step_path):
+                delete_path = global_step_path
+            logger.info(f"Checkpoint manager remove previous save local path: {delete_path}")
+            shutil.rmtree(delete_path, ignore_errors=True)
 
     @staticmethod
     def local_mkdir(path):

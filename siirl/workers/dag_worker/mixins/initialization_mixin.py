@@ -31,6 +31,8 @@ from siirl.workers.base_worker import Worker
 from siirl.workers.dag.node import NodeRole, NodeType
 from siirl.workers.dag_worker.constants import DAGConstants
 from siirl.utils.import_string import import_string
+from datetime import timedelta
+from typing import Tuple
 
 device_name = get_device_name()
 
@@ -123,12 +125,39 @@ class InitializationMixin:
         logger.info(f"Rank {self._rank} assigned to TaskGraph with ID {taskgraph.graph_id}.")
         return taskgraph
 
+    def _get_timeout_from_env(self, env_var: str, default_seconds: int) -> timedelta:
+        timeout_str = os.getenv(env_var, str(default_seconds))
+        timeout_seconds = default_seconds
+
+        try:
+            timeout_seconds = int(timeout_str)
+        except (ValueError, TypeError):
+            logger.warning(f"Warning: Invalid value '{timeout_str}' for {env_var}. "
+                         f"Using default of {default_seconds} seconds.")
+
+        return timedelta(seconds=timeout_seconds)
+
+    def _get_nccl_gloo_timeout(self) -> Tuple[timedelta, timedelta]:
+        nccl_env_var = "NCCL_TIMEOUT"
+        default_nccl_timeout = 1800
+
+        gloo_env_var = "GLOO_TIMEOUT_SECONDS"
+        default_gloo_timeout = 1800
+
+        nccl_timeout = self._get_timeout_from_env(nccl_env_var, default_nccl_timeout)
+        gloo_timeout = self._get_timeout_from_env(gloo_env_var, default_gloo_timeout)
+
+        return nccl_timeout, gloo_timeout
+
+
     def _setup_distributed_environment(self):
         """Initializes the default process group and all required subgroups."""
         # gloo_socket_ifname = 'bond0'
         # os.environ["GLOO_SOCKET_IFNAME"] = gloo_socket_ifname
         # os.environ["GLOO_LOG_LEVEL"] = "DEBUG"
         import torch.distributed as dist
+
+        nccl_timeout, gloo_timeout = self._get_nccl_gloo_timeout()
 
         if not dist.is_initialized():
             backend = (
@@ -140,18 +169,18 @@ class InitializationMixin:
                 f"Rank {self._rank}: Initializing world size {self.world_size} default process group with '{backend}' "
                 f"backend."
             )
-            dist.init_process_group(backend=backend)
+            dist.init_process_group(backend=backend, timeout=nccl_timeout)
 
         if device_name == "npu":
             # For NPU, metrics aggregation requires the hccl backend for device-to-device communication.
             # This group is created regardless of world size for NPU environments.
             gather_backend = get_nccl_backend()
-            self._gather_group = dist.new_group(backend=gather_backend)
+            self._gather_group = dist.new_group(backend=gather_backend, timeout=gloo_timeout)
         else:
             # For GPU, the original logic is preserved for backward compatibility.
             # The gather group is only created if world_size < backend_threshold.
             self._gather_group = dist.new_group(
-                backend="gloo") if self.world_size < self.config.dag.backend_threshold else None
+                backend="gloo", timeout=gloo_timeout) if self.world_size < self.config.dag.backend_threshold else None
         self._build_all_process_groups()
         self._resolve_taskgraph_process_groups()
 
