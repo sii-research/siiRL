@@ -15,18 +15,20 @@ import os
 import random
 import shutil
 import tempfile
+from pathlib import Path
 from typing import Optional, Union
 
 import numpy as np
 import torch
 import torch.distributed
 from filelock import FileLock
-from transformers import PreTrainedTokenizer, ProcessorMixin
 from loguru import logger
 from omegaconf import DictConfig
+from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from siirl.utils.extras.device import is_cuda_available, is_npu_available
 from siirl.utils.params.model_args import CheckpointArguments
+
 
 class BaseCheckpointManager:
     """
@@ -59,12 +61,12 @@ class BaseCheckpointManager:
         else:
             checkpoint_load_contents = None
             checkpoint_save_contents = None
-        
+
         if checkpoint_load_contents is None:
             checkpoint_load_contents = ["model", "optimizer", "extra"]
         if checkpoint_save_contents is None:
             checkpoint_save_contents = ["model", "optimizer", "extra"]
-        
+
         if checkpoint_contents is None:
             checkpoint_contents = ["model", "optimizer", "extra"]
 
@@ -131,11 +133,13 @@ class BaseCheckpointManager:
         Returns True if 'extra' is in checkpoint_load_contents, indicating the extra state should be loaded.
         """
         return "extra" in self.checkpoint_load_contents
-    
+
     def load_checkpoint(self, local_path: str, hdfs_path: str = None, del_local_after_load: bool = False):
         raise NotImplementedError
 
-    def save_checkpoint(self, local_path: str, hdfs_path: str = None, global_step: int = 0, max_ckpt_to_keep: int = None):
+    def save_checkpoint(
+        self, local_path: str, hdfs_path: str = None, global_step: int = 0, max_ckpt_to_keep: int = None
+    ):
         raise NotImplementedError
 
     @staticmethod
@@ -148,10 +152,14 @@ class BaseCheckpointManager:
             path = [path]
         for p in path:
             abs_path = os.path.abspath(p)
-            logger.info(f"Checkpoint manager remove previous save local path: {abs_path}")
             if not os.path.exists(abs_path):
                 continue
-            shutil.rmtree(abs_path, ignore_errors=True)
+            global_step_path = Path(p).parent
+            delete_path = abs_path
+            if "global_step_" in str(global_step_path) and os.path.exists(global_step_path):
+                delete_path = global_step_path
+            logger.info(f"Checkpoint manager remove previous save local path: {delete_path}")
+            shutil.rmtree(delete_path, ignore_errors=True)
 
     @staticmethod
     def local_mkdir(path):
@@ -235,6 +243,6 @@ def find_latest_ckpt_path(path, directory_format="global_step_{}"):
 
 def get_checkpoint_tracker_filename(root_path: str):
     """
-    Tracker file rescords the latest chckpoint during training to restart from.
+    Tracker file rescords the latest checkpoint during training to restart from.
     """
     return os.path.join(root_path, "latest_checkpointed_iteration.txt")
