@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import os
+import hydra
+from pathlib import Path
 from typing import Any
 import transformers
 from omegaconf import OmegaConf, DictConfig
@@ -27,10 +30,13 @@ def _set_transformers_logging() -> None:
         transformers.utils.logging.enable_explicit_format()
 
 
-def parse_config(dict_config: DictConfig) -> SiiRLArguments:
+def parse_config() -> SiiRLArguments:
     """Parse configuration using OmegaConf and convert to a SiiRLArguments instance."""
+    parser = argparse.ArgumentParser()
+    _, overrides = parser.parse_known_args()
+    overrides = OmegaConf.from_cli(overrides)
     # Convert OmegaConf config to a dictionary
-    siirl_config_dict = OmegaConf.to_container(dict_config, resolve=True)
+    siirl_config_dict = OmegaConf.to_container(overrides, resolve=True)
 
     # Recursively convert nested configs
     def convert_to_dataclass(obj: Any, dataclass_type: Any):

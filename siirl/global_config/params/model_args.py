@@ -68,12 +68,12 @@ class MegatronArguments:
     virtual_pipeline_model_parallel_size: Optional[int] = field(default=None, metadata={"help": "Virtual pipeline model parallel size"})
     sequence_parallel: bool = field(default=False, metadata={"help": "Whether the sequence parallel is enabled."})
     use_distributed_optimizer: bool = field(
-        default=False,
+        default=True,
         metadata={"help": "Whether the distributed optimizer is enabled."},
     )
     param_dtype: str = field(default="bfloat16", metadata={"help": "parameter data dtype"})
     seed: int = field(default=1, metadata={"help": "The random seed"})
-    param_offload: bool = field(default=False, metadata={"help": "Offload parameters to CPU"})
+    param_offload: bool = field(default=True, metadata={"help": "Offload parameters to CPU"})
     grad_offload: bool = field(default=False, metadata={"help": "Offload gradients to CPU"})
     optimizer_offload: bool = field(default=False, metadata={"help": "Offload optimizer states to CPU"})
     extra: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Extra settings"})
@@ -226,9 +226,19 @@ class ModelArguments(ProcessorArguments):
 
 @dataclass
 class CheckpointArguments:
-    contents: List[str] = field(default_factory=["model", "hf_model", "optimizer", "extra"], metadata={"help": "The contents to save and load in the checkpoint."})
-    save_contents: List[str] = field(default_factory=["model", "optimizer", "extra"], metadata={"help": "The contents to save in the checkpoint."})
-    load_contents: List[str] = field(default_factory=["model", "optimizer", "extra"], metadata={"help": "The contents to load in the checkpoint."})
+    # 修正 default_factory：用 lambda 函数返回列表（可调用对象）
+    contents: List[str] = field(
+        default_factory=lambda: ["model", "hf_model", "optimizer", "extra"],  # 关键修正
+        metadata={"help": "The contents to save and load in the checkpoint."}
+    )
+    save_contents: List[str] = field(
+        default_factory=lambda: ["model", "optimizer", "extra"],  # 关键修正
+        metadata={"help": "The contents to save in the checkpoint."}
+    )
+    load_contents: List[str] = field(
+        default_factory=lambda: ["model", "optimizer", "extra"],  # 关键修正
+        metadata={"help": "The contents to load in the checkpoint."}
+    )
     async_save: bool = field(default=False, metadata={"help": "Async checkpoint save mode"})
 
 
@@ -373,8 +383,8 @@ class RolloutArguments:
     top_k: int = field(default=-1, metadata={"help": "Top-k sampling"})
     top_p: float = field(default=1.0, metadata={"help": "Top-p sampling"})
     use_fire_sampling: bool = field(default=False, metadata={"help": "Fire sampling optimization"})
-    prompt_length: int = field(default=512, metadata={"help": "Prompt length"})
-    response_length: int = field(default=512, metadata={"help": "Response length"})
+    prompt_length: int = field(default=None, metadata={"help": "Prompt length"})
+    response_length: int = field(default=None, metadata={"help": "Response length"})
     dtype: str = field(default="bfloat16", metadata={"help": "Compute dtype"})
     gpu_memory_utilization: float = field(default=0.5, metadata={"help": "GPU memory usage"})
     ignore_eos: bool = field(default=False, metadata={"help": "Ignore EOS tokens"})
@@ -472,11 +482,9 @@ class CriticArguments:
     grad_clip: float = field(default=1.0, metadata={"help": "Gradient clipping"})
     cliprange_value: float = field(default=0.5, metadata={"help": "Value clipping range"})
     ulysses_sequence_parallel_size: int = field(default=1, metadata={"help": "Sequence parallel size"})
-    forward_micro_batch_size_per_gpu: int = field(default=None, metadata={"help": "Forward micro batch size per gpu"})
-    forward_micro_batch_size: int = field(default=None, metadata={"help": "Forward micro batch size"})
     forward_max_token_len_per_gpu: int = field(default=32768, metadata={"help": "Forward max token length in per gpu"})
     load_weight: bool = field(default=True)
-    rollout_n: int = field(default=5, metadata={"help": "rollout n"})
+    rollout_n: int = field(default=1, metadata={"help": "rollout n"})
     checkpoint: CheckpointArguments = field(default_factory=CheckpointArguments, metadata={"help": "Checkpoint configuration"})
     ppo_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU"})
     loss_agg_mode: str = field(default="token-mean", metadata={"help": "token-mean, seq-mean-token-sum, seq-mean-token-mean"})
@@ -518,9 +526,7 @@ class RewardModelArguments:
     max_length: Optional[int] = field(default=None, metadata={"help": "Max sequence length"})
     ulysses_sequence_parallel_size: int = field(default=1, metadata={"help": "Sequence parallel size"})
     use_dynamic_bsz: bool = field(default=False, metadata={"help": "Dynamic batch size"})
-    reward_manager: str = field(default="batch", metadata={"help": "Reward management strategy"})
-    forward_micro_batch_size_per_gpu: int = field(default=None, metadata={"help": "Forward micro batch size per gpu"})
-    forward_micro_batch_size: int = field(default=None, metadata={"help": "Forward micro batch size"})
+    reward_manager: str = field(default="naive", metadata={"help": "Reward management strategy"})
     forward_max_token_len_per_gpu: int = field(default=32768, metadata={"help": "Forward max token length in per gpu"})
     load_weight: bool = field(default=True)
     launch_reward_fn_async: bool = field(default=False, metadata={"help": "custom reward function executed async on CPU, during log_prob"})
@@ -539,7 +545,7 @@ class RewardModelArguments:
 class KLCtrlArguments:
     type: str = field(default="fixed", metadata={"help": "Type of KL Ctrl, fixed or adaptive"})
     kl_coef: float = field(default=0.001, metadata={"help": "Coef of KL"})
-    target_kl: Optional[float] = field(default=0, metadata={"help": "Target KL value"})
+    target_kl: Optional[float] = field(default=0.1, metadata={"help": "Target KL value"})
     horizon: Optional[float] = field(default=0, metadata={"help": "Horizon of KL"})
 
 
@@ -562,7 +568,7 @@ class AlgorithmArguments:
     adv_estimator: str = field(default="gae", metadata={"help": "Advantage estimator"})
     kl_penalty: str = field(default="kl", metadata={"help": "KL penalty type"})
     kl_ctrl: KLCtrlArguments = field(default_factory=KLCtrlArguments)
-    use_kl_in_reward: bool = field(default=True, metadata={"help": "Use KL In-Reward"})
+    use_kl_in_reward: bool = field(default=False, metadata={"help": "Use KL In-Reward"})
     share_reward_in_agent: bool = field(default=True, metadata={"help": "Shard Reward in Reward"})
     norm_adv_by_std_in_grpo: bool = field(default=True, metadata={"help": "Whether to scale the GRPO advantage"})
     weight_factor_in_cpgd: str = field(default="STD_weight", metadata={"help": "The weighting methods for advantage {STD_weight, clip_filter_like_weight, naive}"})

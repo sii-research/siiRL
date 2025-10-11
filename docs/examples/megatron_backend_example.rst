@@ -137,7 +137,7 @@ Below is a complete example script, `run_qwen3-8b-megatron.sh`, which is adapted
 
     # --- Define the Training Command and its Arguments ---
     TRAINING_CMD=(
-        python3 -m siirl.client.main_dag
+        python3 -m siirl.main_dag
         algorithm.adv_estimator=\$ALG
         data.train_files=\$TRAIN_DATA_PATH
         data.val_files=\$TEST_DATA_PATH

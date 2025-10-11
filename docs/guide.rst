@@ -46,7 +46,7 @@ Codebase Walkthrough: How DistFlow is Implemented
 
 The distributed philosophy of DistFlow is directly reflected in the structure of the codebase.
 
-**The Entrypoint: `siirl.client.main_dag.py`**
+**The Entrypoint: `siirl.main_dag.py`**
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Unlike previous frameworks where the entrypoint contained the entire PPO loop, the role of `main_dag.py` in siiRL is much simpler. It acts as a **launcher**. Its primary responsibilities are:
 1.  Initializing the distributed environment (Ray).

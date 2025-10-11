@@ -159,8 +159,7 @@ class MainRunner:
         logger.info(f"Workflow setup and worker launch complete. Time cost: {setup_duration:.2f}s")
 
 
-@hydra.main(config_path="./global_config/config", config_name="ppo_dag_trainer", version_base=None)
-def main(siirl_config: DictConfig) -> None:
+def main() -> None:
     """
     Main entry point for launching the PPO DAG training job.
 
@@ -175,11 +174,11 @@ def main(siirl_config: DictConfig) -> None:
     # Initialize Ray cluster if not already running
     if not ray.is_initialized():
         logger.info("Initializing local Ray cluster...")
-        ray.init(runtime_env={"env_vars": RAY_RUNTIME_ENV_VARS}, num_cpus=siirl_config.ray_init.num_cpus)
+        ray.init(runtime_env={"env_vars": RAY_RUNTIME_ENV_VARS}, num_cpus=None)
     logger.success(f"Ray is initialized. Time cost: {(time.time() - start_time) * 1000:.2f} ms")
 
     # Parse the complete configuration into a structured object
-    siirl_args = parse_config(siirl_config)
+    siirl_args = parse_config()
     log_dict_formatted(siirl_args.to_dict(), "SiiRLArguments")
 
     # Launch the main orchestration actor and wait for it to complete.
