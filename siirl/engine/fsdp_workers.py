@@ -865,9 +865,7 @@ class CriticWorker(Worker):
         self.config.ppo_mini_batch_size //= world_size // self.ulysses_sequence_parallel_size
         if self.config.ppo_micro_batch_size is not None:
             self.config.ppo_micro_batch_size //= world_size // self.ulysses_sequence_parallel_size
-            self.config.forward_micro_batch_size //= world_size // self.ulysses_sequence_parallel_size
             self.config.ppo_micro_batch_size_per_gpu = self.config.ppo_micro_batch_size
-            self.config.forward_micro_batch_size_per_gpu = self.config.forward_micro_batch_size
 
         if self.config.ppo_micro_batch_size_per_gpu is not None:
             assert self.config.ppo_mini_batch_size % self.config.ppo_micro_batch_size_per_gpu == 0, f"normalized ppo_mini_batch_size {self.config.ppo_mini_batch_size} should be divisible by ppo_micro_batch_size_per_gpu {self.config.ppo_micro_batch_size_per_gpu}"
@@ -1075,7 +1073,7 @@ class CriticWorker(Worker):
 
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.critic_module)
-        micro_batch_size = self.config.forward_micro_batch_size_per_gpu
+        micro_batch_size = self.config.ppo_micro_batch_size_per_gpu
         data.meta_info["micro_batch_size"] = micro_batch_size
         data.meta_info["max_token_len"] = self.config.forward_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.use_dynamic_bsz

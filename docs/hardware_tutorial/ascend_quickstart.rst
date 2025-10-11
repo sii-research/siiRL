@@ -118,7 +118,7 @@ To ensure your setup is correct, we recommend performing a quick test run. The f
 
     set -x
 
-    python3 -m siirl.client.main_dag \
+    python3 -m siirl.main_dag \
         algorithm.adv_estimator=grpo \
         data.train_files=/datasets/gsm8k/train.parquet\
         data.val_files=/datasets/gsm8k/teset.parquet \

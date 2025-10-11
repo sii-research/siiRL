@@ -73,7 +73,7 @@ class TrainingArguments:
     ray_wait_register_center_timeout: int = field(default=300, metadata={"help": "The timeout for ray worker group to wait for the register center to be ready"})
     validation_data_dir: Optional[str] = field(default=None, metadata={"help": "Validation data directory."})
     rollout_data_dir: Optional[str] = field(default=None, metadata={"help": "Rollout data directory."})
-    device: Optional[str] = field(default=None, metadata={"help": "Training device."})
+    device: Optional[str] = field(default="cuda", metadata={"help": "Training device."})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -82,7 +82,7 @@ class TrainingArguments:
 @dataclass
 class CustomRewardArguments:
     path: str = field(default=None, metadata={"help": "Custom reward function import file path"})
-    name: str = field(default=None, metadata={"help": "Custom reward function name"})
+    name: str = field(default="compute_score", metadata={"help": "Custom reward function name"})
     reward_kwargs: Dict[str, Any] = field(default_factory=lambda: {})
 
 
@@ -95,7 +95,7 @@ class SiiRLArguments:
     algorithm: AlgorithmArguments = field(default_factory=AlgorithmArguments)
     trainer: TrainingArguments = field(default_factory=TrainingArguments)
     custom_reward_function: CustomRewardArguments = field(default_factory=CustomRewardArguments)
-    dag: DagArguments = field(default_factory=DataArguments)
+    dag: DagArguments = field(default_factory=DagArguments)
     profiler: ProfilerArguments = field(default_factory=ProfilerArguments)
 
     def to_dict(self) -> Dict[str, Any]:

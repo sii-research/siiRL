@@ -39,7 +39,7 @@ The script specifies the path to the custom code, the function to use, and selec
 .. code-block:: bash
 
    # ... other configurations ...
-   python3 -m siirl.client.main_dag \
+   python3 -m siirl.main_dag \
        # ...
        custom_reward_function.path=$HOME/rl/rewardfunc_gsm8k.py \
        custom_reward_function.name=compute_score \

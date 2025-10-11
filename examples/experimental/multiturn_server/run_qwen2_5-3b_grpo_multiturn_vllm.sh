@@ -55,7 +55,7 @@ export PPO_MINI_BATCH_SIZE=$(($PPO_MINI_BATCH_SIZE_PER_NODE * $NNODES))
 
 # --- Define the Training Command and its Arguments ---
 TRAINING_CMD=(
-    python3 -m siirl.client.main_dag
+    python3 -m siirl.main_dag
     --config-path=\$CONFIG_PATH 
     --config-name='gsm8k_multiturn_grpo' 
     algorithm.adv_estimator=\$ALG

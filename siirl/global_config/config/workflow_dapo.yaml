@@ -42,7 +42,7 @@ nodes:
 
   - node_id: "dynamic_sampling"
     node_type: "COMPUTE"
-    executable_ref: "siirl.algorithm.dapo.dynamic_sampling"
+    executable_ref: "siirl.user_interface.filter_interface.dapo.dynamic_sampling"
     dependencies:
       - "calculate_advantages"
 
