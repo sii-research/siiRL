@@ -13,51 +13,62 @@
 # limitations under the License.
 
 import os
-from collections import defaultdict
-from typing import Any, Dict, List, Optional, Set, Tuple
-from collections import deque
-from pprint import pformat
 import uuid
-from tqdm import tqdm
-import numpy as np
-
 import ray
-from loguru import logger
+import numpy as np
 import torch
 import torch.distributed as dist
+from collections import defaultdict
+from pprint import pformat
+from tqdm import tqdm
+from loguru import logger
+from typing import Any, Dict, List, Optional, Set, Tuple, Type
 from torch.distributed import ProcessGroup
 
-from siirl.models.loader import TokenizerModule
-from siirl.execution.scheduler.process_group_manager import ProcessGroupManager
+from siirl.models.loader import TokenizerModule, load_tokenizer
 from siirl.global_config.params import SiiRLArguments
 from siirl.engine.base_worker import Worker
 from siirl.execution.dag import TaskGraph
 from siirl.execution.dag.node import NodeRole, NodeType, Node
+from siirl.execution.scheduler.reward import compute_reward, create_reward_manager
+from siirl.execution.scheduler.process_group_manager import ProcessGroupManager
+from siirl.execution.scheduler.enums import AdvantageEstimator
 from siirl.data_coordinator import DataProto
-from siirl.dag_worker.dag_utils import  (
-    remove_prefix_from_dataproto,
-    add_prefix_to_dataproto,
-    add_prefix_to_metrics
-    )
+from siirl.data_coordinator.dataloader import DataLoaderNode
 from siirl.dag_worker.data_structures import NodeOutput
-from siirl.utils.debug import DistProfiler
+from siirl.dag_worker.constants import DAGConstants, DAGInitializationError
 from siirl.dag_worker.core_algos import (
     agg_loss, 
     apply_kl_penalty, 
     compute_advantage, 
     compute_response_mask
     )
-from siirl.execution.scheduler.reward import compute_reward
-from siirl.execution.scheduler.enums import AdvantageEstimator
+from siirl.dag_worker.dag_utils import  (
+    remove_prefix_from_dataproto,
+    add_prefix_to_dataproto,
+    add_prefix_to_metrics,
+    log_ray_actor_info,
+    get_and_validate_rank,
+    get_taskgraph_for_rank,
+    log_role_worker_mapping,
+    should_create_worker,
+    generate_node_worker_key,
+    generate_agent_group_key,
+    find_first_non_compute_ancestor,
+    setup_sharding_manager,
+    get_worker_classes,
+    get_parallelism_config,
+    prepare_generation_batch
+    )
+from siirl.utils.debug import DistProfiler
+from siirl.utils.extras.device import get_device_name, get_nccl_backend
 
-from .constants import DAGConstants, DAGInitializationError
-
-from .mixins.initialization_mixin import InitializationMixin
 from .mixins.utilities_mixin import UtilitiesMixin
 from .mixins.validation_mixin import ValidationMixin
 
+device_name = get_device_name()
 
-class DAGWorker(InitializationMixin, ValidationMixin, UtilitiesMixin, Worker):
+class DAGWorker(ValidationMixin, UtilitiesMixin, Worker):
     """
     Orchestrates a Directed Acyclic Graph (DAG) of tasks for distributed training,
     managing the setup, initialization, and workflow for a specific rank.
@@ -113,8 +124,12 @@ class DAGWorker(InitializationMixin, ValidationMixin, UtilitiesMixin, Worker):
             logger.error(f"Rank {rank}: Failed to create DAGWorker due to a critical setup error: {e}", exc_info=True)
             raise DAGInitializationError(f"Initialization failed on Rank {rank}: {e}") from e
 
-        self.log_ray_actor_info()
-        
+        log_ray_actor_info(self._rank)
+
+# ==========================================================================================
+# Module 1: Execution and Training Loop
+# ==========================================================================================
+
     def execute_task_graph(self):
         """Main entry point to start the DAG execution pipeline."""
         logger.info(f"Rank {self._rank}: Starting DAG execution pipeline...")
@@ -215,43 +230,6 @@ class DAGWorker(InitializationMixin, ValidationMixin, UtilitiesMixin, Worker):
 
         if self._rank == 0 and last_val_metrics:
             logger.info(f"Final validation metrics:\n{pformat(last_val_metrics)}")
-
-    def _find_first_non_compute_ancestor(self, start_node_id: str) -> Optional[Node]:
-        """
-        Traverses upwards from a starting node to find the first ancestor
-        that is not of type COMPUTE.
-
-        Uses a Breadth-First Search (BFS) strategy to prioritize finding the
-        closest ancestor by level.
-        """
-        start_node = self.taskgraph.get_node(start_node_id)
-        if not start_node:
-            logger.warning(f"Could not find start node '{start_node_id}' in the graph.")
-            return None
-
-        if start_node.node_type != NodeType.COMPUTE:
-            return start_node
-        queue = deque(start_node.dependencies)
-        visited = set(start_node.dependencies)
-        node_id = start_node_id
-
-        while queue:
-            logger.debug(f"try find dependency node with ID '{node_id}' during upward search")
-            node_id = queue.popleft()
-            node = self.taskgraph.get_node(node_id)
-
-            if not node:
-                logger.warning(f"Could not find dependency node with ID '{node_id}' during upward search.")
-                continue
-
-            if node.node_type != NodeType.COMPUTE:
-                return node
-
-            for dep_id in node.dependencies:
-                if dep_id not in visited:
-                    visited.add(dep_id)
-                    queue.append(dep_id)
-        return None
 
     def _cleanup_step_buffers(self, visited_nodes: Set[str], timing_raw: dict) -> None:
         """
@@ -410,10 +388,14 @@ class DAGWorker(InitializationMixin, ValidationMixin, UtilitiesMixin, Worker):
         ordered_metrics.extend([("training/global_step", self.global_steps + 1), ("training/epoch", epoch + 1)])
         return ordered_metrics
 
+# ==========================================================================================
+# Module 2: Graph Node Execution Handlers
+# ==========================================================================================
+
     @DistProfiler.annotate(role="generate")
     def generate_sync_mode(self, worker_group_index: int, batch: DataProto, **kwargs) -> NodeOutput:
         """Sync mode"""
-        gen_batch:DataProto = self._prepare_generation_batch(batch)
+        gen_batch:DataProto = prepare_generation_batch(batch)
         if self.config.actor_rollout_ref.rollout.name == 'sglang':
             gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
         gen_output = self.agent_group_worker[worker_group_index][NodeRole.ROLLOUT].generate_sequences(gen_batch)
@@ -429,7 +411,7 @@ class DAGWorker(InitializationMixin, ValidationMixin, UtilitiesMixin, Worker):
     def generate_async_mode(self, worker_group_index: int, batch: DataProto, **kwargs) -> NodeOutput:
         """Async mode"""
         if self._async_rollout_manager is not None:
-            gen_batch = self._prepare_generation_batch(batch)
+            gen_batch = prepare_generation_batch(batch)
             gen_output = self._async_rollout_manager.generate_sequences(gen_batch)
             metrics = gen_output.meta_info.get("metrics", {})
             gen_output.meta_info = {}
@@ -443,7 +425,7 @@ class DAGWorker(InitializationMixin, ValidationMixin, UtilitiesMixin, Worker):
     @DistProfiler.annotate(role="generate")
     def generate_multi_agent_mode(self, worker_group_index: int, batch: DataProto, **kwargs) -> NodeOutput:
         """Generates sequences for a training batch using the multi-agent rollout model."""
-        gen_batch = self._prepare_generation_batch(batch)
+        gen_batch = prepare_generation_batch(batch)
         if self.config.actor_rollout_ref.rollout.agent.rewards_with_env and "reward_model" in batch.non_tensor_batch:
             gen_batch.non_tensor_batch["reward_model"] = batch.non_tensor_batch["reward_model"] 
         assert self.config.actor_rollout_ref.rollout.name == 'sglang'
@@ -601,3 +583,366 @@ class DAGWorker(InitializationMixin, ValidationMixin, UtilitiesMixin, Worker):
         process_group = self._get_node_process_group(self._get_node(NodeRole.ACTOR, worker_group_index))
         metrics = self._reduce_and_broadcast_metrics(processed_data.meta_info.get("metrics"), process_group)
         return NodeOutput(batch=processed_data, metrics=metrics)
+
+# ==========================================================================================
+# Module 3: Worker and Environment Initialization
+# ==========================================================================================
+
+    def _initialize_worker(self):
+        """Orchestrates the ordered initialization of all worker components."""
+        self._rank = get_and_validate_rank()
+        self.taskgraph = get_taskgraph_for_rank(self._rank, self.taskgraph_mapping)
+        
+        self._setup_distributed_environment()
+        self._setup_tokenizers()
+        self._setup_dataloader_and_reward()
+        self._setup_role_worker_mapping()
+        self._initialize_node_workers()
+        self._profiler = DistProfiler(rank=self._rank, config=self.config.profiler)
+
+        if self._rank == 0:
+            logger.info("Rank 0: Initializing tracking logger...")
+            from siirl.utils.logger.tracking import Tracking
+
+            self.logger = Tracking(
+                project_name=self.config.trainer.project_name,
+                experiment_name=self.config.trainer.experiment_name,
+                default_backend=self.config.trainer.logger,
+                config=self.config.to_dict(),
+            )
+            if self.enable_perf:
+                logger.warning("Performance tracking is enabled. This may impact training speed.")
+
+    def _setup_distributed_environment(self):
+        """Initializes the default process group and all required subgroups."""
+        # gloo_socket_ifname = 'bond0'
+        # os.environ["GLOO_SOCKET_IFNAME"] = gloo_socket_ifname
+        # os.environ["GLOO_LOG_LEVEL"] = "DEBUG"
+        
+        if not dist.is_initialized():
+            backend = (
+                f"{get_nccl_backend()}"
+                if self.world_size >= self.config.dag.backend_threshold
+                else f"cpu:gloo,{get_device_name()}:{get_nccl_backend()}"
+            )
+            logger.info(
+                f"Rank {self._rank}: Initializing world size {self.world_size} default process group with '{backend}' "
+                f"backend."
+            )
+            dist.init_process_group(backend=backend)
+
+        if device_name == "npu":
+            # For NPU, metrics aggregation requires the hccl backend for device-to-device communication.
+            # This group is created regardless of world size for NPU environments.
+            gather_backend = get_nccl_backend()
+            self._gather_group = dist.new_group(backend=gather_backend)
+        else:
+            # For GPU, the original logic is preserved for backward compatibility.
+            # The gather group is only created if world_size < backend_threshold.
+            self._gather_group = dist.new_group(
+                backend="gloo") if self.world_size < self.config.dag.backend_threshold else None
+            
+        group_specs = self.process_group_manager.get_all_specs()
+        if not group_specs:
+            logger.warning("No process group specifications found in ProcessGroupManager.")
+            return
+
+        #Builds all process groups defined in the ProcessGroupManager.
+        for name, spec in group_specs.items():
+            if not isinstance(spec, dict) or not (ranks := spec.get("ranks")):
+                logger.warning(f"Skipping group '{name}' due to invalid spec or missing 'ranks'.")
+                continue
+            self.process_groups[name] = dist.new_group(ranks=ranks)
+        logger.debug(f"Rank {self._rank}: Created {len(self.process_groups)} custom process groups.")
+        
+        self.inference_group_name_set = self.process_group_manager.get_process_group_for_node_type_in_subgraph(
+            self.taskgraph.graph_id, NodeType.MODEL_INFERENCE.value
+        )
+        self.train_group_name_set = self.process_group_manager.get_process_group_for_node_type_in_subgraph(
+            self.taskgraph.graph_id, NodeType.MODEL_TRAIN.value
+        )
+
+        # Ensure all ranks have finished group creation before proceeding.
+        dist.barrier(self._gather_group)
+        logger.info(f"Rank {self._rank}: Distributed environment setup complete.")
+
+    def _setup_tokenizers(self):
+        """Initializes and caches tokenizers for all models in the task graph."""
+        model_nodes = [
+            node
+            for node in self.taskgraph.nodes.values()
+            if node.node_type in [NodeType.MODEL_TRAIN, NodeType.MODEL_INFERENCE]
+        ]
+        if not model_nodes:
+            logger.warning("No model nodes found in the task graph. Tokenizer setup will be skipped.")
+            return
+
+        for node in model_nodes:
+            agent_key = generate_agent_group_key(node)
+            if agent_key not in self.tokenizer_mapping:
+                # Add robust check for missing configuration.
+                intern_config = node.config.get(DAGConstants.INTERN_CONFIG)
+                if not intern_config or not (model_dict := getattr(intern_config, "model", None)):
+                    logger.warning(f"Node {node.node_id} is missing model config. Skipping tokenizer setup for it.")
+                    continue
+
+                tokenizer_module = load_tokenizer(model_args=model_dict)
+                if tokenizer := tokenizer_module.get("tokenizer"):
+                    tokenizer.padding_side = "left"  # Required for most causal LM generation
+                self.tokenizer_mapping[agent_key] = tokenizer_module
+        logger.info(f"Rank {self._rank}: Initialized {len(self.tokenizer_mapping)} tokenizer(s).")
+
+    def _setup_dataloader_and_reward(self):
+        """Initializes the data loader and reward functions."""
+        rollout_nodes = [n for n in self.taskgraph.nodes.values() if n.node_type == NodeType.MODEL_INFERENCE]
+        if not rollout_nodes:
+            raise ValueError("At least one MODEL_INFERENCE node is required for dataloader and reward setup.")
+        self.first_rollout_node = rollout_nodes[0]
+
+        pg_assignment = self.process_group_manager.get_node_assignment(self.first_rollout_node.node_id)
+        if not (process_group_name := pg_assignment.get("process_group_name")):
+            raise ValueError(
+                f"Process group name not found for the first rollout node {self.first_rollout_node.node_id}."
+            )
+
+        self.dataloader_process_group = self.process_groups.get(process_group_name)
+        if self.dataloader_process_group is None:
+            raise ValueError(f"Could not find process group '{process_group_name}' in the created groups.")
+
+        self.dataloader_tensor_model_parallel_size = self.first_rollout_node.config[
+            DAGConstants.INTERN_CONFIG
+        ].rollout.tensor_model_parallel_size
+
+        self.dataloader = DataLoaderNode(
+            node_id="dataloader",
+            global_config=self.config,
+            config={
+                "group_world_size": dist.get_world_size(self.dataloader_process_group),
+                "group_rank": dist.get_rank(self.dataloader_process_group),
+                "group_parallel_size": self.dataloader_tensor_model_parallel_size,
+                "num_loader_workers": self.config.data.num_loader_workers,
+                "auto_repeat": self.config.data.auto_repeat,
+            },
+        )
+
+        self.validate_tokenizer = next(iter(self.tokenizer_mapping.values()), {}).get("tokenizer")
+        if not self.validate_tokenizer:
+            logger.warning("No tokenizer loaded; reward functions might fail or use a default one.")
+
+        self.val_reward_fn = create_reward_manager(
+            self.config,
+            self.validate_tokenizer,
+            num_examine=1,
+            max_resp_len=self.config.data.max_response_length,
+            overlong_buffer_cfg=self.config.reward_model.overlong_buffer,
+        )
+        self.reward_fn = create_reward_manager(
+            self.config,
+            self.validate_tokenizer,
+            num_examine=0,
+            max_resp_len=self.config.data.max_response_length,
+            overlong_buffer_cfg=self.config.reward_model.overlong_buffer,
+            **self.config.reward_model.reward_kwargs,
+        )
+
+        if self.config.algorithm.use_kl_in_reward:
+            from siirl.dag_worker import core_algos
+            self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
+
+    def _setup_role_worker_mapping(self):
+        """Creates a mapping from NodeRole to the corresponding Worker implementation class."""
+        self.role_worker_mapping: Dict[NodeRole, Type[Worker]] = {}
+        # Actor/Ref/Rollout/Critic workers
+        actor_strategy = self.config.actor_rollout_ref.actor.strategy
+        self.role_worker_mapping.update(get_worker_classes(self.config, actor_strategy))
+
+        # Reward model worker (if enabled)
+        if self.config.reward_model.enable:
+            reward_strategy = self.config.reward_model.strategy
+            reward_workers = get_worker_classes(self.config, reward_strategy)
+            if NodeRole.REWARD in reward_workers:
+                self.role_worker_mapping[NodeRole.REWARD] = reward_workers[NodeRole.REWARD]
+            else:
+                logger.warning(
+                    f"Reward model is enabled, but no worker found for role REWARD with strategy {reward_strategy}."
+                )
+
+        log_role_worker_mapping(self.role_worker_mapping)
+
+    def _initialize_node_workers(self):
+        """Instantiates worker objects for all nodes in the task graph."""
+        for node in self.taskgraph.nodes.values():
+            if not should_create_worker(self.role_worker_mapping, node):
+                continue
+
+            worker_cls = self.role_worker_mapping.get(node.node_role)
+            if not worker_cls:
+                logger.warning(f"No worker class found for role {node.node_role.name}. Skipping node {node.node_id}.")
+                continue
+
+            node_worker_key = generate_node_worker_key(node)
+            if node_worker_key in self.workers:
+                continue
+
+            try:
+                node_process_group = self._get_node_process_group(node)
+                config = node.config.get(DAGConstants.INTERN_CONFIG)
+                if hasattr(config, "actor") and hasattr(config.actor, "optim"):
+                    config.actor.optim.total_training_steps = self.dataloader.total_training_steps
+                elif hasattr(config, "optim"):
+                    config.optim.total_training_steps = self.dataloader.total_training_steps
+                worker_args = {"config": config, "process_group": node_process_group}
+               
+                # For separated workers (Megatron backend), no role parameter is needed
+                # Only legacy ActorRolloutRefWorker needs the role parameter
+                if hasattr(worker_cls, '__name__') and 'ActorRolloutRefWorker' in worker_cls.__name__:
+                    if node.node_role in DAGConstants.WORKER_ROLE_MAPPING:
+                        worker_args["role"] = DAGConstants.WORKER_ROLE_MAPPING[node.node_role]
+                if node.agent_options and node.agent_options.share_instance:
+                    # cur agent share same critic with target agent
+                    self.agent_group_worker[node.agent_group][node.node_role] = self.agent_group_worker[node.agent_options.share_instance][node.node_role]
+                else:
+                    worker_instance = worker_cls(**worker_args)
+                    self.workers[node_worker_key] = worker_instance
+                    self.agent_group_worker[node.agent_group][node.node_role] = worker_instance
+                    self.agent_group_process_group[node.agent_group][node.node_role] = node_process_group
+                    logger.success(
+                        f"Rank {self._rank}: Successfully created worker '{worker_cls.__name__}' for node: {node.node_id}"
+                    )
+
+            except Exception as e:
+                #  Explicitly log the failing node and worker class, then re-raise
+                # the exception to prevent silent failures.
+                logger.error(
+                    f"Failed to create worker for node {node.node_id} with class {worker_cls.__name__}.", exc_info=True
+                )
+                raise RuntimeError(f"Worker instantiation failed for node {node.node_id}") from e
+        
+        if len(self.agent_group_worker) > 1:
+            self._multi_agent = True
+
+    def _get_node_process_group(self, node: Node) -> ProcessGroup:
+        """Retrieves the PyTorch ProcessGroup assigned to a specific graph node."""
+        assignment = self.process_group_manager.get_node_assignment(node.node_id)
+        if not (assignment and (name := assignment.get("process_group_name"))):
+            raise ValueError(f"Process group assignment or name not found for node {node.node_id}.")
+
+        pg = self.process_groups.get(name)
+        if pg is None:
+            raise ValueError(f"Process group '{name}' for node {node.node_id} was not created or found.")
+        return pg
+
+    def _get_node(self, role: NodeRole, agent_group: int) -> Node:
+        """
+        Finds and returns a specific node from the task graph based on its role
+        and agent group.
+        """
+        found_node = next(
+            (
+                node
+                for node in self.taskgraph.nodes.values()
+                if node.node_role == role and node.agent_group == agent_group
+            ),
+            None,
+        )
+
+        if found_node is None:
+            raise RuntimeError(f"Could not find a node with role {role.name} for agent_group {agent_group}")
+        return found_node
+
+    def _get_node_dp_info(self, node: Node) -> tuple[int, int, int, int, int, int]:
+        """
+        Calculates Data Parallel (DP), Tensor Parallel (TP), and Pipeline Parallel (PP) info for a node.
+        
+        Returns:
+            tuple: (dp_size, dp_rank, tp_rank, tp_size, pp_rank, pp_size)
+        """
+        reference_node = node
+        if node.node_type == NodeType.COMPUTE:
+            # If the node is a COMPUTE type, find its true data source ancestor.
+            ancestor = find_first_non_compute_ancestor(self.taskgraph, node.node_id)
+            if ancestor:
+                reference_node = ancestor
+            else:
+                # If no non-COMPUTE ancestor is found, it's a critical error.
+                raise RuntimeError(f"Could not find any non-COMPUTE ancestor for COMPUTE node '{node.node_id}'. Please check your DAG graph configuration.")
+
+        if reference_node.node_type == NodeType.COMPUTE:
+            group_world_size = self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes
+            group_rank = dist.get_rank()
+        else:
+            process_group = self._get_node_process_group(reference_node)
+            group_world_size = dist.get_world_size(process_group)
+            group_rank = dist.get_rank(process_group)
+
+        # Get parallelism configuration based on backend strategy
+        tp_size, pp_size = get_parallelism_config(reference_node)
+        
+        # Calculate total parallel size (TP * PP)
+        total_parallel_size = tp_size * pp_size
+        
+        if group_world_size % total_parallel_size != 0:
+            raise ValueError(f"Configuration error for node {node.node_id}: Group world size ({group_world_size}) is not divisible by total parallel size (TP={tp_size} * PP={pp_size} = {total_parallel_size}). Check your parallel configuration.")
+        
+        dp_size = group_world_size // total_parallel_size
+        
+        # Calculate ranks within the data parallel group
+        dp_rank = group_rank // total_parallel_size
+        
+        # Calculate position within the TP-PP grid
+        local_rank_in_tp_pp_group = group_rank % total_parallel_size
+        
+        # For 2D parallelism: ranks are arranged as [PP0_TP0, PP0_TP1, ..., PP0_TP(tp_size-1), PP1_TP0, ...]
+        pp_rank = local_rank_in_tp_pp_group // tp_size
+        tp_rank = local_rank_in_tp_pp_group % tp_size
+        
+        return dp_size, dp_rank, tp_rank, tp_size, pp_rank, pp_size
+    
+    def init_model(self):
+        """Initializes models for all workers and sets up sharding managers where applicable."""
+        logger.info("Initializing models for all worker nodes...")
+        have_init_workers = set()
+        for node in self.taskgraph.nodes.values():
+            if should_create_worker(self.role_worker_mapping, node):
+                node_worker = self.workers[generate_node_worker_key(node)]
+                if not isinstance(node_worker, Worker):
+                    raise TypeError(f"Invalid worker type for node {node.node_id}: {type(node_worker).__name__}")
+                if generate_node_worker_key(node) in have_init_workers:
+                    logger.warning(
+                        f"Rank {self._rank}: Worker {generate_node_worker_key(node)} for node {node.node_id} "
+                        f"already initialized. Skipping."
+                    )
+                    continue
+                node_worker.init_model()
+                have_init_workers.add(generate_node_worker_key(node))
+                if node.node_role == NodeRole.ROLLOUT and node.config["intern_config"].rollout.mode == "async":
+                    self.rollout_mode = "async"
+                    self.zmq_address = node_worker.get_zeromq_address()
+        logger.success("All worker models initialized.")
+
+        logger.info(f"Setting up sharding managers {self.config.actor_rollout_ref.rollout.name} ...")
+        for agent_group, worker_dict in self.agent_group_worker.items():
+            if NodeRole.ACTOR in worker_dict and NodeRole.ROLLOUT in worker_dict:
+                try:
+                    setup_sharding_manager(self.config, self.agent_group_process_group, agent_group, worker_dict)
+                except Exception as e:
+                    logger.error(f"Failed to set up sharding manager for agent group {agent_group}: {e}", exc_info=True)
+                    raise
+        logger.info("All models and sharding managers initialized successfully.")
+        if self._multi_agent:
+            from siirl.execution.rollout_flow.multi_agent.multiagent_generate import MultiAgentLoop
+            self.multi_agent_loop =  MultiAgentLoop(self, config = self.config.actor_rollout_ref, node_workers = self.workers, local_dag = self.taskgraph, databuffer = self.data_buffers, placement_mode = 'colocate')
+
+    def init_graph(self):
+        # this is needed by async rollout manager
+        self._set_node_executables()
+        self.init_model()
+        self._load_checkpoint()
+        # Ensure all models are initialized and checkpoints are loaded before starting.
+        dist.barrier(self._gather_group)
+
+    def set_async_rollout_manager(self, async_rollout_manager):
+        self._async_rollout_manager = async_rollout_manager
+
+    def get_zeromq_address(self):
+        return self.zmq_address

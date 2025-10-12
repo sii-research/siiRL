@@ -28,6 +28,7 @@ from siirl.utils.metrics.metric_utils import aggregate_validation_metrics
 from siirl.execution.dag.node import NodeRole
 from siirl.dag_worker.data_structures import ValidationPayload, ValidationResult
 from siirl.data_coordinator import DataProto, pad_dataproto_to_divisor, unpad_dataproto
+from siirl.dag_worker.dag_utils import prepare_generation_batch
 
 
 class ValidationMixin:
@@ -120,23 +121,6 @@ class ValidationMixin:
         n_samples = self.config.actor_rollout_ref.rollout.val_kwargs.n
         return test_batch_proto.repeat(n_samples, interleave=True)
 
-    def _prepare_generation_batch(self, batch: DataProto) -> DataProto:
-        """Pops keys from a batch to isolate data needed for sequence generation."""
-        batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
-        non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
-        if "multi_modal_inputs" in batch.non_tensor_batch:
-            non_tensor_batch_keys_to_pop.extend(["multi_modal_data", "multi_modal_inputs"])
-        if "tools_kwargs" in batch.non_tensor_batch:
-            non_tensor_batch_keys_to_pop.append("tools_kwargs")
-        if "raw_prompt" in batch.non_tensor_batch:
-            non_tensor_batch_keys_to_pop.append("raw_prompt")
-        if "interaction_kwargs" in batch.non_tensor_batch:
-            non_tensor_batch_keys_to_pop.append("interaction_kwargs")
-        return batch.pop(
-            batch_keys=batch_keys_to_pop,
-            non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
-        )
-
     def _generate_for_validation(self, batch_proto: DataProto) -> DataProto:
         """Generates sequences using the rollout worker for a validation batch."""
         rollout_worker = self.agent_group_worker[0][NodeRole.ROLLOUT]
@@ -150,7 +134,7 @@ class ValidationMixin:
         # Store the list of decoded strings to be passed along through the process.
         batch_proto.non_tensor_batch["prompt_texts"] = prompt_texts
 
-        gen_batch = self._prepare_generation_batch(batch_proto)
+        gen_batch = prepare_generation_batch(batch_proto)
 
         if self.config.actor_rollout_ref.rollout.agent.rewards_with_env and "reward_model" in batch_proto.non_tensor_batch:
             gen_batch.non_tensor_batch["reward_model"] = batch_proto.non_tensor_batch["reward_model"] 

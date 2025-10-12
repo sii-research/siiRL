@@ -272,15 +272,7 @@ class UtilitiesMixin:
     data_buffers: List["ray.actor.ActorHandle"]
     taskgraph_execute_finished: bool
 
-    generate: Any
-    compute_ref_log_prob: Any
-    compute_old_log_prob: Any
-    train_actor: Any
-    compute_value: Any
-    train_critic: Any
-    _generate_node_worker_key: Any
     _get_node_dp_info: Any
-    postprocess_sampling: Any
 
     @contextmanager
     def _timer(self, name: str, timing_dict: dict):
@@ -331,7 +323,7 @@ class UtilitiesMixin:
         saved_worker_keys = set()
         for node in self.taskgraph.nodes.values():
             if node.node_type == NodeType.MODEL_TRAIN and node.node_role in [NodeRole.ACTOR, NodeRole.CRITIC]:
-                node_worker_key = self._generate_node_worker_key(node)
+                node_worker_key = generate_node_worker_key(node)
                 if node_worker_key in saved_worker_keys:
                     continue
 
@@ -438,7 +430,7 @@ class UtilitiesMixin:
         loaded_worker_keys = set()
         for node in self.taskgraph.nodes.values():
             if node.node_type == NodeType.MODEL_TRAIN and node.node_role in [NodeRole.ACTOR, NodeRole.CRITIC]:
-                node_worker_key = self._generate_node_worker_key(node)
+                node_worker_key = generate_node_worker_key(node)
                 if node_worker_key in loaded_worker_keys:
                     continue
 

@@ -80,6 +80,7 @@ class MultiAgentLoop(UtilitiesMixin):
     def _generate_node_worker_key(self, node: Node) -> str:
         """Generates a unique string key for a node's worker instance."""
         return f"{node.agent_group}_{node.node_type.value}_{node.node_role.value}"
+    
     def node_if_local(self, node):
     # used in spread mode to judge agent node if in current gpu_worker
         pass
