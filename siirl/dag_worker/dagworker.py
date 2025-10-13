@@ -19,6 +19,7 @@ import time
 import torch
 import asyncio
 import psutil
+import random
 import numpy as np
 import torch.distributed as dist
 from collections import defaultdict
@@ -1512,7 +1513,7 @@ class DAGWorker(Worker):
         loop = asyncio.get_event_loop()
         key = key + f"_{cur_dp_rank}"
         prefix_key = f"agent_group_{agent_group}_"
-        with timer(self.enable_perf, self.enable_perf, f"get_ref_data_{key}", timing_raw):
+        with timer(self.enable_perf, f"get_ref_data_{key}", timing_raw):
             tasks = [buf.get.remote(key) for buf in self.data_buffers]
             temp_data =loop.run_until_complete(asyncio.gather(*tasks))
             # temp_data = self.data_buffers.get(key) 
