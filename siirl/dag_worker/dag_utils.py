@@ -1,22 +1,44 @@
 import os
+import csv
 import ray
 import torch
 import inspect
+import json
+import time
+import hashlib
+import numpy as np
+import torch.distributed as dist
+from contextlib import contextmanager
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from pathlib import Path
 from collections import deque
 from tensordict import TensorDict
-from typing import Dict, Optional, Type
+from typing import Dict, Optional, Type, List, Any, Tuple
 from loguru import logger
-import torch.distributed as dist
-
 
 from siirl.data_coordinator import DataProto
 from siirl.execution.dag.node import Node, NodeType, NodeRole
 from siirl.execution.dag import TaskGraph
-from siirl.utils.extras.device import get_device_name
+from siirl.utils.extras.device import get_device_name, device_synchronize
 from siirl.engine.base_worker import Worker
 from siirl.utils.import_string import import_string
 from siirl.dag_worker.constants import DAGConstants
+from siirl.dag_worker.data_structures import ValidationPayload, ValidationResult
 
+
+
+@contextmanager
+def timer(enable_perf, name: str, timing_dict: dict):
+    """A context manager to measure execution time of a code block."""
+    if enable_perf:
+        device_synchronize()
+    start_time = time.perf_counter()
+    yield
+    if enable_perf:
+        device_synchronize()
+    end_time = time.perf_counter()
+    timing_dict[name] = timing_dict.get(name, 0) + end_time - start_time
 
 
 def add_prefix_to_dataproto(data_proto: DataProto, node: Node):
@@ -187,6 +209,106 @@ def log_role_worker_mapping(role_worker_mapping):
             f"  {role.name:<{max_len}} => {worker_cls.__name__} (from {inspect.getmodule(worker_cls).__name__})"
         )
     logger.debug("--------------------------------------")
+
+
+def aggregate_and_write_performance_metrics(
+    gather_group, 
+    rank, 
+    global_steps, 
+    config, 
+    metrics: Dict[str, Any]):
+    """
+    Gathers performance metrics from all rank,s to rank 0 and writes them to a CSV file.
+    Each row corresponds to a metric key COMMON to all ranks, and each column to a rank.
+    This function is called only if performance profiling is enabled.
+    """
+    # Gather all metrics dictionaries to rank 0
+    world_size = dist.get_world_size()
+    gathered_metrics = [None] * world_size if rank == 0 else None
+    dist.gather_object(metrics, gathered_metrics, dst=0, group=gather_group)
+
+    if rank == 0:
+        if not gathered_metrics:
+            logger.warning("No metrics gathered on rank 0. Skipping performance CSV write.")
+            return
+
+        valid_metrics = [m for m in gathered_metrics if isinstance(m, dict) and m]
+        if not valid_metrics:
+            logger.warning("No valid metric dictionaries received on rank 0. Skipping CSV write.")
+            return
+
+        common_keys = set(valid_metrics[0].keys())
+        for rank_metrics in valid_metrics[1:]:
+            common_keys.intersection_update(rank_metrics.keys())
+
+        sorted_keys = sorted(list(common_keys))
+
+        if not sorted_keys:
+            logger.warning(
+                f"No common metric keys found across all ranks for step {global_steps}. Skipping CSV write."
+            )
+            return
+
+        ts = get_time_now().strftime("%Y-%m-%d-%H-%M-%S")
+        try:
+            # Try to get model name from model path config
+            model_name = os.path.basename(os.path.normpath(config.actor_rollout_ref.model.path))
+            output_dir = os.path.join("performance_logs", model_name, ts)
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as e:
+            logger.error(f"Failed to create performance log directory {output_dir}: {e}")
+            return
+
+        filename = os.path.join(output_dir, f"world_{world_size}_step_{global_steps}_common_metrics.csv")
+
+        try:
+            with open(filename, "w", newline="", encoding="utf-8") as csvfile:
+                writer = csv.writer(csvfile)
+
+                header = (
+                    ["metric"]
+                    + [f"rank_{i}" for i in range(world_size)]
+                    + ["max", "min", "delta_max_min", "delta_max_rank_0"]
+                )
+                writer.writerow(header)
+
+                for key in sorted_keys:
+                    row = [key]
+                    for i in range(world_size):
+                        rank_metrics = gathered_metrics[i]
+
+                        if isinstance(rank_metrics, dict):
+                            value = rank_metrics.get(key, "Error: Key Missing")
+                        else:
+                            value = "N/A: Invalid Data"
+                        row.append(value)
+                        
+                    row_max = max([x for x in row[1:] if isinstance(x, (int, float))], default="N/A")
+                    row_min = min([x for x in row[1:] if isinstance(x, (int, float))], default="N/A")
+                    row_delta_max = (
+                        row_max - row_min
+                        if isinstance(row_max, (int, float)) and isinstance(row_min, (int, float))
+                        else "N/A"
+                    )
+                    row_delta_rank0 = row_max - row[1] if isinstance(row[1], (int, float)) else "N/A"
+                    row.extend([row_max, row_min, row_delta_max, row_delta_rank0])
+                    writer.writerow(row)
+
+            logger.info(
+                f"Common performance metrics for step {global_steps} successfully written to {filename}"
+            )
+
+        except OSError as e:
+            logger.error(f"Failed to write performance metrics to CSV file {filename}: {e}")
+
+
+def log_metrics_to_console(rank, ordered_metrics: List[Tuple[str, Any]], step: int):
+    """Logs a formatted string of metrics to the console on rank 0."""
+    if rank != 0:
+        return
+    log_parts = [f"step:{step}"]
+    log_parts.extend([f"{k}:{v:.4f}" if isinstance(v, float) else f"{k}:{v}" for k, v in ordered_metrics])
+    logger.info(" | ".join(log_parts))
 
 
 def find_first_non_compute_ancestor(taskgraph, start_node_id: str) -> Optional[Node]:
@@ -464,3 +586,304 @@ def prepare_generation_batch(batch: DataProto) -> DataProto:
         batch_keys=batch_keys_to_pop,
         non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
     )
+    
+
+def prepare_local_batch_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str, torch.Tensor]:
+    """
+    Prepares a dictionary of raw local metric tensors from a batch.
+    This function DOES NOT pre-aggregate values (like sum, max, min).
+    It provides the raw data needed for a more efficient `all_reduce` aggregation.
+
+    Args:
+        batch: The local data shard for the current rank.
+        use_critic: Flag to include critic-related metric components.
+
+    Returns:
+        A dictionary of tensors representing local, raw metric values.
+    """
+    from siirl.utils.metrics.metric_utils import _compute_response_info
+
+    response_info = _compute_response_info(batch)
+    response_mask = response_info["response_mask"].bool()
+    device = batch.batch["advantages"].device
+    max_response_length = batch.batch["responses"].shape[-1]
+    response_lengths = response_info["response_length"].to(device)
+    prompt_lengths = response_info["prompt_length"].to(device)
+    # Components for correct/wrong response length metrics
+    correct_threshold = 0.5
+    rewards_per_response = batch.batch["token_level_rewards"].sum(-1)
+    correct_mask = rewards_per_response > correct_threshold
+    # Components for prompt clip ratio
+    prompt_attn_mask = batch.batch["attention_mask"][:, :-max_response_length]
+    max_prompt_length = prompt_attn_mask.size(-1)
+
+    # Prepare a dictionary to hold all local raw values
+    local_data = {
+        "score": batch.batch["token_level_scores"].sum(-1),
+        "rewards": batch.batch["token_level_rewards"].sum(-1),
+        "advantages": torch.masked_select(batch.batch["advantages"], response_mask),
+        "returns": torch.masked_select(batch.batch["returns"], response_mask),
+        "response_length": response_info["response_length"].to(device),
+        "prompt_length": response_info["prompt_length"].to(device),
+        "correct_response_length": response_lengths[correct_mask],
+        "wrong_response_length": response_lengths[~correct_mask],
+        "response_clip_ratio": torch.eq(response_info["response_length"], max_response_length).float(),
+        "prompt_clip_ratio": torch.eq(prompt_lengths, max_prompt_length).float(),
+    }
+
+    if use_critic:
+        valid_values = torch.masked_select(batch.batch["values"], response_mask)
+        error = local_data["returns"] - valid_values
+
+        critic_data = {
+            "values": valid_values,
+            # Special components for explained variance. These will be summed globally.
+            "returns_sq_sum_comp": torch.sum(torch.square(local_data["returns"])),
+            "error_sum_comp": torch.sum(error),
+            "error_sq_sum_comp": torch.sum(torch.square(error)),
+        }
+        local_data.update(critic_data)
+
+    return local_data
+
+
+def dump_validation_generations(config, global_steps, rank, results: List[ValidationResult]):
+    """
+    Dumps local validation generation results to a rank-specific JSONL file.
+
+    This method is called by each rank to dump its own portion of the
+    validation data into a shared directory.
+
+    Args:
+        results: A list of ValidationResult objects containing the local
+                    data for the current rank.
+    """
+    dump_path_str = config.trainer.rollout_data_dir
+    if not dump_path_str:
+        return
+    dump_path = Path(dump_path_str)
+
+    try:
+        dump_path.mkdir(parents=True, exist_ok=True)
+
+        # Use .json extension for pretty-printed, multi-line JSON format.
+        filename = dump_path / f"step_{global_steps}_rank_{rank}.json"
+
+        # Collect all entries into a list of dictionaries
+        entries = []
+        for res in results:
+            entry = {
+                "rank": rank,
+                "global_step": global_steps,
+                "data_source": res.data_source,
+                "input": res.input_text,
+                "output": res.output_text,
+                "score": res.score,
+            }
+            if res.extra_rewards:
+                entry.update(res.extra_rewards) #
+
+            entries.append(entry) #
+
+        # Write the entire list to a file with indentation for readability
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(entries, f, ensure_ascii=False, indent=4)
+
+        if rank == 0:
+            logger.info(f"Validation generations are being dumped by all ranks to: {dump_path.resolve()}")
+        logger.debug(f"Rank {rank}: Dumped {len(results)} validation generations to {filename}")
+
+    except (OSError, IOError) as e:
+        logger.error(f"Rank {rank}: Failed to write validation dump file to {dump_path}: {e}")
+    except Exception as e:
+        logger.error(f"Rank {rank}: An unexpected error occurred during validation dumping: {e}", exc_info=True)
+        
+        
+@staticmethod
+def get_time_now(time_zone: str = "Asia/Shanghai") -> datetime:
+    """
+    Returns the current time in Shanghai timezone.
+    """
+    return datetime.now(tz=ZoneInfo(time_zone))
+
+
+def whether_put_data(rank, is_current_last_pp_tp_rank0, next_dp_size, cur_dp_size, cur_node, next_node) -> bool:
+        # Determine whether to put data into buffer based on node configuration
+        result = False
+        reason = "No condition met"
+        
+        if is_current_last_pp_tp_rank0:
+            result = True
+            reason = "Current last PP rank's TP rank 0"
+        elif next_dp_size == cur_dp_size:
+            if next_node.node_type in [NodeType.COMPUTE, NodeType.MODEL_TRAIN]:
+                result = True
+                reason = f"DP sizes match and next node is {next_node.node_type}"
+        elif cur_node.node_role == next_node.node_role and cur_node.node_role == NodeRole.ROLLOUT:
+            result = True
+            reason = "Both nodes are ROLLOUT"
+            
+        logger.debug(f"Rank {rank}: _whether_put_data decision for {cur_node.node_id}->{next_node.node_id}: {result} ({reason}). "
+                    f"is_current_last_pp_tp_rank0={is_current_last_pp_tp_rank0}, next_dp_size={next_dp_size}, cur_dp_size={cur_dp_size}, "
+                    f"cur_node_type={cur_node.node_type}, next_node_type={next_node.node_type}, "
+                    f"cur_node_role={cur_node.node_role}, next_node_role={next_node.node_role}")
+        return result
+
+
+def log_core_performance_metrics(rank, enable_perf, metrics: Dict[str, Any], step: int):
+    """
+    Logs a formatted, easy-to-read summary of core performance metrics on rank 0.
+    This provides a clear, separate view of the most important indicators.
+    """
+    if rank != 0:
+        return
+
+    def get_metric(key, precision=3):
+        val = metrics.get(key)
+        if val is None:
+            return "N/A"
+        if isinstance(val, (float, np.floating)):
+            return f"{val:.{precision}f}"
+        return val
+
+    # --- Build the log string ---
+    log_str = f"\n\n{'=' * 25} RANK({rank}): Core Performance Metrics (Step: {step}) {'=' * 25}\n"
+
+    # --- Overall Performance ---
+    log_str += "\n--- ⏱️  Overall Performance ---\n"
+    log_str += f"  {'Step Time':<28}: {get_metric('perf/time_per_step', 3)} s\n"
+    log_str += f"  {'Throughput (tokens/s)':<28}: {get_metric('perf/throughput', 2)}\n"
+    log_str += f"  {'Total Tokens in Step':<28}: {get_metric('perf/total_num_tokens', 0)}\n"
+
+    # --- Algorithm-Specific Metrics ---
+    log_str += "\n--- 📈 Algorithm Metrics ---\n"
+    log_str += f"  {'Actor Entropy':<28}: {get_metric('actor/entropy_loss', 4)}\n"
+    log_str += (
+        f"  {'Critic Rewards (Mean/Min/Max)':<28}: {get_metric('critic/rewards/mean', 3)} / "
+        f"{get_metric('critic/rewards/min', 3)} / {get_metric('critic/rewards/max', 3)}\n"
+    )
+    log_str += (
+        f"  {'Critic Scores (Mean/Min/Max)':<28}: {get_metric('critic/score/mean', 3)} / "
+        f"{get_metric('critic/score/min', 3)} / {get_metric('critic/score/max', 3)}\n"
+    )
+
+    if enable_perf:
+        # --- Module-wise Timings (Single Column) ---
+        log_str += "\n--- ⏳ Module-wise Timings (s) ---\n"
+        # Dynamically find all delta_time metrics except the total step time
+        timing_keys = sorted(
+            [k for k in metrics.keys() if k.startswith("perf/delta_time/") and k != "perf/delta_time/step"]
+        )
+
+        ref_key = "perf/delta_time/ref"
+        reference_key = "perf/delta_time/reference"
+        if ref_key in timing_keys and reference_key in timing_keys:
+            timing_keys.remove(reference_key)
+
+        if timing_keys:
+            # Find the maximum label length across all keys for clean alignment
+            max_label_len = 0
+            if timing_keys:
+                max_label_len = max(
+                    len(k.replace("perf/delta_time/", "").replace("_", " ").title()) for k in timing_keys
+                )
+
+            for key in timing_keys:
+                label = key.replace("perf/delta_time/", "").replace("_", " ").title()
+                value = get_metric(key, 3)
+                log_str += f"  {label:<{max_label_len}} : {value}s\n"
+        else:
+            log_str += "  No detailed timing metrics available.\n"
+
+    # --- Model Flops Utilization (MFU) ---
+    log_str += "\n--- 🔥 Model Flops Utilization (MFU) ---\n"
+    log_str += f"  {'Mean MFU':<28}: {get_metric('perf/mfu/mean', 3)}\n"
+    log_str += f"  {'Actor Training MFU':<28}: {get_metric('perf/mfu/actor', 3)}\n"
+    # log_str += f"  {'Rollout MFU':<28}: {get_metric('perf/mfu/rollout', 3)}\n"
+    log_str += f"  {'Reference Policy MFU':<28}: {get_metric('perf/mfu/ref', 3)}\n"
+    log_str += f"  {'Actor LogProb MFU':<28}: {get_metric('perf/mfu/actor_log_prob', 3)}\n"
+
+    # --- Memory Usage ---
+    log_str += "\n--- 💾 Memory Usage ---\n"
+    log_str += f"  {'Max GPU Memory Allocated':<28}: {get_metric('perf/max_memory_allocated_gb', 2)} GB\n"
+    log_str += f"  {'Max GPU Memory Reserved':<28}: {get_metric('perf/max_memory_reserved_gb', 2)} GB\n"
+    log_str += f"  {'CPU Memory Used':<28}: {get_metric('perf/cpu_memory_used_gb', 2)} GB\n"
+
+    # --- Sequence Lengths ---
+    log_str += "\n--- 📏 Sequence Lengths ---\n"
+    log_str += (
+        f"  {'Prompt Length (Mean/Max)':<28}: {get_metric('prompt/length/mean', 1)} / "
+        f"{get_metric('prompt/length/max', 0)}\n"
+    )
+    log_str += (
+        f"  {'Response Length (Mean/Max)':<28}: {get_metric('response/length/mean', 1)} / "
+        f"{get_metric('response/length/max', 0)}\n"
+    )
+    log_str += f"  {'Response Clip Ratio':<28}: {get_metric('response/clip_ratio/mean', 4)}\n"
+    log_str += f"  {'Prompt Clip Ratio':<28}: {get_metric('prompt/clip_ratio/mean', 4)}\n"
+    log_str += (
+        f"  {'Correct Resp Len (Mean/Max)':<28}: {get_metric('response/correct_length/mean', 1)} / "
+        f"{get_metric('response/correct_length/max', 0)}\n"
+    )
+    log_str += (
+        f"  {'Wrong Resp Len (Mean/Max)':<28}: {get_metric('response/wrong_length/mean', 1)} / "
+        f"{get_metric('response/wrong_length/max', 0)}\n"
+    )
+
+    log_str += "\n" + "=" * 82 + "\n"
+
+    logger.info(log_str)
+
+
+def format_metrics_by_group(metrics: Dict[str, Any], group_order: List[str], ) -> Dict[str, Any]:
+    """
+    A flexible helper function that formats metrics based on a predefined group order
+    and alphabetical order within groups. It supports extracting specific keys from
+    a group to be placed elsewhere in the sequence.
+    """
+    if not metrics:
+        return {}
+
+    ordered_dict = {}
+    processed_keys = set()
+
+    # Pre-identify all explicitly mentioned full keys to exclude them from group processing.
+    explicitly_mentioned_keys = {key for key in group_order if key in metrics}
+
+    # 1. Process metrics according to the defined group/key order.
+    for pattern in group_order:
+        # First, check if the pattern is a full key that should be processed now.
+        if pattern in explicitly_mentioned_keys and pattern not in processed_keys:
+            ordered_dict[pattern] = metrics[pattern]
+            processed_keys.add(pattern)
+        else:
+            # Otherwise, treat the pattern as a group prefix.
+            group_prefix = f"{pattern}/"
+
+            # Find all keys belonging to this group, excluding any that are already processed
+            # or explicitly mentioned elsewhere in the order. Then sort them alphabetically.
+            keys_in_group = sorted(
+                [
+                    key
+                    for key in metrics
+                    if key.startswith(group_prefix)
+                    and key not in processed_keys
+                    and key not in explicitly_mentioned_keys
+                ]
+            )
+
+            for key in keys_in_group:
+                ordered_dict[key] = metrics[key]
+                processed_keys.add(key)
+
+    # 2. Process all remaining keys that were not matched by any rule.
+    remaining_keys = sorted([key for key in metrics if key not in processed_keys])
+    if remaining_keys:
+        for key in remaining_keys:
+            ordered_dict[key] = metrics[key]
+
+    return ordered_dict
+
+
+def consistent_hash(s):
+    return int(hashlib.md5(s.encode()).hexdigest(), 16)
