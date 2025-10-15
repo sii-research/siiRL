@@ -31,13 +31,13 @@ from siirl.data_coordinator.sample import SampleInfo
 # Performance Test Configuration for New Architecture
 # ====================================================================
 # --- Data Generation Parameters ---
-# 总共要生成的样本数量
-TOTAL_SAMPLES = 2000
+# 总共要生成的样本数量 (与旧测试对齐: 200 items * 8 batch/item = 1600 samples)
+TOTAL_SAMPLES = 1600
 # 每个样本内部的batch size (通常为1，模拟单个trajectory)
 BATCH_SIZE_PER_SAMPLE = 1
-# 序列长度
+# 序列长度 
 SEQ_LEN = 1024
-# 特征维度
+# 特征维度 
 EMBED_DIM = 1024
 
 # --- Workload Parameters ---
@@ -107,7 +107,8 @@ async def main():
     log_with_time("-" * 80)
 
     # 1. 初始化数据协调系统
-    coordinator = init_data_coordinator(NUM_BUFFERS)
+    # 在单机测试时，必须设置 force_local=True，以避免等待多个节点
+    coordinator = init_data_coordinator(NUM_BUFFERS, force_local=True)
     log_with_time(f"✅ Data system initialized with 1 Coordinator.")
 
     # 2. 测试并发 Producer (RolloutWorker) 性能
@@ -152,15 +153,29 @@ async def main():
     
     total_retrieved_samples = 0
     for _ in range(num_batches_to_get):
-        # 1. 从Coordinator获取一批样本的引用
-        batch_refs = await coordinator.get_batch.remote(TRAINER_BATCH_SIZE)
-        if not batch_refs:
+        # 1. 从Coordinator获取一批样本的引用 (或因Ray优化而直接获得值)
+        batch_refs_or_values = await coordinator.get_batch.remote(TRAINER_BATCH_SIZE)
+        if not batch_refs_or_values:
             log_with_time("  - Coordinator returned empty batch, stopping consumer test.")
             break
             
-        # 2. 使用ray.get()批量从对象存储中拉取实际数据
-        # 这是实际的数据传输发生的地方
-        actual_data_batch = await asyncio.gather(*[ray.get(ref) for ref in batch_refs])
+        # 2. 区分返回的是ObjectRef还是已解析的值，分别处理
+        resolved_batch = []
+        refs_to_get = []
+        for item in batch_refs_or_values:
+            if isinstance(item, ray.ObjectRef):
+                refs_to_get.append(item)
+            else:
+                # Ray可能因为调用方是所有者而直接返回值
+                resolved_batch.append(item)
+        
+        # 批量获取所有需要解析的ObjectRef
+        if refs_to_get:
+            loop = asyncio.get_running_loop()
+            resolved_from_refs = await loop.run_in_executor(None, ray.get, refs_to_get)
+            resolved_batch.extend(resolved_from_refs)
+
+        actual_data_batch = resolved_batch
         total_retrieved_samples += len(actual_data_batch)
 
     consumer_end_time = time.perf_counter()

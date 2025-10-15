@@ -16,62 +16,24 @@ import unittest
 import asyncio
 import ray
 import torch
-import numpy as np
+import uuid
 from tensordict import TensorDict
-from typing import Optional, Dict, Any
+from typing import Dict, Any, List
 
-# Assume siirl is in PYTHONPATH
-from siirl.workers.databuffer import DataBuffer
-from siirl.workers.databuffer import DataProto
-
-
-def compare_dataprotos(dp1: Optional[DataProto], dp2: Optional[DataProto], check_meta=True) -> bool:
-    """A more robust DataProto comparison function for testing."""
-    if dp1 is None and dp2 is None:
-        return True
-    if dp1 is None or dp2 is None:
-        return False
-
-    if check_meta and dp1.meta_info != dp2.meta_info:
-        return False
-
-    # Compare batch (TensorDict)
-    batch1_is_none = dp1.batch is None or not dp1.batch.keys()
-    batch2_is_none = dp2.batch is None or not dp2.batch.keys()
-
-    if batch1_is_none != batch2_is_none:
-        return False
-
-    if not batch1_is_none:
-        if dp1.batch.batch_size != dp2.batch.batch_size:
-            return False
-        if set(dp1.batch.keys()) != set(dp2.batch.keys()):
-            return False
-        for key in dp1.batch.keys():
-            if not torch.equal(dp1.batch[key], dp2.batch[key]):
-                return False
-
-    # Compare non_tensor_batch (Dict[str, np.ndarray])
-    if set(dp1.non_tensor_batch.keys()) != set(dp2.non_tensor_batch.keys()):
-        return False
-    for key in dp1.non_tensor_batch.keys():
-        if not np.array_equal(dp1.non_tensor_batch[key], dp2.non_tensor_batch[key]):
-            return False
-
-    return True
+# Imports from the refactored implementation
+from siirl.data_coordinator.data_buffer import init_data_coordinator
+from siirl.data_coordinator.sample import SampleInfo
 
 
-class TestDataBuffer(unittest.IsolatedAsyncioTestCase):
+class TestDataCoordinator(unittest.IsolatedAsyncioTestCase):
     """
-    Unit tests for the new logic in DataBuffer:
-    - put: Executes concat under specific conditions.
-    - get: Returns either an ObjectRef or a sub-shard of a DataProto.
+    Unit tests for the new DataCoordinator/DataBuffer architecture.
     """
 
     @classmethod
     def setUpClass(cls):
         if not ray.is_initialized():
-            ray.init(num_cpus=2, ignore_reinit_error=True, logging_level="error")
+            ray.init(num_cpus=4, ignore_reinit_error=True, logging_level="error")
 
     @classmethod
     def tearDownClass(cls):
@@ -79,183 +41,139 @@ class TestDataBuffer(unittest.IsolatedAsyncioTestCase):
             ray.shutdown()
 
     async def asyncSetUp(self):
-        """Create a new, clean DataBuffer actor for each test."""
-        # Use a unique name to avoid conflicts between tests
-        actor_name = f"TestBuffer_{asyncio.get_running_loop().time()}"
-        # Dynamically create an Actor class from the DataBuffer class
-        RemoteDataBuffer = ray.remote(DataBuffer)
-        self.buffer = RemoteDataBuffer.options(name=actor_name, lifetime="detached").remote(buffer_id=0)  # type: ignore
-        # Ensure the actor has started
-        self.assertTrue(await self.buffer.put.remote("__init__", self._create_dp({})))
+        """Create a new, clean DataCoordinator system for each test."""
+        # Use force_local=True for single-node unit testing
+        self.coordinator = init_data_coordinator(num_buffers=2, force_local=True)
+        # Ensure the actor has started and is ready
+        self.assertEqual(await self.coordinator.get_valid_size.remote(), 0)
 
     async def asyncTearDown(self):
         """Destroy the actor after each test."""
-        ray.kill(self.buffer, no_restart=True)
-        # Wait briefly to ensure the actor is properly cleaned up
+        # The coordinator is a detached actor, so we must manually kill it.
+        ray.kill(self.coordinator, no_restart=True)
+        # Allow some time for cleanup
         await asyncio.sleep(0.1)
 
-    def _create_dp(self, tensor_data: Dict[str, Any], non_tensor_data: Optional[Dict[str, Any]] = None, meta_info: Optional[Dict] = None) -> DataProto:
-        """A simple helper function to create a DataProto for testing."""
-        tensors = {k: torch.tensor(v) for k, v in tensor_data.items()} if tensor_data else {}
-        non_tensors = {k: np.array(v) for k, v in non_tensor_data.items()} if non_tensor_data else {}
+    def _create_mock_sample(self, content_id: int) -> TensorDict:
+        """Helper to create a sample with identifiable content."""
+        return TensorDict({"data": torch.tensor([[content_id]])}, batch_size=[1])
 
-        batch_size = []
-        if tensors:
-            # Use the shape of the first tensor to determine the batch size
-            batch_size = [tensors[list(tensors.keys())[0]].shape[0]]
+    def _create_mock_sample_info(self, tokens: int, group: int = 0) -> SampleInfo:
+        """Helper to create a SampleInfo object."""
+        return SampleInfo(
+            agent_group=group,
+            sum_tokens=tokens,
+            prompt_length=tokens,
+            response_length=0,
+            uid=uuid.uuid4().int
+        )
 
-        td = TensorDict(tensors, batch_size=batch_size) if tensors else None
-        return DataProto(batch=td, non_tensor_batch=non_tensors, meta_info=meta_info or {})
+    # === Test Cases ===
 
-    # === `put` method tests ===
+    async def test_put_increases_size(self):
+        """Test that calling `put` increases the coordinator's queue size."""
+        initial_size = await self.coordinator.get_valid_size.remote()
+        self.assertEqual(initial_size, 0)
 
-    async def test_put_concat_two_dataprotos(self):
-        """Core test: Verify the concat operation of put on two DataProtos."""
-        key = "concat_key"
-        dp1 = self._create_dp({"data": [[1, 1], [2, 2]]}, meta_info={"id": "first_put"})
-        dp2 = self._create_dp({"data": [[3, 3]]}, meta_info={"id": "second_put"})
+        sample_ref = ray.put(self._create_mock_sample(1))
+        sample_info = self._create_mock_sample_info(tokens=128)
+        
+        await self.coordinator.put.remote(sample_info, sample_ref)
+        
+        new_size = await self.coordinator.get_valid_size.remote()
+        self.assertEqual(new_size, 1)
 
-        # First put
-        self.assertTrue(await self.buffer.put.remote(key, dp1))
-        # Second put, should trigger concat
-        self.assertTrue(await self.buffer.put.remote(key, dp2))
+    async def test_get_batch_simple(self):
+        """Test basic `get_batch` functionality and data integrity."""
+        # 1. Put a sample
+        sample_data = self._create_mock_sample(101)
+        sample_ref = ray.put(sample_data)
+        sample_info = self._create_mock_sample_info(tokens=128)
+        await self.coordinator.put.remote(sample_info, sample_ref)
+        self.assertEqual(await self.coordinator.get_valid_size.remote(), 1)
 
-        # Retrieve the result for verification
-        retrieved_dp = await self.buffer.get.remote(key, 0, 1)
+        # 2. Get a batch
+        batch_refs_or_values = await self.coordinator.get_batch.remote(batch_size=1)
+        self.assertEqual(len(batch_refs_or_values), 1)
+        
+        # 3. Verify queue size decreases
+        self.assertEqual(await self.coordinator.get_valid_size.remote(), 0)
 
-        # Expected concat result
-        expected_tensors = {"data": [[1, 1], [2, 2], [3, 3]]}
-        # DataProto.concat uses the meta_info of the first element in the list.
-        # In DataBuffer, it's `concat([existing_value, value])`, so the meta_info should be from dp1.
-        expected_meta = {"id": "first_put"}
-        expected_dp = self._create_dp(expected_tensors, meta_info=expected_meta)
+        # 4. Verify data integrity
+        retrieved_item = batch_refs_or_values[0]
+        if isinstance(retrieved_item, ray.ObjectRef):
+            retrieved_item = ray.get(retrieved_item)
+        
+        self.assertTrue(torch.equal(retrieved_item.get("data"), sample_data.get("data")))
 
-        self.assertTrue(compare_dataprotos(retrieved_dp, expected_dp), "DataProtos after concat do not match expected result")
+    async def test_get_batch_insufficient_samples(self):
+        """Test that `get_batch` returns an empty list when samples are insufficient."""
+        # Queue is empty
+        batch = await self.coordinator.get_batch.remote(batch_size=1)
+        self.assertEqual(len(batch), 0)
 
-    async def test_put_replace_if_existing_is_objectref(self):
-        """Test: If the original value is an ObjectRef, putting a DataProto should perform a replacement."""
-        key = "replace_ref_key"
-        dp_for_ref = self._create_dp({"ref_data": [10]})
-        obj_ref = ray.put(dp_for_ref)
+        # Queue has 1, but we request 2
+        sample_ref = ray.put(self._create_mock_sample(1))
+        sample_info = self._create_mock_sample_info(tokens=128)
+        await self.coordinator.put.remote(sample_info, sample_ref)
+        
+        batch = await self.coordinator.get_batch.remote(batch_size=2)
+        self.assertEqual(len(batch), 0)
+        # Ensure the queue was not modified
+        self.assertEqual(await self.coordinator.get_valid_size.remote(), 1)
 
-        # Store the wrapped ObjectRef ([obj_ref])
-        self.assertTrue(await self.buffer.put.remote(key, [obj_ref]))
+    async def test_get_batch_fifo_order(self):
+        """Test that `get_batch` respects FIFO order without a filter."""
+        # Put 3 samples with identifiable content IDs
+        samples_put = [self._create_mock_sample(i) for i in [10, 20, 30]]
+        for sample in samples_put:
+            sample_ref = ray.put(sample)
+            sample_info = self._create_mock_sample_info(tokens=128)
+            await self.coordinator.put.remote(sample_info, sample_ref)
 
-        dp_new = self._create_dp({"new_data": [20]})
-        # Store a DataProto, which should replace the previous ObjectRef
-        self.assertTrue(await self.buffer.put.remote(key, dp_new))
+        # Get a batch of 2
+        batch_refs_or_values = await self.coordinator.get_batch.remote(batch_size=2)
+        retrieved_data = [ray.get(item) if isinstance(item, ray.ObjectRef) else item for item in batch_refs_or_values]
+        
+        # Verify the first two samples were returned
+        self.assertTrue(torch.equal(retrieved_data[0].get("data"), samples_put[0].get("data")))
+        self.assertTrue(torch.equal(retrieved_data[1].get("data"), samples_put[1].get("data")))
+        self.assertEqual(await self.coordinator.get_valid_size.remote(), 1)
 
-        retrieved_dp = await self.buffer.get.remote(key, 0, 1)
-        self.assertIsInstance(retrieved_dp, DataProto)
-        self.assertTrue(compare_dataprotos(retrieved_dp, dp_new))
+    async def test_get_batch_with_filter(self):
+        """Test that `get_batch` correctly applies the filter_plugin."""
+        # Put 4 samples with different token counts
+        sample_infos = [
+            self._create_mock_sample_info(tokens=100), # Should be filtered out
+            self._create_mock_sample_info(tokens=600), # Should be selected
+            self._create_mock_sample_info(tokens=200), # Should be filtered out
+            self._create_mock_sample_info(tokens=700), # Should be selected
+        ]
+        samples_put = [self._create_mock_sample(info.sum_tokens) for info in sample_infos]
 
-    async def test_put_replace_if_new_value_is_objectref(self):
-        """Test: If the new value is an ObjectRef, it should always perform a replacement."""
-        key = "replace_with_ref_key"
-        dp_initial = self._create_dp({"initial_data": [30]})
-        self.assertTrue(await self.buffer.put.remote(key, dp_initial))  # Store a DataProto
+        for info, data in zip(sample_infos, samples_put):
+            sample_ref = ray.put(data)
+            await self.coordinator.put.remote(info, sample_ref)
+        
+        self.assertEqual(await self.coordinator.get_valid_size.remote(), 4)
+        
+        # Define a filter that only accepts samples with >= 512 tokens
+        def long_sample_filter(sample_info: SampleInfo) -> bool:
+            return sample_info.sum_tokens >= 512
 
-        dp_for_ref = self._create_dp({"ref_data": [40]})
-        obj_ref = ray.put(dp_for_ref)
-        # Store a wrapped ObjectRef, which should replace the previous DataProto
-        self.assertTrue(await self.buffer.put.remote(key, [obj_ref]))
+        # Request a batch of 2 with the filter
+        batch_refs_or_values = await self.coordinator.get_batch.remote(
+            batch_size=2, filter_plugin=long_sample_filter
+        )
+        self.assertEqual(len(batch_refs_or_values), 2)
+        
+        # Verify the correct samples were returned (600 and 700)
+        retrieved_data = [ray.get(item) if isinstance(item, ray.ObjectRef) else item for item in batch_refs_or_values]
+        retrieved_tokens = sorted([item.get("data").item() for item in retrieved_data])
+        self.assertEqual(retrieved_tokens, [600, 700])
 
-        retrieved_ref = await self.buffer.get.remote(key, 0, 1)
-        # Now get should return the ObjectRef directly
-        self.assertIsInstance(retrieved_ref, ray.ObjectRef, f"Expected ObjectRef, but got {type(retrieved_ref)}")
-
-        retrieved_dp = await retrieved_ref  # type: ignore
-        self.assertTrue(compare_dataprotos(retrieved_dp, dp_for_ref))
-
-    # === `get` method tests ===
-
-    async def test_get_returns_objectref_if_stored(self):
-        """Test: When an ObjectRef is stored, get returns it directly."""
-        key = "get_ref_key"
-        dp = self._create_dp({"data": [101]})
-        obj_ref = ray.put(dp)
-        # Store the wrapped ObjectRef
-        self.assertTrue(await self.buffer.put.remote(key, [obj_ref]))
-
-        retrieved_item = await self.buffer.get.remote(key)
-        self.assertIsInstance(retrieved_item, ray.ObjectRef, f"Expected ObjectRef, but got {type(retrieved_item)}")
-        self.assertEqual(retrieved_item, obj_ref)
-
-    async def test_get_reshards_stored_dataprotos_chunk(self):
-        """Test: When a DataProto (shard) is stored, get returns a re-sliced sub-shard."""
-        key = "get_reshard_key"
-        # Simulate a shard stored in the buffer
-        dp_chunk = self._create_dp({"data": [1, 2, 3, 4, 5, 6]}, meta_info={"id": "chunk_1"})
-        self.assertTrue(await self.buffer.put.remote(key, dp_chunk))
-
-        # Target DAG worker group size is 3
-        target_world_size = 3
-
-        # Request sub-shard for rank 0
-        sub_chunk_0 = await self.buffer.get.remote(key, 0, target_world_size)
-        expected_0 = self._create_dp({"data": [1, 2]}, meta_info={"id": "chunk_1"})
-        self.assertTrue(compare_dataprotos(sub_chunk_0, expected_0))
-
-        # Request sub-shard for rank 1
-        sub_chunk_1 = await self.buffer.get.remote(key, 1, target_world_size)
-        expected_1 = self._create_dp({"data": [3, 4]}, meta_info={"id": "chunk_1"})
-        self.assertTrue(compare_dataprotos(sub_chunk_1, expected_1))
-
-        # Request sub-shard for rank 2
-        sub_chunk_2 = await self.buffer.get.remote(key, 2, target_world_size)
-        expected_2 = self._create_dp({"data": [5, 6]}, meta_info={"id": "chunk_1"})
-        self.assertTrue(compare_dataprotos(sub_chunk_2, expected_2))
-
-    async def test_get_returns_none_for_nonexistent_key(self):
-        """Test: When the key does not exist, get returns None."""
-        retrieved_item = await self.buffer.get.remote("non_existent_key")
-        self.assertIsNone(retrieved_item)
-
-    # === `pop` method tests ===
-
-    async def test_pop_removes_and_returns_dataprotos(self):
-        """Test: pop can remove and return a DataProto."""
-        key = "pop_dp_key"
-        dp = self._create_dp({"data": [1, 2, 3]})
-
-        # Store data
-        await self.buffer.put.remote(key, dp)
-
-        # Confirm data exists
-        self.assertIsNotNone(await self.buffer.get.remote(key))
-
-        # pop operation
-        popped_item = await self.buffer.pop.remote(key)
-        self.assertIsInstance(popped_item, DataProto)
-        self.assertTrue(compare_dataprotos(popped_item, dp))
-
-        # Confirm data has been removed
-        self.assertIsNone(await self.buffer.get.remote(key))
-
-    async def test_pop_removes_and_returns_objectref(self):
-        """Test: pop can remove and return an ObjectRef."""
-        key = "pop_ref_key"
-        dp_for_ref = self._create_dp({"ref_data": [100]})
-        obj_ref = ray.put(dp_for_ref)
-
-        # Store the wrapped ObjectRef
-        await self.buffer.put.remote(key, [obj_ref])
-
-        # Confirm data exists
-        self.assertIsNotNone(await self.buffer.get.remote(key))
-
-        # pop operation
-        popped_item = await self.buffer.pop.remote(key)
-        self.assertIsInstance(popped_item, ray.ObjectRef)
-        self.assertEqual(popped_item, obj_ref)
-
-        # Confirm data has been removed
-        self.assertIsNone(await self.buffer.get.remote(key))
-
-    async def test_pop_returns_none_for_nonexistent_key(self):
-        """Test: When the key does not exist, pop returns None."""
-        popped_item = await self.buffer.pop.remote("non_existent_key_for_pop")
-        self.assertIsNone(popped_item)
+        # Verify that the filtered-out samples remain in the queue
+        self.assertEqual(await self.coordinator.get_valid_size.remote(), 2)
 
 
 if __name__ == "__main__":
