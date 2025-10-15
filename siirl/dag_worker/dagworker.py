@@ -89,7 +89,7 @@ from siirl.utils.metrics.metric_utils import (
     compute_timing_metrics
     )
 from siirl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
-
+from siirl.execution.rollout_flow.multiturn.agent_loop import AgentLoopManager
 
 device_name = get_device_name()
 
@@ -454,7 +454,8 @@ class DAGWorker(Worker):
         """Async mode"""
         if self._async_rollout_manager is not None:
             gen_batch = prepare_generation_batch(batch)
-            gen_output = self._async_rollout_manager.generate_sequences(gen_batch)
+            loop = asyncio.get_event_loop()
+            gen_output = loop.run_until_complete(self._async_rollout_manager.generate_sequences(gen_batch))
             metrics = gen_output.meta_info.get("metrics", {})
             gen_output.meta_info = {}
             batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))])
@@ -957,9 +958,6 @@ class DAGWorker(Worker):
                     continue
                 node_worker.init_model()
                 have_init_workers.add(generate_node_worker_key(node))
-                if node.node_role == NodeRole.ROLLOUT and node.config["intern_config"].rollout.mode == "async":
-                    self.rollout_mode = "async"
-                    self.zmq_address = node_worker.get_zeromq_address()
         logger.success("All worker models initialized.")
 
         logger.info(f"Setting up sharding managers {self.config.actor_rollout_ref.rollout.name} ...")
@@ -970,6 +968,17 @@ class DAGWorker(Worker):
                 except Exception as e:
                     logger.error(f"Failed to set up sharding manager for agent group {agent_group}: {e}", exc_info=True)
                     raise
+                
+        
+        if self.config.actor_rollout_ref.rollout.mode == "async":
+            logger.info(f"Initial Async Rollout Server ...")
+            for node in self.taskgraph.nodes.values():
+                if node.node_role == NodeRole.ROLLOUT:
+                    # need init after set sharding manager
+                    self.rollout_mode = "async"
+                    node_worker = self.workers[generate_node_worker_key(node)]
+                    self.zmq_address = node_worker.get_zeromq_address()
+                    self.init_async_server(node=node, node_worker=node_worker)
         logger.info("All models and sharding managers initialized successfully.")
         if self._multi_agent:
             from siirl.execution.rollout_flow.multi_agent.multiagent_generate import MultiAgentLoop
@@ -983,9 +992,27 @@ class DAGWorker(Worker):
         # Ensure all models are initialized and checkpoints are loaded before starting.
         dist.barrier(self._gather_group)
 
-    def set_async_rollout_manager(self, async_rollout_manager):
-        self._async_rollout_manager = async_rollout_manager
-
+    def init_async_server(self, node:Node, node_worker):
+        #gather zmq_address to rank_0
+        _, dp_rank, tp_rank, tp_size, *_ = self._get_node_dp_info(node)
+        addr_len = len(self.zmq_address) 
+        encoded_addr = torch.tensor([ord(c) for c in self.zmq_address], dtype=torch.uint8,
+                                device=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+        zmq_addresses = []
+        if tp_rank == 0: 
+            group_addrs = torch.zeros((tp_size, addr_len), dtype=torch.uint8, device=encoded_addr.device)
+            group_addrs[0] = encoded_addr
+            for i in range(1, tp_size):
+                src_rank = dp_rank * tp_size + i
+                dist.recv(group_addrs[i], src=src_rank)
+            for i in range(tp_size):
+                addr_str = ''.join([chr(c.item()) for c in group_addrs[i]])
+                zmq_addresses.append(addr_str)
+        else:  # 组内其他进程（tp1, tp3...）
+            # 发送自己的地址到组内目标进程
+            dist.send(encoded_addr, dst=dp_rank * tp_size)
+        if tp_rank == 0:
+            self._async_rollout_manager = AgentLoopManager(node.config["intern_config"], dp_rank, os.environ['WG_PREFIX'], node_worker.rollout, zmq_addresses)
     def get_zeromq_address(self):
         return self.zmq_address
     
@@ -1081,7 +1108,8 @@ class DAGWorker(Worker):
             if self.rollout_mode == 'sync':
                 output = rollout_worker.generate_sequences(gen_batch)
             elif self._async_rollout_manager:
-                output = self._async_rollout_manager.generate_sequences(gen_batch)
+                loop = asyncio.get_event_loop()
+                output = loop.run_until_complete(self._async_rollout_manager.generate_sequences(gen_batch))
         else:
             output = self.multi_agent_loop.generate_sequence(gen_batch)
             if output:

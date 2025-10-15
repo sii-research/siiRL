@@ -1491,10 +1491,10 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
         # return something to block the caller
         return True
     
-    def set_rollout_sharding_manager(self, sharding_manager):
+    def set_rollout_sharding_manager(self, sharding_manager):      
         super().set_rollout_sharding_manager(sharding_manager)
-        self.rollout.sharding_manager = sharding_manager
-                
+        
+            
     def get_zeromq_address(self):
         return self.rollout.get_zeromq_address()
 

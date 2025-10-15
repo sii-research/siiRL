@@ -51,12 +51,6 @@ def determine_workflow_config(self, siirl_args: SiiRLArguments) -> str:
         return os.path.join(current_dir, "./global_config/config/workflow_ppo.yaml")
     elif siirl_args.algorithm.adv_estimator in [
         AdvantageEstimator.GRPO,
-        AdvantageEstimator.GRPO_PASSK,
-        AdvantageEstimator.REINFORCE_PLUS_PLUS,
-        AdvantageEstimator.REMAX,
-        AdvantageEstimator.RLOO,
-        AdvantageEstimator.OPO,
-        AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE,
         AdvantageEstimator.CPGD,
     ]:
         if siirl_args.algorithm.algorithm_name == AlgorithmType.DAPO.value:
