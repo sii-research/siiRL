@@ -24,11 +24,7 @@ import random
 import uuid
 
 # 根据你的项目结构，确保这里的导入路径是正确的
-from siirl.data_coordinator.data_buffer import (
-    DataBuffer,
-    DataCoordinator,
-    init_data_system, # New initialization function
-)
+from siirl.data_coordinator.data_buffer import init_data_coordinator
 from siirl.data_coordinator.sample import SampleInfo
 
 # ====================================================================
@@ -111,7 +107,7 @@ async def main():
     log_with_time("-" * 80)
 
     # 1. 初始化数据协调系统
-    coordinator = init_data_system(NUM_BUFFERS)
+    coordinator = init_data_coordinator(NUM_BUFFERS)
     log_with_time(f"✅ Data system initialized with 1 Coordinator.")
 
     # 2. 测试并发 Producer (RolloutWorker) 性能

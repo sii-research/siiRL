@@ -154,7 +154,7 @@ class DataCoordinator:
 # Initialization Logic
 # ====================================================================
 
-def init_data_system(num_buffers: int) -> ray.actor.ActorHandle:
+def init_data_coordinator(num_buffers: int) -> ray.actor.ActorHandle:
     """
     初始化数据协调系统，包含一个全局DataCoordinator和多个分布式的DataBuffer。
     对用户只返回一个统一的DataCoordinator句柄。
@@ -166,7 +166,7 @@ def init_data_system(num_buffers: int) -> ray.actor.ActorHandle:
         DataCoordinator的Actor句柄。
     """
     if not ray.is_initialized():
-        raise RuntimeError("Ray must be initialized before calling init_data_system.")
+        raise RuntimeError("Ray must be initialized before calling init_data_coordinator.")
 
     # 1. 创建或获取全局唯一的DataCoordinator
     # 使用全局命名空间来确保coordinator的唯一性
