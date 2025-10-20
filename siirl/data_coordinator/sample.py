@@ -33,6 +33,8 @@ class SampleInfo:
     response_length: int = field(default=0)
     dict_info: dict = field(default_factory=dict)
     uid: int = field(default=None)
+    # 新增字段，用于亲和性调度
+    node_id: Optional[str] = field(default=None)
 
 @dataclass
 class Sample:

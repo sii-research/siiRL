@@ -176,5 +176,63 @@ class TestDataCoordinator(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.coordinator.get_valid_size.remote(), 2)
 
 
+    async def test_get_batch_with_node_affinity_filter(self):
+        """
+        Test using the filter_plugin to achieve node-affinity scheduling.
+        This simulates a trainer on 'node_A' preferentially pulling data
+        that was also produced on 'node_A'.
+        """
+        # 1. Simulate data coming from two different nodes
+        # Samples from node_A
+        for i in range(3):
+            info = self._create_mock_sample_info(tokens=128, group=i)
+            info.node_id = "node_A" # Manually set node_id for testing
+            data = self._create_mock_sample(content_id=100 + i)
+            await self.coordinator.put.remote(info, ray.put(data))
+
+        # Samples from node_B
+        for i in range(2):
+            info = self._create_mock_sample_info(tokens=256, group=i)
+            info.node_id = "node_B" # Manually set node_id for testing
+            data = self._create_mock_sample(content_id=200 + i)
+            await self.coordinator.put.remote(info, ray.put(data))
+
+        self.assertEqual(await self.coordinator.get_valid_size.remote(), 5)
+
+        # 2. Create a filter factory to generate an affinity filter
+        # This closure captures the desired local_node_id.
+        def create_affinity_filter(local_node_id: str):
+            def affinity_filter(sample_info: SampleInfo) -> bool:
+                return sample_info.node_id == local_node_id
+            return affinity_filter
+
+        # 3. Simulate a Trainer on 'node_A' pulling its local data
+        trainer_on_node_a_filter = create_affinity_filter("node_A")
+        
+        local_batch = await self.coordinator.get_batch.remote(
+            batch_size=3, filter_plugin=trainer_on_node_a_filter
+        )
+        self.assertEqual(len(local_batch), 3)
+
+        # Verify that we got all the data from node_A
+        retrieved_data = ray.get(local_batch)
+        retrieved_ids = sorted([d.get("data").item() for d in retrieved_data])
+        self.assertEqual(retrieved_ids, [100, 101, 102])
+        
+        # 4. The coordinator should now only contain data from node_B
+        self.assertEqual(await self.coordinator.get_valid_size.remote(), 2)
+
+        # 5. Now, the trainer on 'node_A' can fetch remote data if needed
+        # (by inverting the filter or using a different one)
+        trainer_on_node_b_filter = create_affinity_filter("node_B")
+        remote_batch = await self.coordinator.get_batch.remote(
+            batch_size=2, filter_plugin=trainer_on_node_b_filter
+        )
+        self.assertEqual(len(remote_batch), 2)
+        retrieved_data = ray.get(remote_batch)
+        retrieved_ids = sorted([d.get("data").item() for d in retrieved_data])
+        self.assertEqual(retrieved_ids, [200, 201])
+
+
 if __name__ == "__main__":
     unittest.main()

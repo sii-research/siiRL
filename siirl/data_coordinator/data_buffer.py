@@ -27,57 +27,61 @@ from siirl.data_coordinator.sample import SampleInfo
 @ray.remote
 class DataBuffer:
     """
-    一个轻量级的、分布式的Actor，每个实例通常位于一个物理节点上。
-    它的唯一职责是持有本地节点上由RolloutWorkers通过`ray.put`创建的样本对象引用(ObjectRef)，
-    以防止它们被Ray的垃圾回收机制过早地清理掉。
+    A lightweight, distributed Actor, with each instance typically located on a physical node.
+    Its sole responsibility is to hold object references (ObjectRef) of samples created by
+    RolloutWorkers via `ray.put` on the local node, to prevent them from being prematurely
+    garbage collected by Ray's GC.
     """
     def __init__(self, buffer_id: int):
         self.buffer_id = buffer_id
-        # 只存储ObjectRef，不存储实际数据
+        # Stores only ObjectRefs, not the actual data
         self._ref_store: List[ray.ObjectRef] = []
         loguru.logger.info(f"DataBuffer (ID: {self.buffer_id}) initialized on node {ray.get_runtime_context().get_node_id()}.")
 
     def put_ref(self, sample_ref: ray.ObjectRef):
-        """接收并持有一个样本的ObjectRef。"""
+        """Receives and holds the ObjectRef of a sample."""
         self._ref_store.append(sample_ref)
 
     def get_ref_count(self) -> int:
-        """返回当前持有的引用数量。"""
+        """Returns the current number of held references."""
         return len(self._ref_store)
     
     def clear(self):
-        """清空所有已存储的引用。"""
+        """Clears all stored references."""
         self._ref_store.clear()
-        # 注意：这里清空列表后，如果DataCoordinator中也删除了对应的引用，
-        # Ray GC将能够回收这些对象占用的内存。
+        # Note: After clearing this list, if the corresponding references are also
+        # removed from the DataCoordinator, Ray GC will be able to reclaim the
+        # memory occupied by these objects.
 
     def __repr__(self) -> str:
         return f"<DataBuffer(id={self.buffer_id}, stored_ref_count={len(self._ref_store)})>"
 
     def get_node_id(self) -> str:
-        """返回当前actor所在的节点ID。"""
+        """Returns the node ID where the current actor is located."""
         return ray.get_runtime_context().get_node_id()
 
 
 @ray.remote
 class DataCoordinator:
     """
-    一个全局唯一的中央Actor，负责协调数据的生产者(RolloutWorkers)和消费者(Trainers)。
-    它不存储实际的样本数据，只存储样本的元信息(SampleInfo)和对象引用(ObjectRef)。
-    这使得它能够以极低的成本实现复杂的全局采样策略。
+    A globally unique central Actor responsible for coordinating data producers (RolloutWorkers)
+    and consumers (Trainers). It does not store the actual sample data, only the sample
+    metadata (SampleInfo) and object references (ObjectRef). This allows it to implement
+    complex global sampling strategies at a very low cost.
     """
     def __init__(self):
-        # 使用双端队列存储元信息和引用的元组，实现高效的先进先出操作
+        # Use a deque to store tuples of metadata and references for efficient FIFO operations
         self._sample_queue: deque[Tuple[SampleInfo, ray.ObjectRef]] = deque()
-        # 建立从 node_id 到 DataBuffer actor 句柄列表的映射
+        # A map from node_id to a list of DataBuffer actor handles
         self._buffer_map: Dict[str, List[ray.actor.ActorHandle]] = {}
-        self._put_counter = 0  # 用于轮询选择buffer
+        self._put_counter = 0  # Used for round-robin buffer selection
         self.lock = asyncio.Lock()
         loguru.logger.info("Global DataCoordinator initialized.")
 
     def register_buffers(self, buffer_info: Dict[str, List[ray.actor.ActorHandle]]):
         """
-        由初始化逻辑调用，用于注册所有DataBuffer及其所在的节点ID。
+        Called by the initialization logic to register all DataBuffers and their
+        corresponding node IDs.
         """
         self._buffer_map = buffer_info
         for node_id, buffers in self._buffer_map.items():
@@ -85,11 +89,13 @@ class DataCoordinator:
 
     async def put(self, sample_info: SampleInfo, sample_ref: Any):
         """
-        由RolloutWorker调用，用于注册一个新的样本引用及其元数据。
-        该方法会自动将ObjectRef路由到其所在节点的DataBuffer进行持有。
+        Called by a RolloutWorker to register a new sample reference and its metadata.
+        This method automatically routes the ObjectRef to a DataBuffer on its local
+        node to be held.
         """
-        # 由于Ray的小对象优化，客户端传递的ObjectRef可能被自动解析为实际值。
-        # 在这里我们确保处理的永远是ObjectRef。
+        # Due to Ray's small object optimization, an ObjectRef passed by the client
+        # might be automatically resolved to its actual value. Here, we ensure that
+        # we are always handling an ObjectRef.
         if not isinstance(sample_ref, ray.ObjectRef):
             #loguru.logger.warning(
             #    f"Coordinator.put received a value of type {type(sample_ref)} "
@@ -98,66 +104,72 @@ class DataCoordinator:
             #)
             sample_ref = ray.put(sample_ref)
 
-        # 1. 获取调用方所在的节点ID
+        # 1. Get the node ID of the caller
         caller_node_id = ray.get_runtime_context().get_node_id()
+
+        # 2. Inject the node ID into SampleInfo for subsequent filtering
+        #    Only inject if node_id has not been manually set, to facilitate testing.
+        if sample_info.node_id is None:
+            sample_info.node_id = caller_node_id
         
-        # 2. 找到对应节点的DataBuffer列表并委托其持有ref
+        # 3. Find the list of DataBuffers on the corresponding node and delegate the ref holding
         local_buffers = self._buffer_map.get(caller_node_id)
         if local_buffers:
-            # 使用轮询方式将引用均匀分配给节点上的所有buffer
+            # Use round-robin to distribute references evenly among the buffers on the node
             buffer_to_use = local_buffers[self._put_counter % len(local_buffers)]
             buffer_to_use.put_ref.remote(sample_ref)
             self._put_counter += 1
         else:
             loguru.logger.warning(f"No DataBuffer found for node {caller_node_id}. The sample reference will not be held, which may lead to premature garbage collection.")
 
-        # 3. 将元数据和引用注册到全局队列
+        # 4. Register the metadata and reference to the global queue
         async with self.lock:
-            # 在这里可以实现更复杂的逻辑，例如根据priority插入到优先队列中
+            # More complex logic can be implemented here, such as inserting into a
+            # priority queue based on priority
             self._sample_queue.append((sample_info, sample_ref))
 
     async def get_batch(self, batch_size: int, filter_plugin: Optional[Callable[[SampleInfo], bool]] = None) -> List[ray.ObjectRef]:
         """
-        由Trainer调用，用于获取一批样本的ObjectRef。
-        支持传入一个可选的过滤插件，用于实现自定义采样逻辑。
+        Called by a Trainer to get a batch of sample ObjectRefs.
+        Supports an optional filter plugin to implement custom sampling logic.
         """
         async with self.lock:
-            # 无过滤插件，采用高效的FIFO
+            # No filter plugin, use efficient FIFO
             if not filter_plugin:
                 if len(self._sample_queue) < batch_size:
                     loguru.logger.warning(f"Coordinator queue size ({len(self._sample_queue)}) is less than requested batch size ({batch_size}). Returning empty list.")
                     return []
                 
-                # 高效的 O(batch_size) 实现，利用 deque 的 O(1) popleft
+                # Efficient O(batch_size) implementation using deque's O(1) popleft
                 batch_refs = []
                 for _ in range(batch_size):
                     _, sample_ref = self._sample_queue.popleft()
                     batch_refs.append(sample_ref)
                 return batch_refs
 
-            # 有过滤插件，采用 O(N) 的筛选和重构
+            # With filter plugin, use O(N) filtering and reconstruction
             else:
-                # 1. 过滤过程不会消耗队列中的元素
+                # 1. The filtering process does not consume elements from the queue
                 potential_items = [item for item in self._sample_queue if filter_plugin(item[0])]
                 
-                # 2. 检查是否有足够的样本
+                # 2. Check if there are enough samples
                 if len(potential_items) < batch_size:
                     loguru.logger.warning(f"After filtering, coordinator has {len(potential_items)} samples, which is less than requested batch size ({batch_size}). Returning empty list.")
                     return []
                 
-                # 3. 从筛选后的列表中提取一个批次 (FIFO)
+                # 3. Extract a batch from the filtered list (FIFO)
                 batch_items_to_return = potential_items[:batch_size]
                 batch_refs = [item[1] for item in batch_items_to_return]
 
-                # 4. 从原始队列中高效地移除已选中的样本
-                # 使用 ObjectRef (保证唯一且可哈希) 来识别要移除的项
+                # 4. Efficiently remove the selected items from the original queue
+                # Use ObjectRef (guaranteed unique and hashable) to identify items for removal
                 refs_to_remove = {item[1] for item in batch_items_to_return}
                 self._sample_queue = deque(item for item in self._sample_queue if item[1] not in refs_to_remove)
                 
                 return batch_refs
 
     async def get_valid_size(self) -> int:
-        """返回当前队列中的样本数量。"""
+        """Returns the number of samples in the current queue."""
         async with self.lock:
             return len(self._sample_queue)
 
@@ -171,21 +183,24 @@ class DataCoordinator:
 
 def init_data_coordinator(num_buffers: int, force_local: bool = False) -> ray.actor.ActorHandle:
     """
-    初始化数据协调系统，包含一个全局DataCoordinator和多个分布式的DataBuffer。
-    对用户只返回一个统一的DataCoordinator句柄。
+    Initializes the data coordination system, which includes a global DataCoordinator
+    and multiple distributed DataBuffers. Returns a single, unified DataCoordinator
+    handle to the user.
 
     Args:
-        num_buffers: 要创建的分布式DataBuffer实例的数量，通常等于节点数或GPU总数。
-        force_local: 如果为True，则强制在本地节点创建所有Buffer，用于单机测试。
+        num_buffers: The number of distributed DataBuffer instances to create,
+                     usually equal to the number of nodes or total GPUs.
+        force_local: If True, forces all Buffers to be created on the local node,
+                     for single-machine testing.
 
     Returns:
-        DataCoordinator的Actor句柄。
+        The Actor handle for the DataCoordinator.
     """
     if not ray.is_initialized():
         raise RuntimeError("Ray must be initialized before calling init_data_coordinator.")
 
-    # 1. 创建或获取全局唯一的DataCoordinator
-    # 使用全局命名空间来确保coordinator的唯一性
+    # 1. Create or get the globally unique DataCoordinator
+    # Use a global name to ensure the coordinator's uniqueness
     coordinator_name = "global_data_coordinator"
     try:
         coordinator = ray.get_actor(coordinator_name)
@@ -195,15 +210,15 @@ def init_data_coordinator(num_buffers: int, force_local: bool = False) -> ray.ac
         coordinator = DataCoordinator.options(name=coordinator_name, lifetime="detached").remote()
 
     if force_local:
-        # --- 本地测试模式 ---
+        # --- Local testing mode ---
         loguru.logger.warning("force_local=True. Creating all DataBuffers on the local node for testing purposes.")
         data_buffers = [DataBuffer.remote(buffer_id=i) for i in range(num_buffers)]
-        # 在本地模式下，所有buffer都在同一个节点，将它们全部放入一个列表中
+        # In local mode, all buffers are on the same node, so put them all in one list
         local_node_id = ray.get_runtime_context().get_node_id()
         buffer_info = {local_node_id: data_buffers}
     else:
-        # --- 分布式部署模式 ---
-        # 2. 等待并创建分布式的DataBuffer
+        # --- Distributed deployment mode ---
+        # 2. Wait for and create the distributed DataBuffers
         wait_timeout = 300  # seconds
         poll_interval = 2  # seconds
         start_time = time.time()
@@ -220,7 +235,7 @@ def init_data_coordinator(num_buffers: int, force_local: bool = False) -> ray.ac
             num_available_nodes = len([node for node in ray.nodes() if node.get("Alive", False)])
             raise TimeoutError(f"Timed out after {wait_timeout}s. Cannot create {num_buffers} buffers with 'STRICT_SPREAD' strategy on {num_available_nodes} available nodes.")
 
-        # 3. 使用Placement Group确保DataBuffer分布在不同节点
+        # 3. Use a Placement Group to ensure DataBuffers are spread across different nodes
         bundles = [{"CPU": 1} for _ in range(num_buffers)]
         pg = placement_group(bundles, strategy="STRICT_SPREAD")
         loguru.logger.debug(f"Waiting for placement group for {num_buffers} DataBuffers to be ready...")
@@ -230,17 +245,18 @@ def init_data_coordinator(num_buffers: int, force_local: bool = False) -> ray.ac
         scheduling_strategy = PlacementGroupSchedulingStrategy(placement_group=pg)
         data_buffers = [DataBuffer.options(scheduling_strategy=scheduling_strategy).remote(buffer_id=i) for i in range(num_buffers)]
         
-        # 获取每个buffer所在的节点ID
+        # Get the node ID for each buffer
         buffer_nodes = ray.get([b.get_node_id.remote() for b in data_buffers])
-        # 将相同节点上的buffer分组
+        # Group buffers on the same node
         buffer_info: Dict[str, List[ray.actor.ActorHandle]] = {}
         for node_id, buffer in zip(buffer_nodes, data_buffers):
             if node_id not in buffer_info:
                 buffer_info[node_id] = []
             buffer_info[node_id].append(buffer)
     
-    # 4. 在Coordinator中注册所有DataBuffer
-    # 使用 ray.get 等待注册完成，确保后续操作时 map 已经填充
+    # 4. Register all DataBuffers with the Coordinator
+    # Use ray.get to wait for registration to complete, ensuring the map is
+    # populated for subsequent operations
     ray.get(coordinator.register_buffers.remote(buffer_info))
 
     loguru.logger.success(f"Successfully created and registered {len(data_buffers)} DataBuffer actors.")
