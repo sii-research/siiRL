@@ -18,7 +18,18 @@ from typing import Optional
 
 @dataclass
 class DagArguments:
-    workflow_path: Optional[str] = field(default=None, metadata={"help": "Workerflow Dag config file"})
+    workflow_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Workflow DAG config file (YAML, legacy mode). Consider using custom_pipeline_fn instead."}
+    )
+    custom_pipeline_fn: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Custom pipeline function path in format 'module.path:function_name'. "
+                    "Example: 'examples.custom_pipeline_example.custom_grpo:grpo_with_custom_reward'. "
+                    "If not specified, built-in pipelines will be used based on algorithm type."
+        }
+    )
     env_enable: bool = field(default=False, metadata={"help": "Enable environment"})
     environment_path: Optional[str] = field(default=None, metadata={"help": "Environment config file"})
     enable_perf: bool = field(default=False, metadata={"help": "Enable all ranks performance profiling table"})
