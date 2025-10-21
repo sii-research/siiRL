@@ -26,7 +26,7 @@ from siirl.execution.scheduler.process_group_manager import ProcessGroupManager,
 from siirl.execution.scheduler.task_scheduler import TaskScheduler, log_schedule_assignments
 from siirl.utils.logger.logging_utils import set_basic_config
 from siirl.global_config.params import SiiRLArguments, log_dict_formatted, parse_config
-from siirl.execution.dag import DAGConfigLoader, TaskGraph
+from siirl.execution.dag import TaskGraph
 from siirl.execution.dag.builtin_pipelines import grpo_pipeline, ppo_pipeline, dapo_pipeline
 from siirl.data_coordinator import init_data_buffer
 
@@ -44,31 +44,13 @@ RAY_RUNTIME_ENV_VARS = {
 MAIN_RUNNER_CPU_RESERVATION = 5
 
 
-def determine_workflow_config(self, siirl_args: SiiRLArguments) -> str:
-    """Legacy function for YAML-based workflow loading (kept for backward compatibility)."""
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-
-    if siirl_args.algorithm.adv_estimator == AdvantageEstimator.GAE:
-        return os.path.join(current_dir, "./global_config/config/workflow_ppo.yaml")
-    elif siirl_args.algorithm.adv_estimator in [
-        AdvantageEstimator.GRPO,
-        AdvantageEstimator.CPGD,
-    ]:
-        if siirl_args.algorithm.algorithm_name == AlgorithmType.DAPO.value:
-            return os.path.join(current_dir, "./global_config/config/workflow_dapo.yaml")
-        return os.path.join(current_dir, "./global_config/config/workflow_grpo.yaml")
-    else:
-        raise NotImplementedError
-
-
 def load_pipeline(siirl_args: SiiRLArguments) -> TaskGraph:
     """
-    Load training pipeline using the new Python-based Pipeline API.
+    Load training pipeline using the Python-based Pipeline API.
 
-    This function supports three modes (in priority order):
+    This function supports two modes (in priority order):
     1. Custom pipeline via dag.custom_pipeline_fn (user-specified Python function)
     2. Built-in Python pipelines (grpo_pipeline, ppo_pipeline, dapo_pipeline)
-    3. Legacy YAML-based loading (for backward compatibility)
 
     Args:
         siirl_args: Configuration arguments
@@ -124,41 +106,27 @@ def load_pipeline(siirl_args: SiiRLArguments) -> TaskGraph:
             logger.error(f"Failed to load custom pipeline '{siirl_args.dag.custom_pipeline_fn}': {e}")
             raise
 
-    # Mode 2: Built-in Python pipelines (new recommended way)
-    if not hasattr(siirl_args.dag, 'workflow_path') or siirl_args.dag.workflow_path is None:
-        logger.info(f"Using built-in Python pipeline for algorithm: {siirl_args.algorithm.adv_estimator}")
+    # Mode 2: Built-in Python pipelines (default)
+    logger.info(f"Using built-in Python pipeline for algorithm: {siirl_args.algorithm.adv_estimator}")
 
-        # Set CPGD-specific config
-        if siirl_args.algorithm.adv_estimator == AdvantageEstimator.CPGD:
-            siirl_args.actor_rollout_ref.actor.use_cpgd_loss = True
-
-        # Select appropriate built-in pipeline
-        if siirl_args.algorithm.adv_estimator == AdvantageEstimator.GRPO:
-            return grpo_pipeline()
-        elif siirl_args.algorithm.adv_estimator == AdvantageEstimator.CPGD:
-            return grpo_pipeline()  # CPGD uses GRPO structure
-        elif siirl_args.algorithm.adv_estimator == AdvantageEstimator.GAE:
-            return ppo_pipeline()
-        elif siirl_args.algorithm.algorithm_name == AlgorithmType.DAPO.value:
-            return dapo_pipeline()
-        else:
-            raise NotImplementedError(
-                f"No built-in pipeline for algorithm '{siirl_args.algorithm.adv_estimator}'. "
-                f"Please specify dag.custom_pipeline_fn to use a custom pipeline."
-            )
-
-    # Mode 3: Legacy YAML-based loading (backward compatibility)
-    logger.warning(
-        "Loading pipeline from YAML (legacy mode). "
-        "Consider migrating to Python-based pipelines for better visibility and flexibility."
-    )
-    workflow_path = siirl_args.dag.workflow_path
-    logger.info(f"Loading workflow from YAML: {workflow_path}")
-
+    # Set CPGD-specific config
     if siirl_args.algorithm.adv_estimator == AdvantageEstimator.CPGD:
         siirl_args.actor_rollout_ref.actor.use_cpgd_loss = True
 
-    return DAGConfigLoader.load_from_file(workflow_path)
+    # Select appropriate built-in pipeline
+    if siirl_args.algorithm.adv_estimator == AdvantageEstimator.GRPO:
+        return grpo_pipeline()
+    elif siirl_args.algorithm.adv_estimator == AdvantageEstimator.CPGD:
+        return grpo_pipeline()  # CPGD uses GRPO structure
+    elif siirl_args.algorithm.adv_estimator == AdvantageEstimator.GAE:
+        return ppo_pipeline()
+    elif siirl_args.algorithm.algorithm_name == AlgorithmType.DAPO.value:
+        return dapo_pipeline()
+    else:
+        raise NotImplementedError(
+            f"No built-in pipeline for algorithm '{siirl_args.algorithm.adv_estimator}'. "
+            f"Please specify dag.custom_pipeline_fn to use a custom pipeline."
+        )
 
 
 def get_databuffer_shard_number(siirl_args: SiiRLArguments) -> int:

@@ -12,9 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .config_loader import DAGConfigLoader
 from .node import Node, NodeRole, NodeStatus, NodeType
 from .task_graph import TaskGraph
 from .task_loader import discover_and_split_parallel_paths
+from .pipeline import Pipeline
+from .builtin_pipelines import grpo_pipeline, ppo_pipeline, dapo_pipeline
 
-__all__ = ["DAGConfigLoader", "Node", "NodeStatus", "NodeType", "NodeRole", "TaskGraph", "discover_and_split_parallel_paths"]
+__all__ = [
+    "Node",
+    "NodeStatus",
+    "NodeType",
+    "NodeRole",
+    "TaskGraph",
+    "discover_and_split_parallel_paths",
+    "Pipeline",
+    "grpo_pipeline",
+    "ppo_pipeline",
+    "dapo_pipeline"
+]
