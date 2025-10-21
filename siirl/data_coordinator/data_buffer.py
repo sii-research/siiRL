@@ -168,6 +168,28 @@ class DataCoordinator:
                 
                 return batch_refs
 
+    async def get_all_by_filter(self, filter_plugin: Callable[[SampleInfo], bool]) -> List[ray.ObjectRef]:
+        """
+        Gets ALL sample ObjectRefs that match the filter plugin, consuming them from the queue.
+        This is useful for pipeline-based data passing where a downstream stage needs the
+        entire output of an upstream stage.
+        """
+        async with self.lock:
+            # 1. Find all items that match the filter.
+            items_to_return = [item for item in self._sample_queue if filter_plugin(item[0])]
+            
+            if not items_to_return:
+                return []
+
+            # 2. Extract their ObjectRefs.
+            batch_refs = [item[1] for item in items_to_return]
+
+            # 3. Efficiently remove the selected items from the original queue.
+            refs_to_remove = {ref for ref in batch_refs}
+            self._sample_queue = deque(item for item in self._sample_queue if item[1] not in refs_to_remove)
+            
+            return batch_refs
+
     async def get_valid_size(self) -> int:
         """Returns the number of samples in the current queue."""
         async with self.lock:
