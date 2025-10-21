@@ -66,10 +66,6 @@ class RayTrainer:
             self.use_critic = True
         elif self.base_config.algorithm.adv_estimator in [
             AdvantageEstimator.GRPO,
-            AdvantageEstimator.REINFORCE_PLUS_PLUS,
-            AdvantageEstimator.REMAX,
-            AdvantageEstimator.RLOO,
-            AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE,
             AdvantageEstimator.CPGD,
             AdvantageEstimator.GAE_MARFT,
         ]:

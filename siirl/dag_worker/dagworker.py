@@ -15,14 +15,18 @@
 import os
 import uuid
 import ray
-import numpy as np
+import time
 import torch
+import asyncio
+import psutil
+import random
+import numpy as np
 import torch.distributed as dist
 from collections import defaultdict
 from pprint import pformat
 from tqdm import tqdm
 from loguru import logger
-from typing import Any, Dict, List, Optional, Set, Tuple, Type
+from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 from torch.distributed import ProcessGroup
 
 from siirl.models.loader import TokenizerModule, load_tokenizer
@@ -35,7 +39,8 @@ from siirl.execution.scheduler.process_group_manager import ProcessGroupManager
 from siirl.execution.scheduler.enums import AdvantageEstimator
 from siirl.data_coordinator import DataProto
 from siirl.data_coordinator.dataloader import DataLoaderNode
-from siirl.dag_worker.data_structures import NodeOutput
+from siirl.data_coordinator.protocol import collate_fn
+from siirl.dag_worker.data_structures import NodeOutput, ValidationPayload, ValidationResult
 from siirl.dag_worker.constants import DAGConstants, DAGInitializationError
 from siirl.dag_worker.core_algos import (
     agg_loss, 
@@ -43,6 +48,12 @@ from siirl.dag_worker.core_algos import (
     compute_advantage, 
     compute_response_mask
     )
+from siirl.dag_worker.metric_aggregator import (
+    METRIC_CONFIG_FULL,
+    METRIC_CONFIG_MEAN_ONLY,
+    DistributedMetricAggregator,
+    _ReduceOp
+)
 from siirl.dag_worker.dag_utils import  (
     remove_prefix_from_dataproto,
     add_prefix_to_dataproto,
@@ -58,17 +69,31 @@ from siirl.dag_worker.dag_utils import  (
     setup_sharding_manager,
     get_worker_classes,
     get_parallelism_config,
-    prepare_generation_batch
+    prepare_generation_batch,
+    prepare_generation_batch, 
+    dump_validation_generations,
+    whether_put_data,
+    format_metrics_by_group,
+    log_metrics_to_console,
+    timer,
+    consistent_hash,
+    log_core_performance_metrics,
+    aggregate_and_write_performance_metrics,
+    prepare_local_batch_metrics,
     )
 from siirl.utils.debug import DistProfiler
-from siirl.utils.extras.device import get_device_name, get_nccl_backend
-
-from .mixins.utilities_mixin import UtilitiesMixin
-from .mixins.validation_mixin import ValidationMixin
+from siirl.utils.extras.device import get_device_name, get_nccl_backend, get_device_id
+from siirl.utils.metrics.metric_utils import (
+    aggregate_validation_metrics, 
+    compute_throughout_metrics, 
+    compute_timing_metrics
+    )
+from siirl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
+from siirl.execution.rollout_flow.multiturn.agent_loop import AgentLoopManager
 
 device_name = get_device_name()
 
-class DAGWorker(ValidationMixin, UtilitiesMixin, Worker):
+class DAGWorker(Worker):
     """
     Orchestrates a Directed Acyclic Graph (DAG) of tasks for distributed training,
     managing the setup, initialization, and workflow for a specific rank.
@@ -215,15 +240,15 @@ class DAGWorker(ValidationMixin, UtilitiesMixin, Worker):
                             last_val_metrics = val_metrics
 
                     if self.enable_perf:
-                        self._aggregate_and_write_performance_metrics(metrics_dict)
+                        aggregate_and_write_performance_metrics(self._gather_group, self._rank, self.global_steps, self.config, metrics_dict)
 
-                    ordered_metric_dict = self.format_metrics_by_group(metrics_dict, DAGConstants.METRIC_GROUP_ORDER)
-                    self._log_core_performance_metrics(ordered_metric_dict, self.global_steps)
+                    ordered_metric_dict = format_metrics_by_group(metrics_dict, DAGConstants.METRIC_GROUP_ORDER)
+                    log_core_performance_metrics(self._rank, self.enable_perf, ordered_metric_dict, self.global_steps)
                     if self._rank == 0:
                         if self.logger:
                             self.logger.log(data=ordered_metric_dict, step=self.global_steps)
                         else:
-                            self._log_metrics_to_console(ordered_metric_dict, self.global_steps)
+                            log_metrics_to_console(self._rank, ordered_metric_dict, self.global_steps)
 
                 if self.progress_bar and not (epoch == start_epoch and batch_idx < batches_to_skip):
                     self.progress_bar.update(1)
@@ -238,22 +263,22 @@ class DAGWorker(ValidationMixin, UtilitiesMixin, Worker):
         This is called at the end of a step, whether it completed successfully or was aborted.
         """
         # Reset the distributed (Ray) buffers for all keys that were used in this step.
-        with self._timer("reset_data_buffer", timing_raw):
+        with timer(self.enable_perf, "reset_data_buffer", timing_raw):
             self.reset_data_buffer(list(visited_nodes))
         # Clear the local, in-process cache for the next step.
-        with self._timer("reset_intern_data_buffer", timing_raw):
+        with timer(self.enable_perf, "reset_intern_data_buffer", timing_raw):
             self.internal_data_cache.clear()
 
     def _run_training_step(self, epoch: int, batch_idx: int) -> Optional[List[Tuple[str, Any]]]:
         """Executes a single training step by traversing the computational graph."""
         timing_raw, ordered_metrics = {}, []
 
-        with self._timer("step", timing_raw):
+        with timer(self.enable_perf, "step", timing_raw):
             # --- 1. Data Loading ---
-            with self._timer("data_loading", timing_raw):
+            with timer(self.enable_perf, "data_loading", timing_raw):
                 batch = DataProto.from_single_dict(self.dataloader.run(epoch=epoch, is_validation_step=False))
 
-            with self._timer("get_entry_node", timing_raw):
+            with timer(self.enable_perf, "get_entry_node", timing_raw):
                 node_queue = self.taskgraph.get_entry_nodes()
                 if not node_queue:
                     logger.error("Task graph has no entry nodes. Cannot start execution.")
@@ -263,9 +288,9 @@ class DAGWorker(ValidationMixin, UtilitiesMixin, Worker):
 
             # --- 2. Graph Traversal ---
             visited_nodes = set()
-            with self._timer("graph_execution", timing_raw):
+            with timer(self.enable_perf, "graph_execution", timing_raw):
                 while node_queue:
-                    with self._timer("graph_loop_management", timing_raw):
+                    with timer(self.enable_perf, "graph_loop_management", timing_raw):
                         cur_node = node_queue.pop(0)
                         if cur_node.node_id in visited_nodes:
                             continue
@@ -277,7 +302,7 @@ class DAGWorker(ValidationMixin, UtilitiesMixin, Worker):
                 
                     # --- 3. Get Input Data ---
                     if cur_node.node_id != entry_node_id:
-                        with self._timer("get_data_from_buffer", timing_raw):
+                        with timer(self.enable_perf, "get_data_from_buffer", timing_raw):
                             if self._multi_agent and cur_node.node_role == NodeRole.ADVANTAGE:
                                 batch = self.multi_agent_get_log(key=cur_node.node_id, cur_dp_rank = cur_dp_rank, agent_group = cur_node.agent_group,timing_raw = timing_raw)
                             else:
@@ -291,14 +316,14 @@ class DAGWorker(ValidationMixin, UtilitiesMixin, Worker):
                                 return None  # Abort the entire step
                             logger.debug(f"current node({cur_node.node_id}) get data from databuffer batch size: {batch.batch.size()}")
                     if self.enable_perf:
-                        with self._timer("get_data_from_buffer_barrier", timing_raw):
+                        with timer(self.enable_perf, "get_data_from_buffer_barrier", timing_raw):
                             dist.barrier(self._gather_group)
                     # --- 4. Node Execution ---
 
                     node_name_timer = f"{cur_node.node_role.name.lower()}"
                     if cur_node.only_forward_compute and cur_node.node_role == NodeRole.ACTOR:
                         node_name_timer = "actor_log_prob"
-                    with self._timer(node_name_timer, timing_raw):
+                    with timer(self.enable_perf, node_name_timer, timing_raw):
                         if cur_node.node_role == NodeRole.REWARD:
                             if self.check_spmd_mode():
                                 node_output = self.compute_reward(batch, cur_tp_size)
@@ -323,7 +348,7 @@ class DAGWorker(ValidationMixin, UtilitiesMixin, Worker):
                             logger.warning(f"Node {cur_node.node_id} has no executable. Passing data through.")
                             node_output = NodeOutput(batch=batch)
                     if self.enable_perf:
-                        with self._timer(f"{node_name_timer}_barrier", timing_raw):
+                        with timer(self.enable_perf, f"{node_name_timer}_barrier", timing_raw):
                             dist.barrier(self._gather_group)
                     if cur_node.node_role == NodeRole.ROLLOUT and self._multi_agent:
                         next_nodes = self.taskgraph.get_downstream_nodes(cur_node.node_id)
@@ -332,7 +357,7 @@ class DAGWorker(ValidationMixin, UtilitiesMixin, Worker):
                             next_nodes = self.taskgraph.get_downstream_nodes(cur_node.node_id)
                             
                     # --- 5. Process Output & Pass to Children ---
-                    with self._timer("graph_output_handling", timing_raw):
+                    with timer(self.enable_perf, "graph_output_handling", timing_raw):
                         if cur_node.node_role == NodeRole.POSTPROCESS_SAMPLING:
                             if len(node_output.batch) == 0:
                                 logger.warning(f"Rank {self._rank}: Data after postprocess_sampling is insufficient. Caching and skipping the rest of the training step.")
@@ -351,8 +376,8 @@ class DAGWorker(ValidationMixin, UtilitiesMixin, Worker):
                             next_dp_size, _, _, _, _, _ = self._get_node_dp_info(next_node)
                             node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node)
                             is_current_last_pp_tp_rank0 = (cur_pp_rank == cur_pp_size - 1 and cur_tp_rank == 0)
-                            if self._whether_put_data(is_current_last_pp_tp_rank0, next_dp_size, cur_dp_size, cur_node, next_node):
-                                with self._timer("put_data_to_buffer", timing_raw):
+                            if whether_put_data(self._rank, is_current_last_pp_tp_rank0, next_dp_size, cur_dp_size, cur_node, next_node):
+                                with timer(self.enable_perf, "put_data_to_buffer", timing_raw):
                                     if self._multi_agent and next_node.node_role == NodeRole.ADVANTAGE:
                                         self.multi_agent_put_log(key=next_node.node_id, data=node_output.batch, next_dp_size = next_dp_size, agent_group = next_node.agent_group, timing_raw = timing_raw)
                                     else:
@@ -362,9 +387,9 @@ class DAGWorker(ValidationMixin, UtilitiesMixin, Worker):
                             # last_node add prefix for metrics
                             node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node) 
                         if self.enable_perf:
-                            with self._timer("put_data_to_buffer_barrier", timing_raw):
+                            with timer(self.enable_perf, "put_data_to_buffer_barrier", timing_raw):
                                 dist.barrier(self._gather_group)
-                        with self._timer("get_next_node", timing_raw):
+                        with timer(self.enable_perf, "get_next_node", timing_raw):
                             # Add unvisited downstream nodes to the queue
                             for n in next_nodes:
                                 if n.node_id not in visited_nodes:
@@ -372,7 +397,7 @@ class DAGWorker(ValidationMixin, UtilitiesMixin, Worker):
 
                     # barrier after each node execution ensures synchronization.
                     # This is safer but might be slower. Can be configured to be optional.
-                    with self._timer("step_barrier", timing_raw):
+                    with timer(self.enable_perf, "step_barrier", timing_raw):
                         dist.barrier(self._gather_group)
 
             # --- 6. Final Metrics Collection ---
@@ -391,6 +416,23 @@ class DAGWorker(ValidationMixin, UtilitiesMixin, Worker):
 # ==========================================================================================
 # Module 2: Graph Node Execution Handlers
 # ==========================================================================================
+
+    def _set_node_executables(self):
+        """Maps node roles to their corresponding execution methods."""
+        ROLE_METHOD_MAPPING = {
+            (NodeRole.ROLLOUT, False): self.generate,
+            (NodeRole.REFERENCE, False): self.compute_ref_log_prob,
+            (NodeRole.ACTOR, True): self.compute_old_log_prob,
+            (NodeRole.ACTOR, False): self.train_actor,
+            (NodeRole.CRITIC, True): self.compute_value,
+            (NodeRole.CRITIC, False): self.train_critic,
+        }
+        for node in self.taskgraph.nodes.values():
+            if node.node_role in [NodeRole.REWARD, NodeRole.ADVANTAGE]:
+                continue
+            key = (node.node_role, node.only_forward_compute)
+            if executable_func := ROLE_METHOD_MAPPING.get(key):
+                node.executable = executable_func
 
     @DistProfiler.annotate(role="generate")
     def generate_sync_mode(self, worker_group_index: int, batch: DataProto, **kwargs) -> NodeOutput:
@@ -412,7 +454,8 @@ class DAGWorker(ValidationMixin, UtilitiesMixin, Worker):
         """Async mode"""
         if self._async_rollout_manager is not None:
             gen_batch = prepare_generation_batch(batch)
-            gen_output = self._async_rollout_manager.generate_sequences(gen_batch)
+            loop = asyncio.get_event_loop()
+            gen_output = loop.run_until_complete(self._async_rollout_manager.generate_sequences(gen_batch))
             metrics = gen_output.meta_info.get("metrics", {})
             gen_output.meta_info = {}
             batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))])
@@ -915,9 +958,6 @@ class DAGWorker(ValidationMixin, UtilitiesMixin, Worker):
                     continue
                 node_worker.init_model()
                 have_init_workers.add(generate_node_worker_key(node))
-                if node.node_role == NodeRole.ROLLOUT and node.config["intern_config"].rollout.mode == "async":
-                    self.rollout_mode = "async"
-                    self.zmq_address = node_worker.get_zeromq_address()
         logger.success("All worker models initialized.")
 
         logger.info(f"Setting up sharding managers {self.config.actor_rollout_ref.rollout.name} ...")
@@ -928,6 +968,17 @@ class DAGWorker(ValidationMixin, UtilitiesMixin, Worker):
                 except Exception as e:
                     logger.error(f"Failed to set up sharding manager for agent group {agent_group}: {e}", exc_info=True)
                     raise
+                
+        
+        if self.config.actor_rollout_ref.rollout.mode == "async":
+            logger.info(f"Initial Async Rollout Server ...")
+            for node in self.taskgraph.nodes.values():
+                if node.node_role == NodeRole.ROLLOUT:
+                    # need init after set sharding manager
+                    self.rollout_mode = "async"
+                    node_worker = self.workers[generate_node_worker_key(node)]
+                    self.zmq_address = node_worker.get_zeromq_address()
+                    self.init_async_server(node=node, node_worker=node_worker)
         logger.info("All models and sharding managers initialized successfully.")
         if self._multi_agent:
             from siirl.execution.rollout_flow.multi_agent.multiagent_generate import MultiAgentLoop
@@ -941,8 +992,758 @@ class DAGWorker(ValidationMixin, UtilitiesMixin, Worker):
         # Ensure all models are initialized and checkpoints are loaded before starting.
         dist.barrier(self._gather_group)
 
-    def set_async_rollout_manager(self, async_rollout_manager):
-        self._async_rollout_manager = async_rollout_manager
-
+    def init_async_server(self, node:Node, node_worker):
+        #gather zmq_address to rank_0
+        _, dp_rank, tp_rank, tp_size, *_ = self._get_node_dp_info(node)
+        addr_len = len(self.zmq_address) 
+        encoded_addr = torch.tensor([ord(c) for c in self.zmq_address], dtype=torch.uint8,
+                                device=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+        zmq_addresses = []
+        if tp_rank == 0: 
+            group_addrs = torch.zeros((tp_size, addr_len), dtype=torch.uint8, device=encoded_addr.device)
+            group_addrs[0] = encoded_addr
+            for i in range(1, tp_size):
+                src_rank = dp_rank * tp_size + i
+                dist.recv(group_addrs[i], src=src_rank)
+            for i in range(tp_size):
+                addr_str = ''.join([chr(c.item()) for c in group_addrs[i]])
+                zmq_addresses.append(addr_str)
+        else:  # 组内其他进程（tp1, tp3...）
+            # 发送自己的地址到组内目标进程
+            dist.send(encoded_addr, dst=dp_rank * tp_size)
+        if tp_rank == 0:
+            self._async_rollout_manager = AgentLoopManager(node.config["intern_config"], dp_rank, os.environ['WG_PREFIX'], node_worker.rollout, zmq_addresses)
     def get_zeromq_address(self):
         return self.zmq_address
+    
+# ==========================================================================================
+# Module 4: Validation
+# ==========================================================================================
+
+    def _validate(self) -> Dict[str, float]:
+        """Performs validation by generating, scoring, and aggregating metrics across all ranks."""
+        self.val_timedict = defaultdict(float)
+        if self._rank == 0:
+            logger.info("=" * 60)
+            logger.info(f"Starting Validation @ Global Step {self.global_steps}...")
+            logger.info("=" * 60)
+            self.val_timedict["overall_start_time"] = time.perf_counter()
+
+        all_scored_results: List[ValidationResult] = []
+
+        # Check if num_val_batches > 0 to avoid unnecessary loops.
+        if self.dataloader.num_val_batches <= 0:
+            if self._rank == 0:
+                logger.warning("num_val_batches is 0. Skipping validation.")
+            return {}
+
+        for i in range(self.dataloader.num_val_batches):
+            if self._rank == 0:
+                logger.debug(f"Processing validation batch {i + 1}/{self.dataloader.num_val_batches}")
+
+            with timer(self.enable_perf, "prep_and_generate", self.val_timedict):
+                batch_proto = self._prepare_validation_batch()
+                generated_proto = self._generate_for_validation(batch_proto)
+                dist.barrier(self._gather_group)  
+
+            with timer(self.enable_perf, "score_and_package", self.val_timedict):
+                scored_results = self._score_and_package_results(generated_proto)
+                all_scored_results.extend(scored_results)
+
+        dump_validation_generations(self.config, self.global_steps, self._rank, all_scored_results)
+        dist.barrier(self._gather_group)
+        
+        _, _, tp_rank, _, pp_rank, _ = self._get_node_dp_info(self.first_rollout_node)
+        # Gather all payloads to rank 0
+        with timer(self.enable_perf, "gather_payloads", self.val_timedict):
+            payloads_for_metrics = []
+            if tp_rank == 0 and pp_rank == 0:
+                # Only the master rank of the TP group (tp_rank=0) and first PP stage (pp_rank=0) prepares the payload.
+                payloads_for_metrics = [
+                    ValidationPayload(r.input_text, r.score, r.data_source, r.extra_rewards) for r in all_scored_results
+                ]
+            gathered_payloads_on_rank0 = [None] * self.world_size if self._rank == 0 else None
+            dist.gather_object(payloads_for_metrics, gathered_payloads_on_rank0, dst=0, group=self._gather_group)
+
+        # Rank 0 performs the final aggregation and logging
+        if self._rank == 0:
+            flat_payload_list = [p for sublist in gathered_payloads_on_rank0 if sublist for p in sublist]
+            final_metrics = self._aggregate_and_log_validation_metrics(flat_payload_list)
+        dist.barrier(self._gather_group)
+        
+        return final_metrics if self._rank == 0 else {}
+
+    def _prepare_validation_batch(self) -> DataProto:
+        """Fetches and prepares a single batch for validation."""
+        test_batch = self.dataloader.run(is_validation_step=True)
+        test_batch_proto = DataProto.from_single_dict(test_batch)
+        n_samples = self.config.actor_rollout_ref.rollout.val_kwargs.n
+        return test_batch_proto.repeat(n_samples, interleave=True)
+
+    def _generate_for_validation(self, batch_proto: DataProto) -> DataProto:
+        """Generates sequences using the rollout worker for a validation batch."""
+        rollout_worker = self.agent_group_worker[0][NodeRole.ROLLOUT]
+        val_kwargs = self.config.actor_rollout_ref.rollout.val_kwargs
+
+        prompt_texts = self.validate_tokenizer.batch_decode(
+            batch_proto.batch["input_ids"], skip_special_tokens=True
+        )
+        batch_proto.non_tensor_batch["prompt_texts"] = prompt_texts
+
+        gen_batch = prepare_generation_batch(batch_proto)
+
+        if self.config.actor_rollout_ref.rollout.agent.rewards_with_env and "reward_model" in batch_proto.non_tensor_batch:
+            gen_batch.non_tensor_batch["reward_model"] = batch_proto.non_tensor_batch["reward_model"] 
+        gen_batch.meta_info = {
+            "eos_token_id": self.validate_tokenizer.eos_token_id,
+            "pad_token_id": self.validate_tokenizer.pad_token_id,
+            "recompute_log_prob": False,
+            "do_sample": val_kwargs.do_sample,
+            "validate": True,
+        }
+        logger.info(f"_generate_for_validation gen batch meta_info: {gen_batch.meta_info}")
+        
+        output = None
+        if self._multi_agent is False:
+            if self.rollout_mode == 'sync':
+                output = rollout_worker.generate_sequences(gen_batch)
+            elif self._async_rollout_manager:
+                loop = asyncio.get_event_loop()
+                output = loop.run_until_complete(self._async_rollout_manager.generate_sequences(gen_batch))
+        else:
+            output = self.multi_agent_loop.generate_sequence(gen_batch)
+            if output:
+                return output
+            return batch_proto
+        if output:
+            batch_proto.union(output)
+        return batch_proto
+
+    def _score_and_package_results(self, generated_proto: DataProto) -> List[ValidationResult]:
+        """Scores generated sequences and packages them into ValidationResult objects."""
+        if self.rollout_mode == 'async' and self._async_rollout_manager is None:
+            return []
+        if self._multi_agent and 'responses' not in generated_proto.batch:
+            return []
+        if "token_level_rewards" in generated_proto.batch:
+            reward_result = {"reward_tensor": generated_proto.batch["token_level_rewards"],
+                             "reward_extra_info": {}}
+        else:    
+            reward_result = self.val_reward_fn(generated_proto, return_dict=True)
+        scores = reward_result["reward_tensor"].sum(-1).cpu()
+
+        input_texts = generated_proto.non_tensor_batch.get("prompt_texts")
+        if input_texts is None:
+            logger.error(
+                "FATAL: `prompt_texts` not found in `non_tensor_batch`. "
+                "The prompt data was lost during the process. Falling back to decoding the full sequence, "
+                "but please be aware the resulting `input_text` will be INCORRECT (it will contain prompt + response)."
+            )
+            # Fallback to prevent a crash, but the output is known to be wrong.
+            input_texts = self.validate_tokenizer.batch_decode(
+                generated_proto.batch["input_ids"], skip_special_tokens=True
+            )
+
+        output_texts = self.validate_tokenizer.batch_decode(generated_proto.batch["responses"], skip_special_tokens=True)
+        data_sources = generated_proto.non_tensor_batch.get("data_source", ["unknown"] * len(scores))
+        extra_info = generated_proto.non_tensor_batch.get("extra_info", [None] * len(scores))
+
+        packaged_results = []
+        for i in range(len(scores)):
+            if self.dataloader.is_val_trailing_rank and isinstance(extra_info[i], dict) and extra_info[i].get("padded_duplicate", None):
+                logger.debug(f"Rank {self._rank} skip append padded duplicate item {i}: score={scores[i].item()}")
+                continue
+            extra_rewards = {k: v[i] for k, v in reward_result.get("reward_extra_info", {}).items()}
+            packaged_results.append(ValidationResult(input_texts[i], output_texts[i], scores[i].item(), data_sources[i], reward_result["reward_tensor"][i], extra_rewards))
+        return packaged_results
+
+    def _aggregate_and_log_validation_metrics(self, all_payloads: List[ValidationPayload]) -> Dict[str, float]:
+        """On Rank 0, aggregates all validation results and logs performance."""
+        if not all_payloads:
+            logger.warning("Validation finished with no results gathered on Rank 0 to aggregate.")
+            return {}
+
+        logger.info(f"Rank 0: Aggregating {len(all_payloads)} validation results...")
+        with timer(self.enable_perf, "final_aggregation", self.val_timedict):
+            final_metrics = self._aggregate_validation_results(all_payloads)
+
+        # Log performance breakdown
+        total_time = time.perf_counter() - self.val_timedict.pop("overall_start_time", time.perf_counter())
+        logger.info("--- Validation Performance Breakdown (Rank 0) ---")
+        for name, duration in self.val_timedict.items():
+            logger.info(f"  Total {name.replace('_', ' ').title():<25}: {duration:.4f}s")
+        known_time = sum(self.val_timedict.values())
+        logger.info(f"  {'Other/Overhead':<25}: {max(0, total_time - known_time):.4f}s")
+        logger.info(f"  {'TOTAL VALIDATION TIME':<25}: {total_time:.4f}s")
+        logger.info("=" * 51)
+
+        return final_metrics
+
+    def _aggregate_validation_results(self, all_payloads: List[ValidationPayload]) -> Dict[str, float]:
+        """Computes the final metric dictionary from all gathered validation payloads."""
+        data_sources = [p.data_source for p in all_payloads]
+        sample_inputs = [p.input_text for p in all_payloads]
+
+        infos_dict = defaultdict(list)
+        for p in all_payloads:
+            infos_dict["reward"].append(p.score)
+            for key, value in p.extra_rewards.items():
+                infos_dict[key].append(value)
+
+        data_src2var2metric2val = aggregate_validation_metrics(data_sources=data_sources, sample_inputs=sample_inputs, infos_dict=infos_dict)
+
+        metric_dict = {}
+        for data_source, var2metric2val in data_src2var2metric2val.items():
+            core_var = "acc" if "acc" in var2metric2val else "reward"
+            for var_name, metric2val in var2metric2val.items():
+                if not metric2val:
+                    continue
+
+                # Robustly parse '@N' to prevent crashes from malformed metric names.
+                n_max_values = []
+                for name in metric2val.keys():
+                    if "@" in name and "/mean" in name:
+                        try:
+                            n_val = int(name.split("@")[-1].split("/")[0])
+                            n_max_values.append(n_val)
+                        except (ValueError, IndexError):
+                            continue  # Ignore malformed metric names
+
+                n_max = max(n_max_values) if n_max_values else 1
+
+                for metric_name, metric_val in metric2val.items():
+                    is_core_metric = (var_name == core_var) and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"]) and (f"@{n_max}" in metric_name)
+
+                    metric_sec = "val-core" if is_core_metric else "val-aux"
+                    pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
+                    metric_dict[pfx] = metric_val
+
+        # Re-calculate test_score per data source
+
+        data_source_rewards = defaultdict(list)
+        for p in all_payloads:
+            data_source_rewards[p.data_source].append(p.score)
+
+        for source, rewards in data_source_rewards.items():
+            if rewards:
+                metric_dict[f"val/test_score/{source}"] = np.mean(rewards)
+
+        return metric_dict
+
+# ==========================================================================================
+# Module 5: Utilities
+# ==========================================================================================
+
+    def _save_checkpoint(self):
+        """
+        Saves a checkpoint in a fully distributed, robust, and multi-agent compatible manner.
+        - Each agent's state is saved to a unique, agent-specific subdirectory.
+        - A barrier ensures all file writes are complete before committing.
+        - Only Rank 0 updates the tracker file, effectively "committing" the checkpoint atomically.
+        """
+        from siirl.execution.dag.node import NodeType
+
+        step_dir = os.path.join(self.config.trainer.default_local_dir, f"global_step_{self.global_steps}")
+        os.makedirs(step_dir, exist_ok=True)
+        dist.barrier(self._gather_group)
+
+        logger.info(f"Rank {self._rank}: Saving checkpoint for global_step {self.global_steps} to {step_dir}")
+
+        # --- 1. All ranks save their sharded data ---
+        # Save states for trainable models (Actor and Critic) for all agents.
+        saved_worker_keys = set()
+        for node in self.taskgraph.nodes.values():
+            if node.node_type == NodeType.MODEL_TRAIN and node.node_role in [NodeRole.ACTOR, NodeRole.CRITIC]:
+                node_worker_key = generate_node_worker_key(node)
+                if node_worker_key in saved_worker_keys:
+                    continue
+
+                worker = self.workers[node_worker_key]
+
+                # Create an agent-specific subdirectory name to prevent different agents
+                # from overwriting each other's checkpoints.
+                sub_dir_name = f"{node.node_role.name.lower()}_agent_{node.agent_group}"
+                checkpoint_path = os.path.join(step_dir, sub_dir_name)
+
+                # The config key for max checkpoints is still role-based (e.g., max_actor_ckpt_to_keep).
+                role_name_for_config = node.node_role.name.lower()
+                max_ckpt_keep = getattr(self.config.trainer, f"max_{role_name_for_config}_ckpt_to_keep", 10)
+
+                worker.save_checkpoint(
+                    local_path=checkpoint_path, global_step=self.global_steps, max_ckpt_to_keep=max_ckpt_keep
+                )
+                saved_worker_keys.add(node_worker_key)
+
+        # In each DP group, only TP rank 0 saves the DataLoader state to avoid redundancy.
+        _, dp_rank, tp_rank, _, pp_rank, _ = self._get_node_dp_info(self.first_rollout_node)
+        if tp_rank == 0 and pp_rank == 0:
+            # The filename is based on the DP rank to distinguish different data partitions.
+            dataloader_path = os.path.join(step_dir, f"data_dp_rank_{dp_rank}.pt")
+            dataloader_state = self.dataloader.state_dict()
+            torch.save(dataloader_state, dataloader_path)
+            logger.debug(f"Rank {self._rank} (DP_Rank {dp_rank}, TP_Rank {tp_rank}, PP_Rank {pp_rank}): Saved dataloader state.")
+
+        # --- 2. All ranks wait for I/O to complete ---
+        # This barrier ensures all data is written BEFORE committing the checkpoint via the tracker file.
+        logger.debug(f"Rank {self._rank}: All data saved. Waiting at barrier before committing checkpoint.")
+        dist.barrier(self._gather_group)
+
+        # --- 3. Only Rank 0 commits the checkpoint by writing the tracker file ---
+        if self._rank == 0:
+            tracker_file = os.path.join(self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt")
+            with open(tracker_file, "w") as f:
+                f.write(str(self.global_steps))
+            logger.info(f"Rank 0: Checkpoint for step {self.global_steps} successfully committed.")
+
+        # Final barrier to ensure the tracker file is visible before any rank proceeds.
+        dist.barrier(self._gather_group)
+        logger.info(f"Rank {self._rank}: Finished saving and committing checkpoint for step {self.global_steps}.")
+
+    def _load_checkpoint(self):
+        """
+        Loads a checkpoint in a fully distributed and consistent manner.
+        - It relies on Rank 0 to be the single source of truth for which checkpoint to load and broadcasts that
+          decision. This is essential to prevent inconsistencies from filesystem latency.
+        - It constructs agent-specific paths to load the correct state for each agent.
+        """
+        from siirl.execution.dag.node import NodeType
+
+        if self.config.trainer.resume_mode == "disable":
+            if self._rank == 0:
+                logger.info("Checkpoint loading is disabled. Starting from scratch.")
+            self.global_steps = 0
+            return
+
+        # --- 1. Only Rank 0 determines the path to load ---
+        checkpoint_path_container = [None]
+        if self._rank == 0:
+            checkpoint_dir = self.config.trainer.default_local_dir
+            resume_from_path = self.config.trainer.resume_from_path
+
+            path_to_load = None
+            if self.config.trainer.resume_mode == "auto":
+                # This now reads from an atomically-written tracker file.
+                latest_path = find_latest_ckpt_path(checkpoint_dir)
+                if latest_path:
+                    logger.info(f"Rank 0: Auto-found latest checkpoint at {latest_path}")
+                    path_to_load = latest_path
+            elif self.config.trainer.resume_mode == "resume_path" and resume_from_path:
+                logger.info(f"Rank 0: Attempting to load from specified path: {resume_from_path}")
+                path_to_load = resume_from_path
+
+            if path_to_load and os.path.exists(path_to_load):
+                checkpoint_path_container[0] = path_to_load
+            else:
+                logger.warning(
+                    f"Rank 0: Checkpoint path not found or invalid: '{path_to_load}'. Starting from scratch."
+                )
+
+        # --- 2. Rank 0 broadcasts the decision to all other ranks ---
+        # This is the crucial step for ensuring consistency.
+        dist.broadcast_object_list(checkpoint_path_container, src=0)
+        global_step_folder = checkpoint_path_container[0]
+
+        # --- 3. All ranks act on the broadcasted decision ---
+        if global_step_folder is None:
+            if self._rank == 0:
+                logger.info("No valid checkpoint to load. Training will start from step 0.")
+            self.global_steps = 0
+            dist.barrier(self._gather_group)
+            return
+
+        try:
+            self.global_steps = int(os.path.basename(global_step_folder).split("global_step_")[-1])
+            logger.info(f"Rank {self._rank}: Resuming from checkpoint. Setting global_steps to {self.global_steps}.")
+        except (ValueError, IndexError) as e:
+            raise ValueError(f"Could not parse global step from checkpoint path: {global_step_folder}") from e
+
+        # Load sharded model states for all agents.
+        loaded_worker_keys = set()
+        for node in self.taskgraph.nodes.values():
+            if node.node_type == NodeType.MODEL_TRAIN and node.node_role in [NodeRole.ACTOR, NodeRole.CRITIC]:
+                node_worker_key = generate_node_worker_key(node)
+                if node_worker_key in loaded_worker_keys:
+                    continue
+
+                worker = self.workers[node_worker_key]
+
+                # Construct the agent-specific subdirectory name to load from.
+                sub_dir_name = f"{node.node_role.name.lower()}_agent_{node.agent_group}"
+                checkpoint_path = os.path.join(global_step_folder, sub_dir_name)
+
+                if os.path.exists(checkpoint_path):
+                    worker.load_checkpoint(
+                        local_path=checkpoint_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
+                    )
+                    loaded_worker_keys.add(node_worker_key)
+                else:
+                    logger.warning(
+                        f"Rank {self._rank}: Checkpoint for agent {node.agent_group}'s {node.node_role.name} not found "
+                        f"at {checkpoint_path}. Weights will be from initialization."
+                        f"If has multi-agent, will share the same checkpoint in agents"
+                    )
+
+        # Load dataloader state. All ranks in a DP group load from the same file.
+        _, dp_rank, _, _, _, _ = self._get_node_dp_info(self.first_rollout_node)
+        dataloader_path = os.path.join(global_step_folder, f"data_dp_rank_{dp_rank}.pt")
+        if os.path.exists(dataloader_path):
+            dataloader_state = torch.load(dataloader_path, map_location="cpu")
+            self.dataloader.load_state_dict(dataloader_state)
+        else:
+            logger.warning(
+                f"Rank {self._rank} (DP_Rank {dp_rank}): Dataloader checkpoint not found at {dataloader_path}. Sampler "
+                f"state will not be restored, which may lead to data inconsistency."
+            )
+
+        # Barrier to ensure all ranks are synchronized after loading.
+        dist.barrier(self._gather_group)
+        logger.info(f"Rank {self._rank}: Finished loading all checkpoint components.")
+
+    def put_data_to_buffers(
+        self, key: str, 
+        data: DataProto,
+        source_dp_size: int, 
+        dest_dp_size: int, 
+        enforce_buffer: bool, 
+        timing_raw: Dict[str, float]):
+        """Puts data into shared Ray plasma store for consumption by downstream nodes."""
+        try:
+            logger.debug(f"Rank {self._rank}: Starting put_data_to_buffers for key '{key}', source_dp_size={source_dp_size}, dest_dp_size={dest_dp_size}")
+            
+            data.meta_info["padding_values"] = {"input_ids": self.validate_tokenizer.pad_token_id, "responses": self.validate_tokenizer.pad_token_id, "labels": -100, "attention_mask": 0, "response_mask": 0}
+            data.meta_info["padding_side"] = self.validate_tokenizer.padding_side
+
+            if (not enforce_buffer) and source_dp_size == dest_dp_size:
+                with timer(self.enable_perf, f"put_intern_data_{key}", timing_raw):
+                    logger.debug(f"Rank {self._rank}: DP size match ({source_dp_size}). Storing data for key '{key}' in local cache.")
+                    self.internal_data_cache[key] = data
+                    logger.debug(f"Rank {self._rank}: Successfully stored data for key '{key}' in local cache.")
+            else:
+                logger.debug(f"Rank {self._rank}: DP size mismatch (source={source_dp_size}, dest={dest_dp_size}). Using Ray buffers for key '{key}'.")
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    logger.debug(f"Rank {self._rank}: Creating new event loop for key '{key}'")
+                    loop = asyncio.new_event_loop()
+
+                with timer(self.enable_perf, f"put_ray_proto_data_{key}", timing_raw):
+                    chunks = data.chunk(chunks=len(self.data_buffers))
+                    logger.debug(f"Rank {self._rank}: Created {len(chunks)} chunks for key '{key}'")
+                    put_futures = [buf.put.remote(key, chunk) for buf, chunk in zip(self.data_buffers, chunks)]
+                
+                with timer(self.enable_perf, f"put_proto_data_{key}", timing_raw):
+                    try:
+                        loop.run_until_complete(asyncio.gather(*put_futures))
+                        logger.debug(f"Rank {self._rank}: Successfully stored all chunks for key '{key}' in Ray buffers")
+                    except Exception as e:
+                        logger.error(f"Rank {self._rank}: Failed to store chunks for key '{key}' in Ray buffers: {e}")
+                        raise
+        except Exception as e:
+            logger.error(f"Rank {self._rank}: Unexpected error in put_data_to_buffers for key '{key}': {e}")
+            raise  # Re-raise the exception to maintain the original behavior
+
+    def get_data_from_buffers(
+        self, 
+        key: str, 
+        my_current_dp_rank: int, 
+        my_current_dp_size: int, 
+        timing_raw: Dict[str, float]
+        ) -> Optional[DataProto]:
+        """Gets data from shared buffers that was produced by an upstream node."""
+        try:
+            # First, check the high-speed internal cache.
+            with timer(self.enable_perf, f"get_intern_data_{key}", timing_raw):
+                if key in self.internal_data_cache:
+                    logger.debug(f"Rank {self._rank}: Found data for key '{key}' in local cache. Bypassing Ray.")
+                    return self.internal_data_cache.pop(key)
+
+            # If not in the local cache, fall back to remote Ray buffers.
+            logger.debug(f"Rank {self._rank}: Data for key '{key}' not in local cache. Fetching from remote buffers.")
+            if not self.data_buffers:
+                logger.error(f"Rank {self._rank}: data_buffers is None, cannot get data for key '{key}'")
+                return None
+
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                logger.debug(f"Rank {self._rank}: Creating new event loop for key '{key}'")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+            try:
+                logger.debug(f"Rank {self._rank}: Attempting Ray remote call for key '{key}'")
+                first_item = loop.run_until_complete(self.data_buffers[0].get.remote(key, my_current_dp_rank, my_current_dp_size))
+                logger.debug(f"Rank {self._rank}: Completed Ray remote call for key '{key}', got result type: {type(first_item)}")
+            except Exception as e:
+                logger.error(f"Rank {self._rank}: Error getting data from Ray buffer for key '{key}': {e}")
+                return None
+
+            if first_item is None:
+                logger.error(f"Rank {self._rank}: first_item is None for key '{key}'")
+                return None
+
+            if isinstance(first_item, ray.ObjectRef):
+                with timer(self.enable_perf, f"get_ref_data_{key}", timing_raw):
+                    try:
+                        return loop.run_until_complete(first_item)
+                    except Exception as e:
+                        logger.error(f"Rank {self._rank}: Error resolving Ray ObjectRef for key '{key}': {e}")
+                        return None
+            elif isinstance(first_item, DataProto):
+                try:
+                    # If data was chunked, retrieve all chunks and concatenate
+                    with timer(self.enable_perf, f"get_proto_data_{key}", timing_raw):
+                        other_chunks_futures = [b.get.remote(key, my_current_dp_rank, my_current_dp_size) for b in self.data_buffers[1:]]
+                        other_chunks = loop.run_until_complete(asyncio.gather(*other_chunks_futures))
+                    with timer(self.enable_perf, f"get_proto_data_concat_chunks_{key}", timing_raw):
+                        return DataProto.concat([first_item] + other_chunks)
+                except Exception as e:
+                    logger.error(f"Rank {self._rank}: Error concatenating chunks for key '{key}': {e}")
+                    return None
+            logger.error(f"Rank {self._rank}: first_item type {type(first_item)} is neither ray.ObjectRef nor DataProto for key '{key}'")
+            return None
+
+        except Exception as e:
+            logger.error(f"Rank {self._rank}: Unexpected error in get_data_from_buffers for key '{key}': {e}")
+            return None
+
+    def reset_data_buffer(self, all_keys: List[str]):
+        """
+        Reset the data buffer for a given list of keys.
+        """
+        if self._rank == 0:
+            loop = asyncio.get_event_loop()
+            for data_buffer in self.data_buffers:
+                loop.run_until_complete(data_buffer.reset.remote())
+
+    def multi_agent_put_log(self, key: str, data: DataProto, agent_group: int, next_dp_size: int, timing_raw):
+        def uuid_hex_to_bucket(uuid_hex: str, num_buckets: int = 8) -> int:
+            return consistent_hash(uuid_hex) % num_buckets
+        data_size = len(data)
+        put_futures = []
+        meta_info = data.meta_info
+        with timer(self.enable_perf, f"put_ray_proto_data_{key}", timing_raw):
+            for i in range(data_size):
+                cur_data = data[i]
+                request_id = cur_data.non_tensor_batch[f"agent_group_{agent_group}_request_id"]
+                next_dp_rank = uuid_hex_to_bucket(request_id, next_dp_size)
+                cur_key = key + f"_{next_dp_rank}"
+                buf = random.choice(self.data_buffers)
+                # slice of DataProto is DataProtoItem, will loss meta_info, need to recompute when use
+                cur_data = collate_fn([cur_data])
+                cur_data.meta_info = meta_info
+                put_futures.append(buf.put.remote(cur_key, cur_data))
+        with timer(self.enable_perf, f"put_proto_data_{key}", timing_raw):
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(asyncio.gather(*put_futures))
+
+    def multi_agent_get_log(self, key: str, cur_dp_rank: int, agent_group: int, timing_raw):
+        loop = asyncio.get_event_loop()
+        key = key + f"_{cur_dp_rank}"
+        prefix_key = f"agent_group_{agent_group}_"
+        with timer(self.enable_perf, f"get_ref_data_{key}", timing_raw):
+            tasks = [buf.get.remote(key) for buf in self.data_buffers]
+            temp_data =loop.run_until_complete(asyncio.gather(*tasks))
+            # temp_data = self.data_buffers.get(key) 
+            datas = [item for t in temp_data if t is not None for item in t]
+            sorted_datas = sorted(datas, key = lambda x : (x.non_tensor_batch[prefix_key + 'request_id'], -x.non_tensor_batch[prefix_key + 'traj_step']))
+            meta_info = sorted_datas[0].meta_info
+            dataproto = collate_fn(sorted_datas)
+            dataproto.meta_info = meta_info
+        return dataproto
+
+    def check_spmd_mode(self):
+        return self.rollout_mode == 'sync' and self._multi_agent == False
+
+    def _reduce_and_broadcast_metrics(
+        self, local_metrics: Dict[str, Union[float, List[float], torch.Tensor]], group: dist.ProcessGroup
+    ) -> Dict[str, float]:
+        """
+        Aggregates metrics in a distributed environment using a dedicated helper class.
+        For Pipeline Parallel setups, ensures all ranks have the same metric keys to avoid
+        tensor shape mismatch during all_reduce operations.
+
+        Args:
+            local_metrics: A dictionary of metrics on each rank.
+            group: The process group for the aggregation.
+
+        Returns:
+            A dictionary with the globally aggregated metrics, available on all ranks.
+        """
+        if not isinstance(local_metrics, dict) or not local_metrics:
+            return {}
+
+        world_size = dist.get_world_size(group)
+        if world_size <= 1:
+            # If not in a distributed setting, perform local aggregation only.
+            aggregator = DistributedMetricAggregator(local_metrics, group=None)
+            # The bucketed values are already the final values in a non-distributed case.
+            final_metrics = {}
+            for op_type, data in aggregator.op_buckets.items():
+                for key, value in data:
+                    if op_type == _ReduceOp.SUM: # value is a (sum, count) tuple
+                        final_metrics[key] = value[0] / value[1] if value[1] > 0 else 0.0
+                    else: # value is a float
+                        final_metrics[key] = float(value)
+            return final_metrics
+
+        # In Megatron with Pipeline Parallel:
+        # 1. First gather all metric keys from all ranks to ensure consistency
+        local_keys = set(local_metrics.keys())
+        all_keys_list = [None] * world_size
+        dist.all_gather_object(all_keys_list, local_keys, group=group)
+        
+        # 2. Union all keys to get the complete set of expected metrics
+        all_expected_keys = set()
+        for keys_set in all_keys_list:
+            all_expected_keys.update(keys_set)
+        
+        # 3. Use the aggregator with unified keys to perform communication
+        aggregator = DistributedMetricAggregator(local_metrics, group)
+        # NOTE(Ping Zhang): Ensure all ranks have the same metrics by adding missing ones with default values
+        aggregator.op_buckets = aggregator._bucket_local_metrics(local_metrics, all_expected_keys)
+        return aggregator.aggregate_and_get_results()
+
+    def _collect_final_metrics(self, batch: DataProto, timing_raw: dict) -> Dict[str, float]:
+        """
+        Orchestrates the collection and computation of all metrics for a training step
+        using a highly efficient, all_reduce-based aggregation strategy.
+
+        This function replaces the old `compute -> reduce -> finalize` pipeline.
+        """
+        device_name = get_device_name()
+        if device_name == "cuda":
+            torch.cuda.reset_peak_memory_stats()
+        elif device_name == "npu":
+            torch.npu.reset_peak_memory_stats()
+
+        final_metrics = {}
+
+        # --- 1. Prepare all local metric data ---
+        use_critic = any(node.node_role == NodeRole.CRITIC for node in self.taskgraph.nodes.values())
+        local_data = prepare_local_batch_metrics(batch, use_critic=use_critic)
+
+        # --- 2. Build the dictionary for our generic, high-performance aggregator ---
+        # We want mean, max, and min for most standard metrics.
+        metrics_to_aggregate = {}
+
+        # Process metrics requiring mean, max, and min
+        for key, prefix in METRIC_CONFIG_FULL.items():
+            if key in local_data:
+                # The aggregator determines the operation from the key.
+                # We provide the same raw tensor for mean, max, and min calculations.
+                metrics_to_aggregate[f"{prefix}/mean"] = local_data[key]
+                metrics_to_aggregate[f"{prefix}_max"] = local_data[key]
+                metrics_to_aggregate[f"{prefix}_min"] = local_data[key]
+
+        # Process metrics requiring only mean
+        for key, prefix in METRIC_CONFIG_MEAN_ONLY.items():
+            if key in local_data:
+                metrics_to_aggregate[f"{prefix}/mean"] = local_data[key]
+
+        representative_actor_node = next(
+            (n for n in self.taskgraph.nodes.values() if n.node_role == NodeRole.ACTOR), self.first_rollout_node
+        )
+        _, _, _, _, pp_rank_in_group, _ = self._get_node_dp_info(representative_actor_node)
+        # (1) For TP: we have already taken TP into account when we set global_token_num in compute_reward.
+        # see: siirl/workers/dag_worker/mixins/node_executors_mixin.py:compute_reward
+        # (2) For PP: only PP rank 0 contributes to avoid double counting within PP groups
+        # The aggregation will average across DP groups and multiply by world size to get global estimate
+        if pp_rank_in_group == 0:
+            local_token_sum = sum(batch.meta_info.get("global_token_num", [0]))
+            metrics_to_aggregate["perf/total_num_tokens/mean"] = float(local_token_sum)
+
+        # --- 3. Perform the aggregated, distributed reduction ---
+        with timer(self.enable_perf, "metrics_aggregation", timing_raw):
+            aggregated_metrics = self._reduce_and_broadcast_metrics(metrics_to_aggregate, self._gather_group)
+
+        # Post-process keys and values for the final output
+        for key, value in aggregated_metrics.items():
+            if "_max" in key and "mem" not in key:
+                final_metrics[key.replace("_max", "/max")] = value
+            elif "_min" in key:
+                final_metrics[key.replace("_min", "/min")] = value
+            else:
+                final_metrics[key] = value
+
+        # Special handling for total_num_tokens to convert mean back to sum
+        if "perf/total_num_tokens/mean" in final_metrics:
+            final_metrics["perf/total_num_tokens"] = final_metrics.pop(
+                "perf/total_num_tokens/mean"
+            ) * dist.get_world_size(self._gather_group)
+
+        # --- 4. Handle special cases like Explained Variance ---
+        if use_critic:
+            # Determine the correct device for distributed operations
+            device_name = get_device_name()
+            if device_name in ["cuda", "npu"]:
+                device = f"{device_name}:{get_device_id()}"
+            else:
+                # Fallback to the device of an existing tensor. If it's CPU, all_reduce will fail,
+                # which is the original problem, indicating a deeper issue.
+                device = local_data["returns"].device
+            # These components only need to be summed. We can do a direct all_reduce.
+            components_to_sum = {k: v for k, v in local_data.items() if k.endswith("_comp")}
+            for tensor in components_to_sum.values():
+                if self._gather_group is not None:
+                    dist.all_reduce(tensor.to(device), op=dist.ReduceOp.SUM, group=self._gather_group)
+
+            # Now all ranks have the global sums and can compute the final value.
+            N = local_data["returns"].numel()
+            total_N_tensor = torch.tensor([N], dtype=torch.int64, device=local_data["returns"].device)
+            if self._gather_group is not None:
+                dist.all_reduce(total_N_tensor.to(device), op=dist.ReduceOp.SUM, group=self._gather_group)
+            global_N = total_N_tensor.item()
+
+            if global_N > 0:
+                global_returns_sum = final_metrics["critic/returns/mean"] * global_N
+                global_returns_sq_sum = components_to_sum["returns_sq_sum_comp"].item()
+                global_error_sum = components_to_sum["error_sum_comp"].item()
+                global_error_sq_sum = components_to_sum["error_sq_sum_comp"].item()
+
+                mean_returns = global_returns_sum / global_N
+                var_returns = (global_returns_sq_sum / global_N) - (mean_returns**2)
+
+                mean_error = global_error_sum / global_N
+                var_error = (global_error_sq_sum / global_N) - (mean_error**2)
+
+                final_metrics["critic/vf_explained_var"] = 1.0 - var_error / (var_returns + 1e-8)
+            else:
+                final_metrics["critic/vf_explained_var"] = 0.0
+
+        # --- 5. Add timing and other rank-0-only metrics ---
+        # Only rank 0 needs to compute these for logging.
+        if self._rank == 0:
+            batch.meta_info["global_token_num"] = [final_metrics.get("perf/total_num_tokens", 0)]
+            final_metrics.update(compute_throughout_metrics(batch, timing_raw, dist.get_world_size()))
+            final_metrics["perf/process_cpu_mem_used_gb"] = psutil.Process(os.getpid()).memory_info().rss / (1024**3)
+            timing_metrics = compute_timing_metrics(batch, timing_raw)
+            for key, value in timing_metrics.items():
+                if key.startswith("timing_s/"):
+                    final_metrics[key.replace("timing_s/", "perf/delta_time/")] = value
+
+        # All ranks return the final metrics. Ranks other than 0 can use them if needed,
+        # or just ignore them. This is cleaner than returning an empty dict.
+        return final_metrics
+
+    def _collect_multi_final_metrics(self, batch: DataProto, ordered_metrics: dict, timing_raw: dict) -> Dict[str, float]:
+        node_queue = self.taskgraph.get_entry_nodes()
+        visited_nodes = set()
+        while node_queue:
+            cur_node = node_queue.pop(0)
+            if cur_node.node_id in visited_nodes:
+                continue
+            if cur_node.node_role !=  NodeRole.ROLLOUT:
+                break
+            batch = remove_prefix_from_dataproto(batch, cur_node)        
+            final_metrics = self._collect_final_metrics(batch, timing_raw)
+            final_metrics = add_prefix_to_metrics(final_metrics, cur_node)
+            if final_metrics:
+                ordered_metrics.extend(sorted(final_metrics.items()))
+            if next_nodes := self.taskgraph.get_downstream_nodes(cur_node.node_id):
+                for n in next_nodes:
+                    if n.node_id not in visited_nodes:
+                        node_queue.append(n)
+            batch = add_prefix_to_dataproto(batch, cur_node)
+        return ordered_metrics
+

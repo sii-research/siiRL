@@ -1379,9 +1379,8 @@ class SGLangRollout(BaseRollout):
         request_sampling_params = self.sampling_params.copy()
         request_sampling_params.update(sampling_params)
         output = await self._handle_engine_generate(prompt_ids, request_sampling_params)
-        return output["text"]
+        return output["text"] if self.config.mode == "sync" else output["output_ids"]
     
-
     async def wake_up(self):
         if not self.is_sleep:
             return

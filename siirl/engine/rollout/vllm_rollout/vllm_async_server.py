@@ -34,41 +34,9 @@ from siirl.utils.extras.fs import copy_to_local
 from siirl.engine.rollout.async_server import AsyncServerBase
 from siirl import DataProto
 from siirl.global_config.params.model_args import ActorRolloutRefArguments
-
+import torch
 logger = logging.getLogger(__file__)
 
-
-
-
-
-
-def _get_model_runner_workers(vllm_config, init_ray: bool = True):
-    assert vllm_config.instance_id is not None, "instance_id must be set for external ray actors."
-
-    fields = vllm_config.instance_id.split(":")
-    namespace, wg_prefix, global_rank= fields[0], fields[1], int(fields[2])
-    
-    # Make sure subprocess in same namespace as parent actor.
-    # actor name format: {name_prefix}WorkerDict_{pg_idx}:{local_rank}
-    
-    if init_ray:
-        ray.init(namespace=namespace)
-    actor_names = [
-        actor_name for actor_name in ray.util.list_named_actors() if actor_name.startswith(f"{wg_prefix}_DAGWorker")
-    ]
-    vllm_tp_size = vllm_config.parallel_config.tensor_parallel_size
-    def get_pg_index_and_local_rank(actor_name) -> Tuple[int, int]:
-        fields = actor_name.split(":")
-        assert len(fields) == 2, f"invalid actor name: {actor_name}"
-        pg_index, local_rank = int(fields[0].split("_")[-1]), int(fields[1])
-        return pg_index, local_rank
-    # sort actor names by pg_index and local_rank
-    actor_names = sorted(actor_names, key=get_pg_index_and_local_rank)
-    
-    actor_names = actor_names[global_rank : global_rank + vllm_tp_size]
-    
-    workers: List[WorkerWrapperBase] = [ray.get_actor(actor_name) for actor_name in actor_names]
-    return workers
 
 class ExternalZeroMQDistributedExecutor(Executor):
     """An executor that engines are launched by external ray actors."""
@@ -121,7 +89,6 @@ class ExternalZeroMQDistributedExecutor(Executor):
     def check_health(self):
         return
 
-@ray.remote(num_cpus=1)
 class AsyncvLLMServer(AsyncServerBase):
     """
     AsyncvLLMServer is a wrapper for AsyncLLM, it uses ExternalRayDistributedExecutor to launch engines
@@ -138,24 +105,24 @@ class AsyncvLLMServer(AsyncServerBase):
     For vLLM AsyncLLM design, see: https://github.com/vllm-project/vllm/pull/9826
     """
 
-    def __init__(self, config: ActorRolloutRefArguments, global_rank: int, wg_prefix: str):
+    def __init__(self, config: ActorRolloutRefArguments,  spmd_engine: Any, zmq_addresses:List):
         """
         Args:
             config: DictConfig.
             wg_prefix: str, worker group prefix, used to lookup actors.
+            engine: Any, used in sglang ,vllm not need
         """
         super().__init__()
 
         self.config = config
-        self.global_rank = global_rank
-        self.wg_prefix = wg_prefix
+        self.spmd_engine = spmd_engine
+        self.zmq_addresses = zmq_addresses
         self.engine: AsyncLLM = None
         
     def init_engine(self):
         """Init vLLM AsyncLLM engine."""
         config = self.config
         model_path = config.model.path
-        model_name = "/".join(model_path.split("/")[-2:])
         local_path = copy_to_local(model_path)
         trust_remote_code = config.rollout.trust_remote_code
         config = config.rollout
@@ -203,24 +170,19 @@ class AsyncvLLMServer(AsyncServerBase):
             trust_remote_code=trust_remote_code,
             seed=config.seed,
         )
-
         # init async llm engine
-        vllm_config = self._create_engine_config(engine_args)
+        vllm_config = self._create_engine_config(engine_args, self.zmq_addresses)
+        
         self.engine = AsyncLLM.from_vllm_config(vllm_config)
+        
 
-    def _create_engine_config(self, engine_args: AsyncEngineArgs):
+    def _create_engine_config(self, engine_args: AsyncEngineArgs, zmq_addresses:List):
         # wg_prefix = os.environ['WG_PREFIX']
         # local_world_size = os.environ['RAY_LOCAL_WORLD_SIZE']
         # local_rank = os.environ['RAY_LOCAL_RANK']
-        namespace = 'siiRL'
         vllm_config = engine_args.create_engine_config()
-        namespace = ray.get_runtime_context().namespace
-        vllm_config.instance_id = f"{namespace}:{self.wg_prefix}:{self.global_rank}"
-
         # SIIRL_VLLM_ZMQ_ADDRESSES
         if engine_args.distributed_executor_backend == ExternalZeroMQDistributedExecutor:
-            workers = _get_model_runner_workers(vllm_config=vllm_config, init_ray=False)
-            zmq_addresses = ray.get([worker.get_zeromq_address.remote() for worker in workers])
             os.environ["SIIRL_VLLM_ZMQ_ADDRESSES"] = ",".join(zmq_addresses)
 
         return vllm_config

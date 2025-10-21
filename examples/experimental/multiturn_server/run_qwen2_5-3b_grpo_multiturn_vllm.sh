@@ -12,7 +12,7 @@ export MODEL_NAME=qwen2.5-3b
 export HOME={your_home_path}
 export TRAIN_DATA_PATH=$HOME/data/datasets/$DATASET/train.parquet
 export TEST_DATA_PATH=$HOME/data/datasets/$DATASET/test.parquet
-export MODEL_PATH=$HOME/data/models/Qwen2.5-3B-Instruct
+export MODEL_PATH=$HOME/data/models/Qwen3-1.7B-Instruct
 
 # Base output paths
 export BASE_CKPT_PATH=ckpts
@@ -92,6 +92,8 @@ TRAINING_CMD=(
     actor_rollout_ref.rollout.enforce_eager=False
     actor_rollout_ref.rollout.free_cache_engine=False
     actor_rollout_ref.rollout.n=\$ROLLOUT_N
+    actor_rollout_ref.rollout.prompt_length=\$MAX_PROMPT_LENGTH  
+    actor_rollout_ref.rollout.response_length=\$MAX_RESPONSE_LENGTH
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.ref.fsdp_config.param_offload=True
     algorithm.kl_ctrl.kl_coef=0.001
@@ -110,6 +112,8 @@ TRAINING_CMD=(
     trainer.val_before_train=True
     actor_rollout_ref.rollout.multi_turn.tool_config_path="\$TOOL_CONFIG_PATH" 
     actor_rollout_ref.rollout.multi_turn.interaction_config_path="\$INTERACTION_CONFIG_PATH" 
+    actor_rollout_ref.rollout.multi_turn.max_assistant_turns=1
+    actor_rollout_ref.rollout.multi_turn.max_user_turns=1
     actor_rollout_ref.rollout.agent.agent_name="tool_agent"
 )
 

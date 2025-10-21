@@ -51,35 +51,16 @@ class AsyncLLMServerManager:
     - Sticky session: send multi-turn chat completions to same server for automatic prefix caching
     """
 
-    def __init__(self, config: DictConfig, server_handles: List[ray.actor.ActorHandle], max_cache_size: int = 10000):
+    def __init__(self, config: DictConfig, server, max_cache_size: int = 10000):
         """Initialize the AsyncLLMServerManager.
 
         Args:
             config (DictConfig): YAML config.
-            server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
+            server (vllm/sglang async engine): OpenAI compatible LLM server.
             max_cache_size (int, optional): max cache size for request_id to server mapping. Defaults to 10000.
         """
         self.config = config
-        self.server_handles = server_handles
-        random.shuffle(self.server_handles)
-
-        # Least requests load balancing
-        self.weighted_serveres = [[0, (hash(server), server)] for server in server_handles]
-        heapq.heapify(self.weighted_serveres)
-
-        # LRU cache to map request_id to server
-        self.request_id_to_server = LRUCache(maxsize=max_cache_size)
-
-    def _choose_server(self, request_id: str) -> ray.actor.ActorHandle:
-        # TODO: implement server pressure awareness load balancing
-        if request_id in self.request_id_to_server:
-            return self.request_id_to_server[request_id]
-
-        server = self.weighted_serveres[0][1][1]
-        self.weighted_serveres[0][0] += 1
-        heapq.heapreplace(self.weighted_serveres, self.weighted_serveres[0])
-        self.request_id_to_server[request_id] = server
-        return server
+        self.server = server
 
     async def generate(
         self,
@@ -98,8 +79,8 @@ class AsyncLLMServerManager:
         Returns:
             List[int]: List of generated token ids.
         """
-        server = self._choose_server(request_id)
-        output = await server.generate.remote(
+
+        output = await self.server.generate(
             request_id=request_id,
             prompt_ids=prompt_ids,
             sampling_params=sampling_params,
@@ -165,7 +146,6 @@ class AgentLoopBase(ABC):
         raise NotImplementedError
 
 
-@ray.remote
 class AgentLoopWorker:
     """Agent loop worker takes a batch of messages and run each message in an agent loop."""
 
@@ -230,7 +210,6 @@ class AgentLoopWorker:
         for agent_name, messages in zip(agent_names, raw_prompts):
             tasks.append(asyncio.create_task(self._run_agent_loop(agent_name, messages.tolist(), sampling_params)))
         outputs = await asyncio.gather(*tasks)
-
         output = self._postprocess(outputs)
         return output
 
@@ -321,7 +300,7 @@ class AgentLoopWorker:
 class AgentLoopManager:
     """Agent loop manager that manages a group of agent loop workers."""
 
-    def __init__(self, config: DictConfig, cur_dp_size, cur_dp_rank, name_prefix):
+    def __init__(self, config: DictConfig, cur_dp_rank, name_prefix, engine, zmq_addresses:List):
         """Initialize agent loop manager.
 
         Args:
@@ -329,26 +308,18 @@ class AgentLoopManager:
             worker_group (RayWorkerGroup): ActorRolloutRef worker group.
         """
         self.config = config
-        self.cur_dp_size = cur_dp_size
         self.cur_dp_rank = cur_dp_rank
         self.name_prefix = name_prefix
-        
-    async def init_model(self):
-        await self._initialize_llm_servers()
-        await self._init_agent_loop_workers()
+        self.engine = engine
+        self.zmq_addresses = zmq_addresses
+        self._initialize_llm_servers()
+        self._init_agent_loop_workers()
 
-    async def _initialize_llm_servers(self):
+    def _initialize_llm_servers(self):
         self.rollout_tp_size = self.config.rollout.tensor_model_parallel_size
         # self.rollout_dp_size = self.worker_group.world_size // self.rollout_tp_size
         # in siirl, every dp has private rollout engine
         self.rollout_dp_size = 1
-        register_center = ray.get_actor(f"{self.name_prefix}_register_center")
-        workers_info = ray.get(register_center.get_worker_info.remote())
-        rank = self.cur_dp_rank * self.rollout_tp_size 
-        ddp_rank = self.cur_dp_rank
-        self.async_llm_servers = []
-
-
         if self.config.rollout.agent.custom_async_server:
             server_class = async_server_class(
                 rollout_backend=self.config.rollout.name,
@@ -358,40 +329,13 @@ class AgentLoopManager:
         else:
             server_class = async_server_class(rollout_backend=self.config.rollout.name)
 
-        # Start all server instances, restart if address already in use.
-        unready_dp_ranks = set([ddp_rank])
-        while len(unready_dp_ranks) > 0:
-            servers = {
-                rollout_dp_rank: server_class.options(
-                    # make sure AsyncvLLMServer colocates with its corresponding workers
-                    scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                        node_id=workers_info[rollout_dp_rank * self.rollout_tp_size],
-                        soft=False,
-                    ),
-                    name=f"async_llm_server_{rollout_dp_rank}",
-                ).remote(self.config, rank, self.name_prefix)
-                for rollout_dp_rank in unready_dp_ranks
-            }
-            
-            for rollout_dp_rank, server in servers.items():
-                self.async_llm_servers.append(server)
-                unready_dp_ranks.remove(rollout_dp_rank)
-        # All server instances are ready, init AsyncLLM engine.
-        futures = [server.init_engine.remote() for server in self.async_llm_servers]
-        await asyncio.gather(*futures)
-
-
-    async def _init_agent_loop_workers(self):
-        if self.config.rollout.agent.num_workers != 1:
-            self.config.rollout.agent.num_workers = 1
-            logger.warning("only support agent has one num_workers")
-            
-        self.agent_loop_workers = AgentLoopWorker.options(
-            name=f"agent_loop_worker_{self.cur_dp_rank}",
-        ).remote(self.config, self.async_llm_servers)
+        self.async_llm_server = server_class(self.config, self.engine, self.zmq_addresses)
+        self.async_llm_server.init_engine()
+    def _init_agent_loop_workers(self):
+        self.agent_loop_worker = AgentLoopWorker(self.config, self.async_llm_server)
             
 
-    def generate_sequences(self, prompts: DataProto) -> DataProto:
+    async def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Split input batch and dispatch to agent loop workers.
 
         Args:
@@ -401,18 +345,15 @@ class AgentLoopManager:
             DataProto: Output batch.
         """
         if self.config.rollout.free_cache_engine:
-            self.wake_up()
-        outputs = ray.get(
-            [self.agent_loop_workers.generate_sequences.remote(prompts)]
-        )
-        output = DataProto.concat(outputs)
+            await self.wake_up()
+        output = await self.agent_loop_worker.generate_sequences(prompts)
         if self.config.rollout.free_cache_engine:
-            self.sleep()
+            await self.sleep()
 
         # calculate performance metrics
-        metrics = [output.meta_info["metrics"] for output in outputs]  # List[List[Dict[str, str]]]
+        metrics = [output.meta_info["metrics"]]  # List[List[Dict[str, str]]]
         timing = self._performance_metrics(metrics, output)
-
+    
         output.meta_info = {"timing": timing}
         return output
 
@@ -438,10 +379,11 @@ class AgentLoopManager:
 
         return timing
 
-    def wake_up(self):
+    async def wake_up(self):
         """Wake up all rollout server instances."""
-        ray.get([server.wake_up.remote() for server in self.async_llm_servers])
+        self.async_llm_server.wake_up()
 
-    def sleep(self):
+    async def sleep(self):
         """Sleep all rollout server instances."""
-        ray.get([server.sleep.remote() for server in self.async_llm_servers])
+        self.async_llm_server.sleep()
+

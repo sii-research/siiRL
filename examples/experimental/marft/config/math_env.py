@@ -13,10 +13,9 @@
 # limitations under the License.
 
 import asyncio
-from siirl.workers.environment.base import BaseEnvironment
 from siirl.utils.reward_score.math import compute_score
 from typing import Any, Dict, Optional, Tuple
-class MathEnv(BaseEnvironment):
+class MathEnv():
     def __init__(self):
         pass
     def reset(self) -> Any:

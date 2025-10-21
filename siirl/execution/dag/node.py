@@ -250,15 +250,31 @@ class Node:
     def _resolve_executable(self) -> None:
         """
         Dynamically import and obtain the executable function based on the executable_ref string.
+
+        Supports two formats:
+        1. "module.path:ClassName.method" - imports module.path, then gets ClassName.method
+        2. "module.path.function" - imports module.path, then gets function
         """
         if not self.executable_ref:
             self._executable = None
             return
 
         try:
-            module_path, function_name = self.executable_ref.rsplit(".", 1)
-            module = importlib.import_module(module_path)
-            self._executable = getattr(module, function_name)
+            # Check if colon separator is present (format: module.path:ClassName.method)
+            if ":" in self.executable_ref:
+                module_path, attr_path = self.executable_ref.split(":", 1)
+                module = importlib.import_module(module_path)
+                # Handle nested attributes (e.g., "ClassName.method")
+                obj = module
+                for attr_name in attr_path.split("."):
+                    obj = getattr(obj, attr_name)
+                self._executable = obj
+            else:
+                # Fall back to original behavior (format: module.path.function)
+                module_path, function_name = self.executable_ref.rsplit(".", 1)
+                module = importlib.import_module(module_path)
+                self._executable = getattr(module, function_name)
+
             if not callable(self._executable):
                 raise AttributeError(f"The object resolved from '{self.executable_ref}' is not callable.")
         except (ImportError, AttributeError, ValueError) as e:

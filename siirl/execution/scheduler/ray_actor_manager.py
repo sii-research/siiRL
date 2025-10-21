@@ -174,30 +174,6 @@ class RayActorManager(WorkerGroup):
         work_futures = self.map_async(method_name="init_graph")
         ray.get(work_futures)
         # only support single agent
-        if self.base_config.actor_rollout_ref.rollout.mode == 'async':
-            tp_size = self.base_config.actor_rollout_ref.rollout.tensor_model_parallel_size
-            world_size = len(self._workers)
-            dp_size = world_size // tp_size
-            self.async_rollout_manager = []
-            futures = self._init_async_rollout_manaager(dp_size)
-            
-            loop = asyncio.get_event_loop()
-            self.async_rollout_manager = loop.run_until_complete(futures)
-            for manager in self.async_rollout_manager:
-                manager.sleep()
-            for i in range(len(self._workers)):
-                if i % tp_size == 0:
-                    ray.get(self._workers[i].set_async_rollout_manager.remote(self.async_rollout_manager[i // tp_size]))
-    async def _init_async_rollout_manaager(self,dp_size):
-         # add sync_rollout manager
-        futures = []
-        for dp_rank in range(dp_size):
-            futures.append(self._create_async_rollout_manaager(dp_size, dp_rank))
-        return await asyncio.gather(*futures)
-    async def _create_async_rollout_manaager(self, dp_size, dp_rank):
-        agent_manager = AgentLoopManager(self.base_config.actor_rollout_ref, dp_size, dp_rank, self.name_prefix)
-        await agent_manager.init_model()
-        return agent_manager
         
     def _get_register_center_and_master_info(self) -> Tuple[str, str]:
         """

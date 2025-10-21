@@ -17,7 +17,6 @@ import time
 
 import hydra
 import ray
-from loguru import logger
 from omegaconf import DictConfig
 
 from siirl.execution.scheduler.enums import AdvantageEstimator, AlgorithmType
@@ -27,7 +26,8 @@ from siirl.execution.scheduler.process_group_manager import ProcessGroupManager,
 from siirl.execution.scheduler.task_scheduler import TaskScheduler, log_schedule_assignments
 from siirl.utils.logger.logging_utils import set_basic_config
 from siirl.global_config.params import SiiRLArguments, log_dict_formatted, parse_config
-from siirl.execution.dag import DAGConfigLoader
+from siirl.execution.dag import TaskGraph
+from siirl.execution.dag.builtin_pipelines import grpo_pipeline, ppo_pipeline, dapo_pipeline
 from siirl.data_coordinator import init_data_buffer
 
 
@@ -44,26 +44,89 @@ RAY_RUNTIME_ENV_VARS = {
 MAIN_RUNNER_CPU_RESERVATION = 5
 
 
-def determine_workflow_config(self, siirl_args: SiiRLArguments) -> str:
-    current_dir = os.path.dirname(os.path.abspath(__file__))
+def load_pipeline(siirl_args: SiiRLArguments) -> TaskGraph:
+    """
+    Load training pipeline using the Python-based Pipeline API.
 
-    if siirl_args.algorithm.adv_estimator == AdvantageEstimator.GAE:
-        return os.path.join(current_dir, "./global_config/config/workflow_ppo.yaml")
-    elif siirl_args.algorithm.adv_estimator in [
-        AdvantageEstimator.GRPO,
-        AdvantageEstimator.GRPO_PASSK,
-        AdvantageEstimator.REINFORCE_PLUS_PLUS,
-        AdvantageEstimator.REMAX,
-        AdvantageEstimator.RLOO,
-        AdvantageEstimator.OPO,
-        AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE,
-        AdvantageEstimator.CPGD,
-    ]:
-        if siirl_args.algorithm.algorithm_name == AlgorithmType.DAPO.value:
-            return os.path.join(current_dir, "./global_config/config/workflow_dapo.yaml")
-        return os.path.join(current_dir, "./global_config/config/workflow_grpo.yaml")
+    This function supports two modes (in priority order):
+    1. Custom pipeline via dag.custom_pipeline_fn (user-specified Python function)
+    2. Built-in Python pipelines (grpo_pipeline, ppo_pipeline, dapo_pipeline)
+
+    Args:
+        siirl_args: Configuration arguments
+
+    Returns:
+        TaskGraph: Loaded and validated task graph
+
+    Raises:
+        ImportError: If custom pipeline function cannot be loaded
+        NotImplementedError: If no suitable pipeline is found
+    """
+    # Import logger locally to avoid Ray serialization issues
+    from loguru import logger
+
+    # Mode 1: User-specified custom pipeline function
+    if hasattr(siirl_args.dag, 'custom_pipeline_fn') and siirl_args.dag.custom_pipeline_fn:
+        logger.info(f"Loading custom pipeline: {siirl_args.dag.custom_pipeline_fn}")
+
+        try:
+            # Parse function path: "module.path:function_name"
+            if ":" not in siirl_args.dag.custom_pipeline_fn:
+                raise ValueError(
+                    f"Invalid custom_pipeline_fn format: '{siirl_args.dag.custom_pipeline_fn}'. "
+                    f"Expected format: 'module.path:function_name'"
+                )
+
+            module_path, func_name = siirl_args.dag.custom_pipeline_fn.rsplit(":", 1)
+
+            # Dynamically import the module and function
+            import importlib
+            module = importlib.import_module(module_path)
+            pipeline_fn = getattr(module, func_name)
+
+            if not callable(pipeline_fn):
+                raise ValueError(
+                    f"'{siirl_args.dag.custom_pipeline_fn}' is not callable. "
+                    f"It should be a function that returns TaskGraph."
+                )
+
+            # Call the function to get TaskGraph
+            taskgraph = pipeline_fn()
+
+            if not isinstance(taskgraph, TaskGraph):
+                raise ValueError(
+                    f"Custom pipeline function '{siirl_args.dag.custom_pipeline_fn}' "
+                    f"must return a TaskGraph object, got {type(taskgraph)}"
+                )
+
+            logger.success(f"Custom pipeline loaded successfully: {taskgraph.graph_id}")
+            return taskgraph
+
+        except Exception as e:
+            logger.error(f"Failed to load custom pipeline '{siirl_args.dag.custom_pipeline_fn}': {e}")
+            raise
+
+    # Mode 2: Built-in Python pipelines (default)
+    logger.info(f"Using built-in Python pipeline for algorithm: {siirl_args.algorithm.adv_estimator}")
+
+    # Set CPGD-specific config
+    if siirl_args.algorithm.adv_estimator == AdvantageEstimator.CPGD:
+        siirl_args.actor_rollout_ref.actor.use_cpgd_loss = True
+
+    # Select appropriate built-in pipeline
+    if siirl_args.algorithm.adv_estimator == AdvantageEstimator.GRPO:
+        return grpo_pipeline()
+    elif siirl_args.algorithm.adv_estimator == AdvantageEstimator.CPGD:
+        return grpo_pipeline()  # CPGD uses GRPO structure
+    elif siirl_args.algorithm.adv_estimator == AdvantageEstimator.GAE:
+        return ppo_pipeline()
+    elif siirl_args.algorithm.algorithm_name == AlgorithmType.DAPO.value:
+        return dapo_pipeline()
     else:
-        raise NotImplementedError
+        raise NotImplementedError(
+            f"No built-in pipeline for algorithm '{siirl_args.algorithm.adv_estimator}'. "
+            f"Please specify dag.custom_pipeline_fn to use a custom pipeline."
+        )
 
 
 def get_databuffer_shard_number(siirl_args: SiiRLArguments) -> int:
@@ -107,17 +170,9 @@ class MainRunner:
         databuffer_number = get_databuffer_shard_number(siirl_args)
         data_buffer_handlers = init_data_buffer(databuffer_number)
 
-        # 2. Load and configure the workerflow task graph (DAG)
-        if siirl_args.dag.workflow_path is None:
-            # If no workerflow path is provided, determine the default workflow config
-            workflow_path = determine_workflow_config(self, siirl_args)
-            logger.info(f"No workerflow path provided. Using {workflow_path} determined by adv_estimator: {siirl_args.algorithm.adv_estimator}")
-        else:
-            workflow_path = siirl_args.dag.workflow_path
-        logger.info(f"Loading workerflow from: {siirl_args.dag.workflow_path}")
-        if siirl_args.algorithm.adv_estimator == AdvantageEstimator.CPGD:
-            siirl_args.actor_rollout_ref.actor.use_cpgd_loss = True
-        workerflow_taskgraph = DAGConfigLoader.load_from_file(workflow_path)
+        # 2. Load and configure the workflow task graph (DAG)
+        logger.info("Loading training pipeline...")
+        workerflow_taskgraph = load_pipeline(siirl_args)
         update_task_graph_node_configs(workerflow_taskgraph, siirl_args)
         display_node_config(workerflow_taskgraph)
 
@@ -169,6 +224,9 @@ def main() -> None:
     Args:
         siirl_config: The configuration object provided by Hydra.
     """
+    # Import logger locally to avoid Ray serialization issues
+    from loguru import logger
+
     start_time = time.time()
 
     # Initialize Ray cluster if not already running
