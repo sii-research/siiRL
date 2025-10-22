@@ -315,12 +315,10 @@ class DataParallelPPOActor(BasePPOActor):
         micro_batch_size = data.meta_info["micro_batch_size"]
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
-
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
-        batch = data.select(batch_keys=select_keys).batch
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
-
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
+
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
 
         if use_dynamic_bsz:
@@ -328,7 +326,7 @@ class DataParallelPPOActor(BasePPOActor):
             max_token_len = data.meta_info["max_token_len"] * self.ulysses_sequence_parallel_size
             micro_batches, batch_idx_list = prepare_dynamic_batch(data, max_token_len=max_token_len)
         else:
-            micro_batches = batch.split(micro_batch_size)
+            micro_batches = data.split(micro_batch_size)
 
         log_probs_lst = []
         entropy_lst = []
