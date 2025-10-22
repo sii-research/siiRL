@@ -312,6 +312,7 @@ class ActorArguments:
     policy_drift_coeff: float = field(default=0.0, metadata={"help": "policy drift coeff for CPGD"})
     data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
     profile: dict[str, Any] = field(default_factory=dict, metadata={"help": "Actor Profile settings"})
+    entropy_checkpointing: bool = field(default=False, metadata={"help": "Enable entropy checkpointing"})
     entropy_from_logits_with_chunking: bool = field(
         default=False, metadata={"help": "Enable entropy from logits with chunking"}
     )
@@ -501,6 +502,7 @@ class RefArguments:
     shuffle: bool = field(default=False, metadata={"help": "Data shuffling"})
     data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
     recompute_old_log_prob: bool = field(default=True, metadata={"help": "recompute old log prob"})
+    entropy_checkpointing: bool = field(default=False, metadata={"help": "Enable entropy checkpointing"})
     entropy_from_logits_with_chunking: bool = field(
         default=False, metadata={"help": "Enable entropy from logits with chunking"}
     )
