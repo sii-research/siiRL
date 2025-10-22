@@ -71,6 +71,7 @@ TRAINING_CMD=(
     actor_rollout_ref.model.use_remove_padding=True
     actor_rollout_ref.model.use_fused_kernels=False
     actor_rollout_ref.actor.policy_drift_coeff=0.001
+    actor_rollout_ref.actor.policy_loss.loss_mode=cpgd
     actor_rollout_ref.actor.ppo_mini_batch_size=\$PPO_MINI_BATCH_SIZE
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.actor.use_kl_loss=True
@@ -167,7 +168,7 @@ main() {
     local timestamp=$(date +"%Y%m%d_%H%M%S")
     ray stop --force
 
-    
+
 
     export VLLM_USE_V1=1
     export GLOO_SOCKET_TIMEOUT=600

@@ -74,6 +74,8 @@ actor_rollout_ref:
     ppo_epochs: 1
     shuffle: False
     ulysses_sequence_parallel_size: 1 # sp size
+    policy_loss:
+      loss_mode: vanilla
     use_fused_kernels: ${actor_rollout_ref.model.use_fused_kernels}
     checkpoint:
       contents: ['model', 'optimizer', 'extra']  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
@@ -119,7 +121,7 @@ actor_rollout_ref:
       expert_model_parallel_size: 1  # Expert parallelism for MoE models
       expert_tensor_parallel_size: 1  # Expert tensor parallelism for MoE models
       param_offload: False  # Offload parameters to CPU
-      grad_offload: False   # Offload gradients to CPU 
+      grad_offload: False   # Offload gradients to CPU
       optimizer_offload: False  # Offload optimizer states to CPU
       override_transformer_config: {}
       override_ddp_config: {}

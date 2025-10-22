@@ -16,12 +16,14 @@ Utilities to create common models from huggingface
 """
 
 import os
-import warnings
-from typing import Dict, Optional, Type
-from dataclasses import dataclass
 import re
+import warnings
+from dataclasses import dataclass
+from typing import Dict, Optional, Type
+
 import numpy as np
 import torch
+from loguru import logger
 from torch import nn
 from transformers import (
     AutoConfig,
@@ -32,8 +34,8 @@ from transformers import (
     PreTrainedModel,
 )
 from transformers.modeling_outputs import CausalLMOutputWithPast
+
 from siirl.models.registry import ModelRegistry
-from loguru import logger
 
 
 class LambdaLayer(nn.Module):
@@ -65,7 +67,9 @@ def update_model_config(module_config, override_config_kwargs):
 def get_huggingface_actor_config(model_name: str, override_config_kwargs=None, trust_remote_code=False) -> Dict:
     if override_config_kwargs is None:
         override_config_kwargs = {}
-    assert isinstance(override_config_kwargs, Dict), f"override_config_kwargs must be a dict, got {type(override_config_kwargs)}"
+    assert isinstance(override_config_kwargs, Dict), (
+        f"override_config_kwargs must be a dict, got {type(override_config_kwargs)}"
+    )
     module_config = AutoConfig.from_pretrained(model_name, trust_remote_code=trust_remote_code)
     update_model_config(module_config, override_config_kwargs)
 
@@ -103,8 +107,12 @@ def create_huggingface_actor(model_name: str, override_config_kwargs=None, autom
         override_config_kwargs = {}
     if automodel_kwargs is None:
         automodel_kwargs = {}
-    assert isinstance(override_config_kwargs, Dict), f"override_config_kwargs must be a dict, got {type(override_config_kwargs)}"
-    module_config = get_huggingface_actor_config(model_name, override_config_kwargs, trust_remote_code=automodel_kwargs.get("trust_remote_code", False))
+    assert isinstance(override_config_kwargs, Dict), (
+        f"override_config_kwargs must be a dict, got {type(override_config_kwargs)}"
+    )
+    module_config = get_huggingface_actor_config(
+        model_name, override_config_kwargs, trust_remote_code=automodel_kwargs.get("trust_remote_code", False)
+    )
     module: nn.Module = AutoModelForCausalLM.from_config(module_config, **automodel_kwargs)
     return module
 
@@ -119,11 +127,15 @@ def create_huggingface_critic(model_name: str, override_config_kwargs=None, auto
     Returns:
 
     """
-    critic_module: nn.Module = create_huggingface_actor(model_name, override_config_kwargs=override_config_kwargs, automodel_kwargs=automodel_kwargs)
+    critic_module: nn.Module = create_huggingface_actor(
+        model_name, override_config_kwargs=override_config_kwargs, automodel_kwargs=automodel_kwargs
+    )
     if automodel_kwargs is None:
         automodel_kwargs = {}
     torch_dtype = automodel_kwargs.get("torch_dtype", torch.float32)
-    critic_module.lm_head = nn.Sequential(nn.Linear(critic_module.config.hidden_size, 1, dtype=torch_dtype), LambdaLayer(fn=squeeze))
+    critic_module.lm_head = nn.Sequential(
+        nn.Linear(critic_module.config.hidden_size, 1, dtype=torch_dtype), LambdaLayer(fn=squeeze)
+    )
     return critic_module
 
 
@@ -247,11 +259,15 @@ def normalize_pp_vpp_params(params, num_hidden_layers, layer_name="layers"):
         vpp_size = len(params[pp_rank])
         for vpp_rank in range(vpp_size):
             for name, param in params[pp_rank][vpp_rank].items():
-                normalized_name = normalize_model_name(name, pp_rank, vpp_rank, pp_size, vpp_size, num_hidden_layers, layer_name=layer_name)
+                normalized_name = normalize_model_name(
+                    name, pp_rank, vpp_rank, pp_size, vpp_size, num_hidden_layers, layer_name=layer_name
+                )
                 yield normalized_name, param
 
 
-def get_parallel_model_from_config(config, megatron_config, pre_process=None, post_process=None, share_embeddings_and_output_weights=False, value=False):
+def get_parallel_model_from_config(
+    config, megatron_config, pre_process=None, post_process=None, share_embeddings_and_output_weights=False, value=False
+):
     from megatron.core import ModelParallelConfig
 
     assert isinstance(megatron_config, ModelParallelConfig)
@@ -271,10 +287,13 @@ def _get_parallel_model_architecture_from_config(config: PretrainedConfig, value
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
         model_cls = ModelRegistry.load_model_cls(arch, value)
-        logger.info(f"after load model cls")
+        logger.info("after load model cls")
         if model_cls is not None:
             return model_cls
-    raise ValueError(f"Model architectures {architectures} are not supported for now. Supported architectures: {ModelRegistry.get_supported_archs()}")
+    raise ValueError(
+        f"Model architectures {architectures} are not supported for now. Supported architectures: "
+        f"{ModelRegistry.get_supported_archs()}"
+    )
 
 
 def _load_hf_model(config, model_config, is_value_model, local_cache_path):
@@ -292,7 +311,9 @@ def _load_hf_model(config, model_config, is_value_model, local_cache_path):
         from siirl.utils.extras.fs import copy_to_local
 
         logger.info(f"start download from {config.model.path}")
-        local_model_path = copy_to_local(src=config.model.path, cache_dir=local_cache_path, use_shm=config.model.get("use_shm", False))
+        local_model_path = copy_to_local(
+            src=config.model.path, cache_dir=local_cache_path, use_shm=config.model.get("use_shm", False)
+        )
         logger.info("finish download")
     else:
         local_model_path = config.model.path
@@ -313,7 +334,9 @@ def _load_hf_model(config, model_config, is_value_model, local_cache_path):
             )  # use score head instead of lm_head
             state_dict = model.state_dict()
             state_dict["lm_head.weight"] = state_dict["score.weight"]
-            state_dict["model.embed_tokens.weight"] = state_dict["model.embed_tokens.weight"][:32000]  # workaround, 32001 -> 32000
+            state_dict["model.embed_tokens.weight"] = state_dict["model.embed_tokens.weight"][
+                :32000
+            ]  # workaround, 32001 -> 32000
             is_value_model = True
         else:
             model = AutoModelForCausalLM.from_pretrained(
@@ -325,6 +348,7 @@ def _load_hf_model(config, model_config, is_value_model, local_cache_path):
             state_dict = model.state_dict()
 
     return architectures, model, state_dict, is_value_model
+
 
 def get_hf_model_path(config, local_cache_path="~/.cache/siirl/rlhf"):
     local_cache_path = os.path.expanduser(local_cache_path)
@@ -338,9 +362,14 @@ def get_hf_model_path(config, local_cache_path="~/.cache/siirl/rlhf"):
         local_model_path = config.model.path
     return local_model_path
 
-def load_megatron_model_weights(config, model_config, parallel_model, params_dtype, is_value_model=False, local_cache_path="~/.cache/siirl/rlhf"):
+
+def load_megatron_model_weights(
+    config, model_config, parallel_model, params_dtype, is_value_model=False, local_cache_path="~/.cache/siirl/rlhf"
+):
     """Load weights for siirl customized model."""
-    architectures, model, state_dict, is_value_model = _load_hf_model(config, model_config, is_value_model, local_cache_path)
+    architectures, model, state_dict, is_value_model = _load_hf_model(
+        config, model_config, is_value_model, local_cache_path
+    )
 
     from siirl.models.weight_loader_registry import get_weight_loader
 
@@ -359,7 +388,9 @@ def load_megatron_model_weights(config, model_config, parallel_model, params_dty
     return model.config
 
 
-def load_megatron_gptmodel_weights(config, model_config, parallel_model, params_dtype, is_value_model=False, local_cache_path="~/.cache/siirl/rlhf"):
+def load_megatron_gptmodel_weights(
+    config, model_config, parallel_model, params_dtype, is_value_model=False, local_cache_path="~/.cache/siirl/rlhf"
+):
     """Load weights for mcore GPT model."""
     _, model, state_dict, is_value_model = _load_hf_model(config, model_config, is_value_model, local_cache_path)
 
@@ -430,7 +461,9 @@ def load_mcore_dist_weights(parallel_model, dist_weight_path, is_value_model=Fal
     return
 
 
-def get_parallel_gptmodel_from_config(tfconfig, hf_config, pre_process=None, post_process=None, share_embeddings_and_output_weights=False, value=False):
+def get_parallel_gptmodel_from_config(
+    tfconfig, hf_config, pre_process=None, post_process=None, share_embeddings_and_output_weights=False, value=False
+):
     from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
     from megatron.core.models.gpt.gpt_model import GPTModel
 
@@ -458,7 +491,9 @@ def get_parallel_gptmodel_from_config(tfconfig, hf_config, pre_process=None, pos
     if post_process and value:
         from siirl.models.llama.megatron.layers.parallel_linear import LinearForLastLayer
 
-        parallel_model.output_layer = LinearForLastLayer(input_size=tfconfig.hidden_size, output_size=1, config=tfconfig)
+        parallel_model.output_layer = LinearForLastLayer(
+            input_size=tfconfig.hidden_size, output_size=1, config=tfconfig
+        )
     return parallel_model
 
 
@@ -481,6 +516,48 @@ def convert_weight_keys(state_dict: Dict[str, torch.Tensor], model: PreTrainedMo
         original_weights[key] = value
 
     return original_weights
+
+
+def extract_multi_modal_inputs(
+    batch_data: list[dict[str, torch.Tensor]],
+    indices: Optional[list[int]] = None,
+) -> dict[str, torch.Tensor | list[torch.Tensor]]:
+    """
+    Extract and process multi-modal inputs from a batch.
+
+    Args:
+        batch_data (list[dict[str, torch.Tensor]]): The batch containing potential multi-modal inputs
+        indices (Optional[list[int]]): If provided, only extract inputs at these indices
+
+    Returns:
+        dict[str, torch.Tensor | list[torch.Tensor]]: Processed multi-modal inputs ready for model consumption
+
+    """
+    multi_modal_inputs = {}
+    multi_modal_inputs_collected = {}
+    has_image_bound = False
+
+    selected_batch_data = batch_data
+    if indices is not None:
+        selected_batch_data = [batch_data[i] for i in indices if i < len(batch_data)]
+
+    for inputs in selected_batch_data:
+        if "image_bound" in inputs:
+            has_image_bound = True
+        for key, value in inputs.items():
+            if value is not None:
+                if key not in multi_modal_inputs_collected:
+                    multi_modal_inputs_collected[key] = []
+                multi_modal_inputs_collected[key].append(value)
+
+    for key, values in multi_modal_inputs_collected.items():
+        if has_image_bound:  # minicpm-o logic
+            multi_modal_inputs[key] = values
+        else:
+            multi_modal_inputs[key] = torch.cat(values, dim=0)
+
+    return multi_modal_inputs
+
 
 @dataclass
 class CausalLMOutputForPPO(CausalLMOutputWithPast):
