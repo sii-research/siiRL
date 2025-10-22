@@ -438,8 +438,7 @@ class DataParallelPPOActor(BasePPOActor):
                         else:
                             old_log_prob = model_inputs["old_log_probs"]
 
-                    # NOTE: This assumes 'self.config.policy_loss' exists, otherwise it will error.
-                    loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
+                    loss_mode = self.config.policy_loss.loss_mode
 
                     # Extract pre-computed rollout importance sampling weights if present
                     # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
