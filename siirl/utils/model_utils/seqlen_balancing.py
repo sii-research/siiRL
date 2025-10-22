@@ -17,10 +17,10 @@ import heapq
 from itertools import chain
 from typing import List, Tuple
 
-import tensordict_utils as tu
 import torch
 from torch import distributed as dist
 
+import siirl.utils.model_utils.tensordict_utils as tu
 from siirl.utils.extras.device import get_device_name
 from siirl.workers.databuffer.protocol import DataProto
 

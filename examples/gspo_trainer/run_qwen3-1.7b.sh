@@ -27,9 +27,9 @@ export BASE_TENSORBOARD_PATH=tensorboard
 export TRAIN_BATCH_SIZE_PER_NODE=512
 export PPO_MINI_BATCH_SIZE_PER_NODE=256
 export PPO_MICRO_BATCH_SIZE_PER_GPU=8
-export MAX_PROMPT_LENGTH=1024
-export MAX_RESPONSE_LENGTH=2048
-export MAX_MODEL_LENGTH=4096
+export MAX_PROMPT_LENGTH=$((1024 * 2))
+export MAX_RESPONSE_LENGTH=$((1024 * 4))
+export MAX_MODEL_LENGTH=$((1024 * 6))
 
 export ROLLOUT_GPU_MEMORY_UTILIZATION=0.5
 
@@ -128,7 +128,6 @@ TRAINING_CMD=(
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.rollout.tensor_model_parallel_size=\$ROLLOUT_TP
     actor_rollout_ref.rollout.name=vllm
-    actor_rollout_ref.rollout.mode=async
     actor_rollout_ref.rollout.n=\$ROLLOUT_N
     actor_rollout_ref.rollout.gpu_memory_utilization=\$ROLLOUT_GPU_MEMORY_UTILIZATION
     actor_rollout_ref.rollout.max_model_len=\$MAX_MODEL_LENGTH
