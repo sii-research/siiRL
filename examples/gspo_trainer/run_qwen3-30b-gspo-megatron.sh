@@ -166,7 +166,7 @@ TRAINING_CMD=(
     algorithm.kl_ctrl.kl_coef=\$KL_COEF
     # Trainer configuration
     trainer.critic_warmup=0
-    trainer.logger='["console","wandb"]'
+    trainer.logger='["console","tensorboard"]'
     trainer.project_name=\$PROJECT_NAME
     trainer.experiment_name=\$EXPERIMENT_NAME
     trainer.n_gpus_per_node=\$N_GPUS_PER_NODE
