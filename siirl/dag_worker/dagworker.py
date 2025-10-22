@@ -39,7 +39,7 @@ from siirl.execution.scheduler.process_group_manager import ProcessGroupManager
 from siirl.execution.scheduler.enums import AdvantageEstimator
 from siirl.data_coordinator.sample import Sample, SampleInfo, DataProto2Sample, Sample2DataProto
 from siirl.data_coordinator.dataloader import DataLoaderNode
-from siirl.data_coordinator.protocol import collate_fn
+from siirl.data_coordinator.protocol import DataProto
 from siirl.dag_worker.data_structures import NodeOutput, ValidationPayload, ValidationResult
 from siirl.dag_worker.constants import DAGConstants, DAGInitializationError
 from siirl.dag_worker.core_algos import (
