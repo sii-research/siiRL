@@ -15,12 +15,14 @@
 from siirl import DataProto
 from siirl.utils.reward_score import _default_compute_score
 from siirl.models.transformers.internvl import IMG_CONTEXT_TOKEN
+
 import torch
 import os
 import multiprocessing as mp
 from functools import partial
 import multiprocessing.dummy as mp_dummy
 from functools import partial
+from tensordict import TensorDict
 
 class ParallelRewardManager:
     """The reward manager."""
@@ -56,39 +58,39 @@ class ParallelRewardManager:
         with mp_dummy.Pool(processes=mp.cpu_count() // 2) as pool:
             items = [self._process_single_item(data[i]) for i in range(len(data))]
             scores = pool.map(partial(self._compute_score), items)
-            data.batch["acc"] = torch.tensor(scores, dtype=torch.float32, device=data[0].batch["prompts"].device)
+            data["acc"] = torch.tensor(scores, dtype=torch.float32, device=data[0]["prompts"].device)
         return scores
 
-    def __call__(self, data: DataProto, return_dict: bool = True):
+    def __call__(self, data: TensorDict, return_dict: bool = True):
         """We will expand this function gradually based on the available datasets"""
 
         # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
-        if "rm_scores" in data.batch.keys():
-            return data.batch["rm_scores"]
+        if "rm_scores" in data.keys():
+            return data["rm_scores"]
 
         scores = self.verify(data)
-        reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+        reward_tensor = torch.zeros_like(data["responses"], dtype=torch.float32)
 
         already_print_data_sources = {}
 
         for i in range(len(data)):
             data_item = data[i]
-            prompt_length = data_item.batch["prompts"].shape[-1]
-            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+            prompt_length = data_item["prompts"].shape[-1]
+            valid_response_length = data_item["attention_mask"][prompt_length:].sum()
             reward_tensor[i, valid_response_length - 1] = scores[i]
 
-            data_source = data_item.non_tensor_batch["data_source"]
+            data_source = data["data_source"][i]
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
 
             if self.rank == 0 and already_print_data_sources[data_source] < self.num_examine:
                 already_print_data_sources[data_source] += 1
-                valid_prompt_length = data_item.batch["attention_mask"][:prompt_length].sum()
-                prompt_str = self.tokenizer.decode(data_item.batch["prompts"][-valid_prompt_length:])
-                response_str = self.tokenizer.decode(data_item.batch["responses"][:valid_response_length])
+                valid_prompt_length = data_item["attention_mask"][:prompt_length].sum()
+                prompt_str = self.tokenizer.decode(data_item["prompts"][-valid_prompt_length:])
+                response_str = self.tokenizer.decode(data_item["responses"][:valid_response_length])
                 print("[prompt]", prompt_str.replace(IMG_CONTEXT_TOKEN, ""))
                 print("[response]", response_str)
-                print("[ground_truth]", data_item.non_tensor_batch["reward_model"]["ground_truth"])
+                print("[ground_truth]", data["reward_model"][i]["ground_truth"])
                 print("[score]", scores[i])
         if return_dict:
             return {

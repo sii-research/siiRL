@@ -32,6 +32,8 @@ from transformers import (
     PreTrainedModel,
 )
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from tensordict import TensorDict
+from torch.utils.data import DataLoader
 from siirl.models.registry import ModelRegistry
 from loguru import logger
 

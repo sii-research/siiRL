@@ -25,6 +25,7 @@ from typing import Iterable
 
 import torch
 import torch.distributed
+import numpy as np
 from loguru import logger
 from megatron.core import parallel_state as mpu
 
@@ -32,6 +33,7 @@ from megatron.core import parallel_state as mpu
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from torch import nn
+from tensordict import TensorDict
 
 from siirl import DataProto
 from siirl.utils.debug import GPUMemoryLogger
@@ -145,11 +147,11 @@ class MegatronPPOActor(BasePPOActor):
         self.config = config
 
     @GPUMemoryLogger(role="megatron actor", logger=logger)
-    def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
+    def compute_log_prob(self, data: TensorDict, calculate_entropy=False) -> torch.Tensor:
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
 
         Args:
-            data (DataProto): a DataProto containing keys
+            data (TensorDict): a TensorDict containing keys
 
                 ``input_ids``: tensor of shape [batch_size, sequence_length]. torch.int64. Note that input_ids is the
                 concatenation of prompt and response. Note that ``sequence_length = prompt_length + response_length``.
@@ -161,11 +163,11 @@ class MegatronPPOActor(BasePPOActor):
                 ``responses``:  tensor of shape [batch_size, response_length]. torch.int64.
 
         Returns:
-            DataProto: torch.Tensor: the log_prob tensor
+            TensorDict: torch.Tensor: the log_prob tensor
         """
-        use_dynamic_bsz = data.meta_info.get("use_dynamic_bsz", False)
-        micro_batch_size = data.meta_info.get("micro_batch_size", None)
-        max_token_len = data.meta_info.get("max_token_len", None)
+        use_dynamic_bsz = data["use_dynamic_bsz"]
+        micro_batch_size = data["micro_batch_size"]
+        max_token_len = data["max_token_len"]
         if use_dynamic_bsz:
             assert max_token_len is not None, "max_token_len must be set when use_dynamic_bsz is True"
             max_token_len = max_token_len * self.config.megatron.context_parallel_size
@@ -180,14 +182,16 @@ class MegatronPPOActor(BasePPOActor):
         entropys = torch.Tensor()
 
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
-        batch = data.select(batch_keys=select_keys).batch
-        input_ids = batch["input_ids"]
+        batch = data.select(*select_keys)
+        input_ids = data["input_ids"]
         batch_size = input_ids.size(0)
         response = batch["responses"]
+        temperature = data["temperature"]
         response_length = response.size(1)
         with torch.no_grad():
             output = self.forward_backward_batch(
-                data,
+                batch,
+                temperature=temperature,
                 forward_only=True,
                 calculate_entropy=calculate_entropy,
                 use_dynamic_bsz=use_dynamic_bsz,
@@ -247,55 +251,6 @@ class MegatronPPOActor(BasePPOActor):
 
         return log_probs, entropys
 
-    def make_minibatch_iterator(self, data: DataProto) -> Iterable[DataProto]:
-        """Make minibatch iterator for updating the actor
-
-        Args:
-            data (DataProto): a DataProto containing keys
-
-                ``input_ids``: tensor of shape [batch_size, sequence_length]. torch.int64, where
-                ``sequence_length = prompt_length + response_length``
-
-                ``attention_mask``: tensor of shape [batch_size, sequence_length]. torch.int64
-
-                ``position_ids``: tensor of shape [batch_size, sequence_length]. torch.int64
-
-                ``responses``: tensor of shape [batch_size, response_length]. torch.int64. Note that
-                responses = input_ids[:, -response_length:]
-
-                ``old_log_probs``: tensor of shape [batch_size, response_length]. torch.float32. The log probability
-                of responses.
-
-                ``advantages``: tensor of shape [batch_size, response_length]. torch.float32. The advantages of
-                responses.
-                See PPO paper for details. https://arxiv.org/abs/1707.06347
-
-        Returns:
-
-        """
-        select_keys = [
-            "responses",
-            "input_ids",
-            "attention_mask",
-            "response_mask",
-            "position_ids",
-            "old_log_probs",
-            "advantages",
-        ]
-        if self.config.use_kl_loss:
-            select_keys.append("ref_log_prob")
-        self.has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
-        if self.has_multi_modal_inputs:
-            data = data.select(select_keys, ["multi_modal_inputs"])
-        else:
-            data = data.select(batch_keys=select_keys)
-        return data.make_iterator(
-            mini_batch_size=self.config.ppo_mini_batch_size,
-            epochs=self.config.ppo_epochs,
-            seed=self.config.data_loader_seed,
-            dataloader_kwargs={"shuffle": self.config.shuffle},
-        )
-
     def compute_ppo_loss(self, model_output, data):
         log_prob = model_output["log_probs"]
         entropy = model_output.get("entropy", None)
@@ -352,7 +307,8 @@ class MegatronPPOActor(BasePPOActor):
 
     def forward_backward_batch(
         self,
-        data: DataProto,
+        data: TensorDict,
+        temperature: float,  
         forward_only=False,
         calculate_entropy=False,
         use_dynamic_bsz=False,
@@ -367,37 +323,36 @@ class MegatronPPOActor(BasePPOActor):
         # broadcast from last pp rank to all other pp ranks
         # TODO: actually, we just need to control the sampling order.
         data.to(get_device_id())
-        data.batch = data.batch.contiguous()
+        data = data.contiguous()
         mini_batch = data
         broadcast_dict_tensor(
-            mini_batch.batch,
+            mini_batch,
             src=mpu.get_pipeline_model_parallel_last_rank(),
             group=mpu.get_pipeline_model_parallel_group(),
         )
         mini_batch.to("cpu")
         # split into micro-batches
-        mini_batch.batch["attention_mask"] = mini_batch.batch["attention_mask"].to(bool)
-        self.has_multi_modal_inputs = "multi_modal_inputs" in mini_batch.non_tensor_batch.keys()
+        mini_batch["attention_mask"] = mini_batch["attention_mask"].to(bool)
+        self.has_multi_modal_inputs = "multi_modal_inputs" in mini_batch.keys()
         if self.has_multi_modal_inputs:
             mini_batch.batch["multi_modal_inputs"] = mini_batch.non_tensor_batch["multi_modal_inputs"]
             mini_batch.batch["multi_modal_inputs_idx"] = torch.Tensor(
                 list(range(len(mini_batch.non_tensor_batch["multi_modal_inputs"])))
             ).to(torch.int64)
 
-        if mini_batch.batch["position_ids"].dim() == 3:  # qwen2vl mrope [bs, 3, seq_len]
-            mini_batch.batch["position_ids"] = mini_batch.batch["position_ids"][
+        if mini_batch["position_ids"].dim() == 3:  # qwen2vl mrope [bs, 3, seq_len]
+            mini_batch["position_ids"] = mini_batch["position_ids"][
                 :, 0
             ]  # mcore patch recompute qwen2vl's pos ids during forward
 
         indices = None
-        temperature = data.meta_info["temperature"]
         if use_dynamic_bsz:
             assert max_token_len is not None, "max_token_len must be set when use_dynamic_bsz is True"
             vpp_size = mpu.get_virtual_pipeline_model_parallel_world_size()
             if vpp_size is not None and vpp_size > 1:
                 microbatch_group_size_per_vp_stage = self.tf_config.microbatch_group_size_per_vp_stage
                 micro_batches, indices = rearrange_micro_batches(
-                    batch=mini_batch.batch,
+                    batch=mini_batch,
                     num_batches_divided_by=microbatch_group_size_per_vp_stage,
                     max_token_len=max_token_len,
                 )
@@ -406,12 +361,12 @@ class MegatronPPOActor(BasePPOActor):
                     f"{microbatch_group_size_per_vp_stage} for megatron backend"
                 )
             else:
-                micro_batches, indices = rearrange_micro_batches(batch=mini_batch.batch, max_token_len=max_token_len)
+                micro_batches, indices = rearrange_micro_batches(batch=mini_batch, max_token_len=max_token_len)
         else:
             assert micro_batch_size is not None, (
                 "micro_batch_size is needed to be passed in when not using dynamic batch size"
             )
-            micro_batches = mini_batch.batch.split(micro_batch_size)
+            micro_batches = mini_batch.split(micro_batch_size)
         # compute input shapes for pp stages
         n_micro_batch = len(micro_batches)
 
@@ -543,19 +498,45 @@ class MegatronPPOActor(BasePPOActor):
         return losses_reduced
 
     @GPUMemoryLogger(role="megatron actor", logger=logger)
-    def update_policy(self, dataloader: Iterable[DataProto]) -> dict:
-        """Update the policy with an iterator of DataProto
+    def update_policy(self, data:TensorDict) -> dict:
+        """Update the policy with an iterator of TensorDict
 
         Args:
-            dataloader (Iterable[DataProto]): an iterator over the DataProto that returns by ``make_minibatch_iterator``
-                The keys of each data batch is described in the make_minibatch_iterator.
-
+            ddata (TensorDict): TensorDict 
         Returns:
             Dict: a dictionary containing the statistics. Note that the statistics are only valid in the last pp stage
             and users have to combine the output in each dp rank manually.
 
         """
         metrics = {}
+        temperature = data["temperature"]  # temperature must be in the data.meta_info to avoid silent error
+        select_keys = [
+            "responses",
+            "response_mask",
+            "input_ids",
+            "attention_mask",
+            "position_ids",
+            "old_log_probs",
+            "advantages",
+        ]
+        if self.config.use_kl_loss:
+            select_keys.append("ref_log_prob")
+        batch = data.select(*select_keys)
+        has_multi_modal_inputs = "multi_modal_inputs" in data.keys()
+
+        # Split to make minibatch iterator for updating the actor
+        # See PPO paper for details. https://arxiv.org/abs/1707.06347
+        if has_multi_modal_inputs:
+            num_mini_batches = data.batch_size[0] // self.config.ppo_mini_batch_size
+            mini_batches = batch.split(self.config.ppo_mini_batch_size)
+            multi_modal_inputs = np.array_split(data["multi_modal_inputs"], num_mini_batches, axis=0)
+            for i in range(num_mini_batches):
+                mini_batches[i]["multi_modal_inputs"] = multi_modal_inputs[i]
+            dataloader = mini_batches
+        else:
+            dataloader = batch.split(self.config.ppo_mini_batch_size)
+        
+        
         if self.use_torch_profiler and self.prof and self.prof.enable:
             self.prof.start()
         for data in dataloader:
@@ -566,8 +547,8 @@ class MegatronPPOActor(BasePPOActor):
                 chunk.zero_grad_buffer()
 
             calculate_entropy = self.config.entropy_coeff != 0
-            if data.meta_info.get("micro_batch_size", None) is not None:
-                micro_batch_size = data.meta_info["micro_batch_size"]
+            if data.get("micro_batch_size", None) is not None:
+                micro_batch_size = data["micro_batch_size"]
             else:
                 micro_batch_size = self.config.ppo_micro_batch_size_per_gpu
             max_token_len = None
@@ -575,6 +556,7 @@ class MegatronPPOActor(BasePPOActor):
                 max_token_len = self.config.ppo_max_token_len_per_gpu * self.config.megatron.context_parallel_size
             metric_micro_batch = self.forward_backward_batch(
                 data,
+                temperature=temperature,
                 calculate_entropy=calculate_entropy,
                 use_dynamic_bsz=self.config.use_dynamic_bsz,
                 micro_batch_size=micro_batch_size,

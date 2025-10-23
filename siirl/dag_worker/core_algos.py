@@ -32,6 +32,7 @@ from omegaconf import DictConfig
 import siirl.utils.model_utils.torch_functional as siirl_F
 from siirl.global_config.params.model_args import AlgorithmArguments, ActorArguments
 from siirl.execution.scheduler.enums import AdvantageEstimator
+from tensordict import TensorDict 
 from siirl import DataProto
 
 
@@ -86,7 +87,7 @@ def get_policy_loss_fn(name):
     return POLICY_LOSS_REGISTRY[loss_name]
 
 
-def compute_response_mask(data: DataProto):
+def compute_response_mask(data: TensorDict):
     """Compute the attention mask for the response part of the sequence.
 
     This function extracts the portion of the attention mask that corresponds to the model's response,
@@ -98,9 +99,9 @@ def compute_response_mask(data: DataProto):
     Returns:
         torch.Tensor: The attention mask for the response tokens.
     """
-    responses = data.batch["responses"]
+    responses = data["responses"]
     response_length = responses.size(1)
-    attention_mask = data.batch["attention_mask"]
+    attention_mask = data["attention_mask"]
     return attention_mask[:, -response_length:]
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -239,7 +240,6 @@ def compute_gae_advantage_return(
         lastgaelam = 0
         advantages_reversed = []
         gen_len = token_level_rewards.shape[-1]
-
         for t in reversed(range(gen_len)):
             delta = token_level_rewards[:, t] + gamma * nextvalues - values[:, t]
             lastgaelam_ = delta + gamma * lam * lastgaelam
@@ -1131,14 +1131,14 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: AdaptiveKLController, kl_penalty=
             - The updated data with token-level rewards adjusted by KL penalty
             - A dictionary of metrics related to the KL penalty
     """
-    responses = data.batch["responses"]
-    token_level_scores = data.batch["token_level_scores"]
-    batch_size = data.batch.batch_size[0]
-    response_mask = data.batch["response_mask"]
+    responses = data["responses"]
+    token_level_scores = data["token_level_scores"]
+    batch_size = data.batch_size[0]
+    response_mask = data["response_mask"]
 
     # compute kl between ref_policy and current policy
     # When apply_kl_penalty, algorithm.use_kl_in_reward=True, so the reference model has been enabled.
-    kld = kl_penalty(data.batch["old_log_probs"], data.batch["ref_log_prob"], kl_penalty=kl_penalty)  # (batch_size, response_length)
+    kld = kl_penalty(data["old_log_probs"], data["ref_log_prob"], kl_penalty=kl_penalty)  # (batch_size, response_length)
     kld = kld * response_mask
     beta = kl_ctrl.value
 
@@ -1176,20 +1176,20 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         DataProto: The updated data with computed advantages and returns.
     """
     # Back-compatible with trainers that do not compute response mask in fit
-    if "response_mask" not in data.batch.keys():
+    if "response_mask" not in data.keys():
         data.batch["response_mask"] = compute_response_mask(data)
     # prepare response group
     # TODO: add other ways to estimate advantages
     if adv_estimator == AdvantageEstimator.GAE:
         advantages, returns = compute_gae_advantage_return(
-            token_level_rewards=data.batch["token_level_rewards"],
-            values=data.batch["values"],
-            response_mask=data.batch["response_mask"],
+            token_level_rewards=data["token_level_rewards"],
+            values=data["values"],
+            response_mask=data["response_mask"],
             gamma=gamma,
             lam=lam,
         )
-        data.batch["advantages"] = advantages
-        data.batch["returns"] = returns
+        data["advantages"] = advantages
+        data["returns"] = returns
         if kwargs.get("use_pf_ppo", False):
             data = compute_pf_ppo_reweight_data(
                 data,
@@ -1197,27 +1197,27 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
                 kwargs.get("pf_ppo_weight_pow", 2.0),
             )
     elif adv_estimator == AdvantageEstimator.GRPO:
-        grpo_calculation_mask = data.batch["response_mask"]
+        grpo_calculation_mask = data["response_mask"]
         # Call compute_grpo_outcome_advantage with parameters matching its definition
         advantages, returns = compute_grpo_outcome_advantage(
-            token_level_rewards=data.batch["token_level_rewards"],
+            token_level_rewards=data["token_level_rewards"],
             response_mask=grpo_calculation_mask,
-            index=data.non_tensor_batch["uid"],
+            index=data["uid"],
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
         )
-        data.batch["advantages"] = advantages
-        data.batch["returns"] = returns
+        data["advantages"] = advantages
+        data["returns"] = returns
     elif adv_estimator == AdvantageEstimator.CPGD:
-        cpgd_calculation_mask = data.batch["response_mask"]
+        cpgd_calculation_mask = data["response_mask"]
         # Call compute_cpgd_outcome_advantage with parameters matching its definition
         advantages, returns = compute_grpo_outcome_advantage(
-            token_level_rewards=data.batch["token_level_rewards"],
+            token_level_rewards=data["token_level_rewards"],
             response_mask=cpgd_calculation_mask,
-            index=data.non_tensor_batch["uid"],
+            index=data["uid"],
             weight_factor_in_cpgd=weight_factor_in_cpgd,
         )
-        data.batch["advantages"] = advantages
-        data.batch["returns"] = returns
+        data["advantages"] = advantages
+        data["returns"] = returns
     elif adv_estimator == AdvantageEstimator.GAE_MARFT:
         compute_marft_gae_advantage_return(
             data,

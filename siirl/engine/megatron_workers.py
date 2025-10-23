@@ -29,7 +29,7 @@ from codetiming import Timer
 from loguru import logger
 
 from omegaconf import DictConfig, OmegaConf
-
+from tensordict import TensorDict, NonTensorData
 try:
     from mindspeed.megatron_adaptor import repatch
 except ImportError:
@@ -396,13 +396,12 @@ class ActorRolloutRefWorker(MegatronWorker):
         if self._is_offload_optimizer:
             load_megatron_optimizer(self.actor_optimizer)
             log_gpu_memory_usage("After load actor optimizer during update_actor", logger=logger)
-        data.batch = data.batch.to(get_device_name())
+        data = data.to(get_device_name())
 
         micro_batch_size = self.config.actor.ppo_micro_batch_size_per_gpu
-        data.meta_info["micro_batch_size"] = micro_batch_size
-        dataloader = self.actor.make_minibatch_iterator(data=data)
+        data["micro_batch_size"] = NonTensorData(micro_batch_size)
         with Timer(name="update_policy", logger=None) as timer:
-            metrics = self.actor.update_policy(dataloader=dataloader)
+            metrics = self.actor.update_policy(data=data)
         delta_time = timer.last
         global_num_tokens = data.meta_info["global_token_num"]
         estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
@@ -456,49 +455,6 @@ class ActorRolloutRefWorker(MegatronWorker):
 
         output = output.to("cpu")
         # clear kv cache
-        get_torch_device().empty_cache()
-        return output
-
-    @GPUMemoryLogger(role="compute_ref_log_prob", logger=logger)
-    def compute_ref_log_prob(self, data: DataProto):
-        assert self._is_ref
-        if self._ref_is_offload_param:
-            load_megatron_model_to_gpu(self.ref_module, load_grad=False)
-            log_gpu_memory_usage("After load ref params and grad during compute_ref_log_prob", logger=logger)
-        micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
-        data.meta_info["micro_batch_size"] = micro_batch_size
-        data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
-        data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
-        data.meta_info["temperature"] = self.config.rollout.temperature
-        data = data.to(get_device_id())
-        output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
-        output = DataProto.from_dict(tensors={"ref_log_prob": output})
-        output = output.to("cpu")
-        if self._ref_is_offload_param:
-            offload_megatron_model_to_cpu(self.ref_module)
-            log_gpu_memory_usage("After offload ref params and grad during compute_ref_log_prob", logger=logger)
-        get_torch_device().empty_cache()
-        return output
-
-    @GPUMemoryLogger(role="compute_log_prob", logger=logger)
-    def compute_log_prob(self, data: DataProto):
-        assert self._is_actor
-        if self._is_offload_param:
-            load_megatron_model_to_gpu(self.actor_module, load_grad=False)
-            log_gpu_memory_usage("After load actor params and grad during compute_log_prob", logger=logger)
-        # we should always recompute old_log_probs when it is HybridEngine
-        data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
-        data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
-        data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
-        data.meta_info["temperature"] = self.config.rollout.temperature
-        data = data.to(get_device_id())
-        output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
-        output = DataProto.from_dict(tensors={"old_log_probs": output, "entropys": entropys}, meta_info={"temperature": self.config.rollout.temperature})
-        output = output.to("cpu")
-        # clear kv cache
-        if self._is_offload_param:
-            offload_megatron_model_to_cpu(self.actor_module)
-            log_gpu_memory_usage("After offload actor params and grad during compute_log_prob", logger=logger)
         get_torch_device().empty_cache()
         return output
 
@@ -728,38 +684,36 @@ class CriticWorker(MegatronWorker):
             use_dist_checkpointing=self.config.megatron.use_dist_checkpointing,
         )
 
-    def compute_values(self, data: DataProto):
+    def compute_values(self, data: TensorDict):
         micro_batch_size = self.config.ppo_micro_batch_size_per_gpu
-        data.meta_info["micro_batch_size"] = micro_batch_size
-        data.meta_info["max_token_len"] = self.config.forward_max_token_len_per_gpu
-        data.meta_info["use_dynamic_bsz"] = self.config.use_dynamic_bsz
+        data["micro_batch_size"] = NonTensorData(micro_batch_size)
+        data["max_token_len"] = NonTensorData(self.config.forward_max_token_len_per_gpu)
+        data["use_dynamic_bsz"] = NonTensorData(self.config.use_dynamic_bsz)
         data = data.to(get_device_id())
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.critic_module)
         values = self.critic.compute_values(data=data)
-        data.batch["values"] = values
+        data["values"] = values
         data = data.to("cpu")
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.critic_module)
         return data
 
-    def update_critic(self, data: DataProto):
+    def update_critic(self, data: TensorDict):
         data = data.to(get_device_id())
 
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.critic_module)
         if self._is_offload_optimizer:
             load_megatron_optimizer(self.critic_optimizer)
-
-        dataloader = self.critic.make_minibatch_iterator(data)
         with Timer(name="update_critic", logger=None) as timer:
-            metrics = self.critic.update_critic(dataloader=dataloader)
+            metrics = self.critic.update_critic(data=data)
         delta_time = timer.last
-        global_num_tokens = data.meta_info["global_token_num"]
+        global_num_tokens = data["global_token_num"]
         estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
         metrics["perf/mfu/critic"] = estimated_flops * self.config.ppo_epochs / promised_flops
         metrics["perf/delta_time/critic"] = delta_time
-        data.meta_info["metrics"] = metrics
+        data["metrics"] = NonTensorData(metrics)
         data = data.to("cpu")
 
         if self._is_offload_param:
@@ -910,7 +864,7 @@ class RewardModelWorker(MegatronWorker):
 
     # TODO: reward model use itself tokenizer instead of sft tokenizer
     # the input_ids, responses, attention_mask and position_ids may be different!
-    def compute_rm_score(self, data: DataProto):
+    def compute_rm_score(self, data: TensorDict):
         data.meta_info["micro_batch_size"] = self.config.micro_batch_size_per_gpu
         data.meta_info["max_token_len"] = self.config.forward_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.use_dynamic_bsz
@@ -1120,15 +1074,14 @@ class ActorWorker(MegatronWorker):
         if self._is_offload_optimizer:
             load_megatron_optimizer(self.actor_optimizer)
             log_gpu_memory_usage("After load actor optimizer during update_actor", logger=logger)
-        data.batch = data.batch.to(get_device_name())
+        data = data.to(get_device_name())
 
         micro_batch_size = self.config.actor.ppo_micro_batch_size_per_gpu
-        data.meta_info["micro_batch_size"] = micro_batch_size
-        dataloader = self.actor.make_minibatch_iterator(data=data)
+        data["micro_batch_size"] = NonTensorData(micro_batch_size)
         with Timer(name="update_policy", logger=None) as timer:
-            metrics = self.actor.update_policy(dataloader=dataloader)
+            metrics = self.actor.update_policy(data=data)
         delta_time = timer.last
-        global_num_tokens = data.meta_info["global_token_num"]
+        global_num_tokens = data["global_token_num"]
         estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
         metrics["perf/mfu/actor"] = estimated_flops / promised_flops
         metrics["perf/delta_time/actor"] = delta_time
@@ -1137,7 +1090,7 @@ class ActorWorker(MegatronWorker):
         metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
         # TODO: here, we should return all metrics
-        data.meta_info["metrics"] = metrics
+        data["metrics"] = NonTensorData(metrics)
         data = data.to("cpu")
 
         if self._is_offload_param:
@@ -1150,33 +1103,33 @@ class ActorWorker(MegatronWorker):
         return data
 
     @GPUMemoryLogger(role="compute_log_prob", logger=logger)
-    def compute_log_prob(self, data: DataProto):
+    def compute_log_prob(self, data: TensorDict):
         torch.cuda.synchronize()
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module, load_grad=False)
             log_gpu_memory_usage("After load actor params during compute_log_prob", logger=logger)
 
         # we should always recompute old_log_probs when it is HybridEngine
-        data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
-        data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
-        data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
-        data.meta_info["temperature"] = self.config.rollout.temperature
+        data["micro_batch_size"] = NonTensorData(self.config.rollout.log_prob_micro_batch_size_per_gpu)
+        data["max_token_len"] = NonTensorData(self.config.rollout.log_prob_max_token_len_per_gpu)
+        data["use_dynamic_bsz"] = NonTensorData(self.config.rollout.log_prob_use_dynamic_bsz)
+        data["temperature"] = NonTensorData(self.config.rollout.temperature)
         data = data.to(get_device_id())
         with Timer(name="compute_log_prob", logger=None) as timer:
             output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
         delta_time = timer.last
 
         # store results of Actor old_log_probs
-        data.batch["old_log_probs"] = output
-        data.batch["entropys"] = entropys
+        data["old_log_probs"] = output
+        data["entropys"] = entropys
 
         # update metrics
         metrics = {}
-        global_num_tokens = data.meta_info["global_token_num"]
+        global_num_tokens = data["global_token_num"]
         estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
         metrics["perf/mfu/actor_log_prob"] = estimated_flops / promised_flops
         metrics["perf/delta_time/actor_log_prob"] = delta_time
-        data.meta_info["metrics"] = metrics
+        data["metrics"] = NonTensorData(metrics)
         data = data.to("cpu")
         # clear kv cache
         if self._is_offload_param:
@@ -1311,13 +1264,10 @@ class RolloutWorker(MegatronWorker):
         log_gpu_memory_usage("After rollout init", logger=logger)
 
     @GPUMemoryLogger(role="generate_sequences", logger=logger)
-    def generate_sequences(self, prompts: DataProto):
+    def generate_sequences(self, prompts: TensorDict):
         prompts = prompts.to(get_device_id())
-        meta_info = {
-            "eos_token_id": self.generation_config.eos_token_id if self.generation_config is not None else self.tokenizer.eos_token_id,
-            "pad_token_id": self.generation_config.pad_token_id if self.generation_config is not None else self.tokenizer.pad_token_id,
-        }
-        prompts.meta_info.update(meta_info)
+        prompts["eos_token_id"] = NonTensorData(self.generation_config.eos_token_id if self.generation_config is not None else self.tokenizer.eos_token_id)
+        prompts["pad_token_id"] = NonTensorData(self.generation_config.pad_token_id if self.generation_config is not None else self.tokenizer.pad_token_id)
 
         with self.sharding_manager:
             log_gpu_memory_usage("After entering sharding manager", logger=logger)
@@ -1328,7 +1278,7 @@ class RolloutWorker(MegatronWorker):
             metrics = {}
             metrics["perf/delta_time/rollout"] = delta_time
         log_gpu_memory_usage("After rollout generation", logger=logger)
-        output.meta_info.update({"metrics": metrics})
+        output["metrics"] = NonTensorData(metrics, batch_size=None)
         output = output.to("cpu")
         # clear kv cache
         get_torch_device().empty_cache()
@@ -1446,10 +1396,10 @@ class ReferenceWorker(MegatronWorker):
             load_megatron_model_to_gpu(self.ref_module, load_grad=False)
             log_gpu_memory_usage("After load ref params and grad during compute_ref_log_prob", logger=logger)
         micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
-        data.meta_info["micro_batch_size"] = micro_batch_size
-        data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
-        data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
-        data.meta_info["temperature"] = self.config.rollout.temperature
+        data["micro_batch_size"] = NonTensorData(micro_batch_size)
+        data["max_token_len"] = NonTensorData(self.config.ref.log_prob_max_token_len_per_gpu)
+        data["use_dynamic_bsz"] = NonTensorData(self.config.ref.log_prob_use_dynamic_bsz)
+        data["temperature"] = NonTensorData(self.config.rollout.temperature)
         data = data.to(get_device_id())
 
         with Timer(name="compute_ref_log_prob", logger=None) as timer:
@@ -1458,12 +1408,12 @@ class ReferenceWorker(MegatronWorker):
 
         # update metrics
         metrics = {}
-        global_num_tokens = data.meta_info["global_token_num"]
+        global_num_tokens = data["global_token_num"]
         estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
         metrics["perf/mfu/ref"] = estimated_flops / promised_flops
         metrics["perf/delta_time/ref"] = delta_time
-        data.meta_info["metrics"] = metrics
-        data.batch["ref_log_prob"] = output
+        data["metrics"] = NonTensorData(metrics)
+        data["ref_log_prob"] = output
         data = data.to("cpu")
         if self._ref_is_offload_param:
             offload_megatron_model_to_cpu(self.ref_module)

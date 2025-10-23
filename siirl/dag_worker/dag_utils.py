@@ -16,6 +16,7 @@ from collections import deque
 from tensordict import TensorDict
 from typing import Dict, Optional, Type, List, Any, Tuple
 from loguru import logger
+from tensordict import TensorDict
 
 from siirl.data_coordinator import DataProto
 from siirl.execution.dag.node import Node, NodeType, NodeRole
@@ -41,100 +42,56 @@ def timer(enable_perf, name: str, timing_dict: dict):
     timing_dict[name] = timing_dict.get(name, 0) + end_time - start_time
 
 
-def add_prefix_to_dataproto(data_proto: DataProto, node: Node):
+def add_prefix_to_dataproto(tensordict: TensorDict, node: Node):
     """
-    Adds a prefix to all keys in the DataProto.
+    Adds a prefix to all keys in the TensorDict.
     The prefix is formatted as f"agent_group_{node.agent_group}_".
     Only keys that do not already have a prefix will be modified.
 
     Args:
-        data_proto (DataProto): The DataProto instance.
+        data_proto (TensorDict): The TensorDict instance.
         node (Node): The node containing the agent_group.
     """
     prefix = f"agent_group_{node.agent_group}_"
     prefix_agent_group = "agent_group_"
 
     # Process tensor batch
-    if data_proto.batch is not None:
+    if tensordict is not None:
         new_batch = {}
-        for key, value in data_proto.batch.items():
+        for key, value in tensordict.items():
             if not key.startswith(prefix_agent_group):
                 new_key = prefix + key
                 new_batch[new_key] = value
             else:
                 new_batch[key] = value
-        data_proto.batch = TensorDict(new_batch, batch_size=data_proto.batch.batch_size)
-
-    # Process non_tensor_batch
-    if data_proto.non_tensor_batch is not None:
-        new_non_tensor = {}
-        for key, value in data_proto.non_tensor_batch.items():
-            if not key.startswith(prefix_agent_group):
-                new_key = prefix + key
-                new_non_tensor[new_key] = value
-            else:
-                new_non_tensor[key] = value
-        data_proto.non_tensor_batch = new_non_tensor
-
-    # Process meta_info
-    if data_proto.meta_info is not None:
-        new_meta = {}
-        for key, value in data_proto.meta_info.items():
-            if not key.startswith(prefix_agent_group):
-                new_key = prefix + key
-                new_meta[new_key] = value
-            else:
-                new_meta[key] = value
-        data_proto.meta_info = new_meta
-    return data_proto
+        tensordict = TensorDict(new_batch, batch_size=tensordict.batch_size)
+    return tensordict
 
 
-def remove_prefix_from_dataproto(data_proto, node: Node):
+def remove_prefix_from_dataproto(tensordict, node: Node):
     """
-    Removes the prefix from all keys in the DataProto.
+    Removes the prefix from all keys in the TensorDict.
     Only keys with a matching prefix will have the prefix removed.
 
     Args:
-        data_proto (DataProto): The DataProto instance.
+        data_proto (TensorDict): The TensorDict instance.
         node (Node): The node containing the agent_group to identify the prefix.
     """
     prefix = f"agent_group_{node.agent_group}_"
     prefix_len = len(prefix)
 
     # Process tensor batch
-    if data_proto.batch is not None:
+    if tensordict is not None:
         new_batch = {}
-        for key, value in data_proto.batch.items():
+        for key, value in tensordict.items():
             if key.startswith(prefix):
                 new_key = key[prefix_len:]
                 new_batch[new_key] = value
             else:
                 new_batch[key] = value
-        data_proto.batch = TensorDict(new_batch, batch_size=data_proto.batch.batch_size)
+        tensordict = TensorDict(new_batch, batch_size=tensordict.batch_size)
 
-    # Process non_tensor_batch
-    if data_proto.non_tensor_batch is not None:
-        new_non_tensor = {}
-        for key, value in data_proto.non_tensor_batch.items():
-            if key.startswith(prefix):
-                new_key = key[prefix_len:]
-                new_non_tensor[new_key] = value
-            else:
-                new_non_tensor[key] = value
-        data_proto.non_tensor_batch = new_non_tensor
-
-    # Process meta_info
-    if data_proto.meta_info is not None:
-        new_meta = {}
-        for key, value in data_proto.meta_info.items():
-            if key.startswith(prefix):
-                new_key = key[prefix_len:]
-                new_meta[new_key] = value
-            else:
-                new_meta[key] = value
-        data_proto.meta_info = new_meta
-
-    return data_proto
+    return tensordict
 
 
 def add_prefix_to_metrics(metrics: dict, node: Node):
@@ -570,21 +527,18 @@ def get_parallelism_config(reference_node: Node) -> tuple[int, int]:
         return tp_size, pp_size
     
 
-def prepare_generation_batch(batch: DataProto) -> DataProto:
+def prepare_generation_batch(batch: TensorDict) -> TensorDict:
     """Pops keys from a batch to isolate data needed for sequence generation."""
-    batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
-    non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
-    if "multi_modal_inputs" in batch.non_tensor_batch:
-        non_tensor_batch_keys_to_pop.extend(["multi_modal_data", "multi_modal_inputs"])
-    if "tools_kwargs" in batch.non_tensor_batch:
-        non_tensor_batch_keys_to_pop.append("tools_kwargs")
-    if "raw_prompt" in batch.non_tensor_batch:
-        non_tensor_batch_keys_to_pop.append("raw_prompt")
-    if "interaction_kwargs" in batch.non_tensor_batch:
-        non_tensor_batch_keys_to_pop.append("interaction_kwargs")
+    keys_to_pop = ["input_ids", "attention_mask", "position_ids", "raw_prompt_ids"]
+    if "multi_modal_inputs" in batch:
+        keys_to_pop.extend(["multi_modal_data", "multi_modal_inputs"])
+    if "tools_kwargs" in batch:
+        keys_to_pop.append("tools_kwargs")
+    if "raw_prompt" in batch:
+        keys_to_pop.append("raw_prompt")
+    if "interaction_kwargs" in batch:
+        keys_to_pop.append("interaction_kwargs")
     return batch.pop(
-        batch_keys=batch_keys_to_pop,
-        non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
     )
     
 
@@ -605,24 +559,24 @@ def prepare_local_batch_metrics(batch: DataProto, use_critic: bool = True) -> Di
 
     response_info = _compute_response_info(batch)
     response_mask = response_info["response_mask"].bool()
-    device = batch.batch["advantages"].device
-    max_response_length = batch.batch["responses"].shape[-1]
+    device = batch["advantages"].device
+    max_response_length = batch["responses"].shape[-1]
     response_lengths = response_info["response_length"].to(device)
     prompt_lengths = response_info["prompt_length"].to(device)
     # Components for correct/wrong response length metrics
     correct_threshold = 0.5
-    rewards_per_response = batch.batch["token_level_rewards"].sum(-1)
+    rewards_per_response = batch["token_level_rewards"].sum(-1)
     correct_mask = rewards_per_response > correct_threshold
     # Components for prompt clip ratio
-    prompt_attn_mask = batch.batch["attention_mask"][:, :-max_response_length]
+    prompt_attn_mask = batch["attention_mask"][:, :-max_response_length]
     max_prompt_length = prompt_attn_mask.size(-1)
 
     # Prepare a dictionary to hold all local raw values
     local_data = {
-        "score": batch.batch["token_level_scores"].sum(-1),
-        "rewards": batch.batch["token_level_rewards"].sum(-1),
-        "advantages": torch.masked_select(batch.batch["advantages"], response_mask),
-        "returns": torch.masked_select(batch.batch["returns"], response_mask),
+        "score": batch["token_level_scores"].sum(-1),
+        "rewards": batch["token_level_rewards"].sum(-1),
+        "advantages": torch.masked_select(batch["advantages"], response_mask),
+        "returns": torch.masked_select(batch["returns"], response_mask),
         "response_length": response_info["response_length"].to(device),
         "prompt_length": response_info["prompt_length"].to(device),
         "correct_response_length": response_lengths[correct_mask],
@@ -632,7 +586,7 @@ def prepare_local_batch_metrics(batch: DataProto, use_critic: bool = True) -> Di
     }
 
     if use_critic:
-        valid_values = torch.masked_select(batch.batch["values"], response_mask)
+        valid_values = torch.masked_select(batch["values"], response_mask)
         error = local_data["returns"] - valid_values
 
         critic_data = {

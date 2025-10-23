@@ -2,3 +2,4 @@
 
 from .protocol import *
 from .data_buffer import *
+from .sample import *

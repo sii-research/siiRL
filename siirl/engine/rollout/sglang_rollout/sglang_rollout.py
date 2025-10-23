@@ -557,7 +557,7 @@ class SGLangRollout(BaseRollout):
 
     @GPUMemoryLogger(role="sglang rollout", logger=logger)
     @torch.no_grad()
-    def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
+    def generate_sequences(self, prompts: TensorDict, **kwargs) -> TensorDict:
         """Generate sequences for a batch of prompts.
 
         Args:
@@ -584,7 +584,7 @@ class SGLangRollout(BaseRollout):
 
     @GPUMemoryLogger(role="sglang rollout", logger=logger)
     @torch.no_grad()
-    def _batch_level_generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
+    def _batch_level_generate_sequences(self, prompts: TensorDict, **kwargs) -> TensorDict:
         """Generates single-turn sequences for a batch of prompts.
         For single-turn generation, all prompts are processed in one request.
         `_batch_level_generate_sequences` involves:
@@ -624,32 +624,31 @@ class SGLangRollout(BaseRollout):
               sequences.
         Note that in GRPO, if the prompts are validated, we repeat the prompts for rollout.n times in ray_trainer.
         Thus we do not need to repeat the prompts here and set the sampling parameter n to 1.
-        """
+        """     
         # input ids: (bs, prompt_length), left-padded
-        idx = prompts.batch["input_ids"]
+        idx = prompts["input_ids"]
         # attention_mask: (bs, seq_length), left-padded
-        attention_mask = prompts.batch["attention_mask"]
-        position_ids = prompts.batch["position_ids"]
+        attention_mask = prompts["attention_mask"]
+        position_ids = prompts["position_ids"]
 
         # used to generate attention mask for the
         # response based on EOS token position
-        eos_token_id = prompts.meta_info["eos_token_id"]
+        eos_token_id = prompts["eos_token_id"]
 
         batch_size = idx.size(0)
 
         # Extract non-tensor data
-        non_tensor_batch = prompts.non_tensor_batch
-        if "raw_prompt_ids" not in non_tensor_batch:
-            non_tensor_batch["raw_prompt_ids"] = np.array(
+        if "raw_prompt_ids" not in prompts:
+            prompts["raw_prompt_ids"] = np.array(
                 [_pre_process_inputs(self.pad_token_id, idx[i]).tolist() for i in range(batch_size)],
                 dtype=object,
             )
 
-        if "multi_modal_data" in non_tensor_batch:
+        if "multi_modal_data" in prompts:
             sglang_inputs = []
             for raw_prompt_ids, multi_modal_data in zip(
-                non_tensor_batch.pop("raw_prompt_ids"),
-                non_tensor_batch.pop("multi_modal_data"),
+                prompts.pop("raw_prompt_ids").data,
+                prompts.pop("multi_modal_data").data,
             ):
                 sglang_inputs.append(
                     {
@@ -662,9 +661,9 @@ class SGLangRollout(BaseRollout):
                 )
         else:
             sglang_inputs = [
-                {"prompt_token_ids": raw_prompt_ids} for raw_prompt_ids in non_tensor_batch.pop("raw_prompt_ids")
+                {"prompt_token_ids": raw_prompt_ids} for raw_prompt_ids in prompts.pop("raw_prompt_ids").data
             ]
-
+        
         # Ensure token IDs are lists or numpy arrays
         for input_data in sglang_inputs:
             if isinstance(input_data["prompt_token_ids"], np.ndarray):
@@ -673,13 +672,13 @@ class SGLangRollout(BaseRollout):
                 raise TypeError(
                     f"prompt_token_ids must be a list or numpy array, got {type(input_data['prompt_token_ids'])}"
                 )
-
+        
         # Extract token IDs and image data for SGLang Engine
         idx_list = [input_data["prompt_token_ids"] for input_data in sglang_inputs]
         image_list = [input_data.get("image_data", None) for input_data in sglang_inputs]
 
-        do_sample = prompts.meta_info.get("do_sample", True)
-        is_validate = prompts.meta_info.get("validate", False)
+        do_sample = prompts.get("do_sample", True)
+        is_validate = prompts.get("validate", False)
 
         # Create request-level sampling parameters
         request_sampling_params = self.sampling_params.copy()
@@ -738,17 +737,9 @@ class SGLangRollout(BaseRollout):
         out = _post_process_outputs(self.processing_class, output)
 
         response = out[0].to(idx.device)
-        rollout_log_probs = None
-
-        if self.config.calculate_log_probs:
-            rollout_log_probs = out[1].to(idx.device)
 
         if response.shape[1] < self.config.response_length:
             response = pad_sequence_to_length(response, self.config.response_length, self.pad_token_id)
-            if self.config.calculate_log_probs:
-                rollout_log_probs = pad_sequence_to_length(
-                    rollout_log_probs, self.config.response_length, self.pad_token_id
-                )
 
         seq = torch.cat([idx, response], dim=-1)
 
@@ -770,26 +761,18 @@ class SGLangRollout(BaseRollout):
         attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
 
         # all the tp ranks should contain the same data here. data in all ranks are valid
-        batch = TensorDict(
-            {
-                "prompts": idx,
-                "responses": response,
-                "input_ids": seq,  # here input_ids become the whole sentences
-                "attention_mask": attention_mask,
-                "position_ids": position_ids,
-            },
-            batch_size=batch_size,
-        )
-        if self.config.calculate_log_probs:
-            # we will recompute old log prob with actor
-            batch["rollout_log_probs"] = rollout_log_probs
+        prompts["prompts"] = idx
+        prompts["responses"] =  response
+        prompts["input_ids"] = seq
+        prompts["attention_mask"] = attention_mask
+        prompts["position_ids"] = position_ids
 
         # free cache engine
         if self.inference_engine is not None and self._tp_rank == 0:
             loop = asyncio.get_event_loop()
             loop.run_until_complete(self.inference_engine.flush_cache())
 
-        return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
+        return prompts
 
     async def _async_rollout_a_request(
         self,
@@ -1052,7 +1035,7 @@ class SGLangRollout(BaseRollout):
 
     @GPUMemoryLogger(role="sglang rollout", logger=logger)
     @torch.no_grad()
-    def _req_level_generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
+    def _req_level_generate_sequences(self, prompts: TensorDict, **kwargs) -> TensorDict:
         """Generates multi-turn sequences for a batch of prompts.
         For multi-turn generation, each prompt is processed separately via
         `_req_level_generate_sequences` for better tool calling control.
@@ -1060,9 +1043,9 @@ class SGLangRollout(BaseRollout):
         Thus we do not need to repeat the prompts here and set the sampling parameter n to 1.
         """
         # Async rollout with tools support
-        do_sample = prompts.meta_info.get("do_sample", True)
-        is_validate = prompts.meta_info.get("validate", False)
-        tgt_device = prompts.batch["input_ids"].device
+        do_sample = prompts["do_sample"] if "do_sample" in prompts else True
+        is_validate = prompts["validate"] if "validate" in prompts else False
+        tgt_device = prompts["input_ids"].device
         if self._tp_rank == 0:
             req_list = self._preprocess_prompt_to_async_rollout_requests(
                 prompts,
@@ -1218,44 +1201,39 @@ class SGLangRollout(BaseRollout):
         if self.inference_engine is not None and self._tp_rank == 0:
             loop = asyncio.get_event_loop()
             loop.run_until_complete(self.inference_engine.flush_cache())
+        prompts.update(batch)
+        prompts["messages"] = np.array(messages)
+        prompts["reward_scores"] = np.array(reward_scores)
+        prompts["multi_modal_inputs"] = multi_modal_inputs
+        return prompts
 
-        return DataProto(
-            batch=batch,
-            non_tensor_batch={
-                "messages": np.array(messages),
-                "reward_scores": np.array(reward_scores),
-                "multi_modal_inputs": np.array(multi_modal_inputs, dtype=object),
-            },
-        )
-
-    def _preprocess_prompt_to_async_rollout_requests(self, prompts: DataProto, n: int = 1) -> list[AsyncRolloutRequest]:
-        assert "raw_prompt" in prompts.non_tensor_batch, (
+    def _preprocess_prompt_to_async_rollout_requests(self, prompts: TensorDict, n: int = 1) -> list[AsyncRolloutRequest]:
+        assert "raw_prompt" in prompts, (
             "need data.return_raw_chat=True, due to no official way do parse_messages"
         )
         logger.info(
             "n is deprecated for SGLang rollout since ray ppo trainer will repeat the prompts for rollout.n times"
         )
         req_list = []
-        multi_modal_data_list = prompts.non_tensor_batch.get(
-            "multi_modal_data", [None] * len(prompts.non_tensor_batch["raw_prompt"])
-        )
+        
+        multi_modal_data_list = prompts["multi_modal_data"] if "multi_modal_data" in prompts else  [None] * len(prompts["raw_prompt"])
 
         for data_idx, (raw_prompt, multi_modal_data) in enumerate(
-            zip(prompts.non_tensor_batch["raw_prompt"], multi_modal_data_list)
+            zip(prompts["raw_prompt"], multi_modal_data_list)
         ):
             if self._tool_schemas:
-                _tools_kwargs = prompts.non_tensor_batch["tools_kwargs"][data_idx]
+                _tools_kwargs = prompts["tools_kwargs"][data_idx]
                 _tool_schemas = [self._tool_map[k].get_openai_tool_schema() for k in _tools_kwargs.keys()]
                 _input_ids = None
                 _attention_mask = None
             else:
-                _input_ids = _pre_process_inputs(self.pad_token_id, prompts.batch["input_ids"][data_idx])
-                _attention_mask = _pre_process_inputs(0, prompts.batch["attention_mask"][data_idx])
+                _input_ids = _pre_process_inputs(self.pad_token_id, prompts["input_ids"][data_idx])
+                _attention_mask = _pre_process_inputs(0, prompts["attention_mask"][data_idx])
                 _tools_kwargs = {}
                 _tool_schemas = None
 
             if self.interaction_map:
-                _interaction_kwargs = prompts.non_tensor_batch["interaction_kwargs"][data_idx]
+                _interaction_kwargs = prompts["interaction_kwargs"][data_idx]
             else:
                 _interaction_kwargs = {}
 
