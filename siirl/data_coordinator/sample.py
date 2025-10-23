@@ -8,31 +8,13 @@ from siirl.data_coordinator.protocol import DataProto
 from tensordict import TensorDict
 
 @dataclass
-class MetaInfo:
-    # single instance
-    _instance = None
-    
-    # data
-    validate: bool=field(default=False)
-    metrics: dict=field(default_factory=dict)
-    temperature: float=field(default=0)
-    total_input_tokens: int=field(default=0)
-    total_output_tokens: int=field(default=0)
-    global_token_num: List=field(default_factory=list)
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-    
-
-@dataclass
 class SampleInfo:
     agent_group: int = field(default=0)
     sum_tokens: int = field(default=0)
     prompt_length: int = field(default=0)
     response_length: int = field(default=0)
     dict_info: dict = field(default_factory=dict)
-    uid: int = field(default=None)
+    uid: Optional[int] = field(default=None)
     node_id: Optional[str] = field(default=None)
 
 @dataclass
@@ -53,6 +35,7 @@ class Sample:
     ref_log_prob: List[float] = field(default_factory=list)
     returns: List[float] = field(default_factory=list)
     # from non_tensor_batch of Dataproto
+    uid: Optional[int] = field(default=None)
     raw_prompt: str = field(default="")
     raw_prompt_ids: List[int] = field(default_factory=list)
     prompt_texts: str = field(default="", metadata={"help":"used in validate, decode form 'input_ids', but may is same with raw_prompt"})
@@ -66,6 +49,8 @@ class Sample:
     traj_step: int = field(default=0, metadata={"help":"used in multi-agent"})
     seq_final_reward: float = field(default=0.0, metadata={"help":"used in dapo"})
     seq_reward: float = field(default=0.0, metadata={"help":"used in dapo"})
+    # Metadata for the entire batch, attached to each sample for transit.
+    meta_info: dict = field(default_factory=dict)
     
 @dataclass
 class GroupSample:
@@ -110,6 +95,14 @@ def is_key_in_sample(key: str) -> bool:
 
 def Sample2DataProto(samples: List[Sample]):
     """将Sample对象转换为Dataproto，拆分到tensordict和nontensorbatch"""
+    if not samples:
+        # Handle the case of an empty list of samples gracefully.
+        return DataProto(
+            batch=TensorDict({}, batch_size=0),
+            non_tensor_batch={},
+            meta_info={}
+        )
+
     # 1. 构建tensordict（适合张量操作的列表/数值字段）
     tensordict = TensorDict ({
         "prompts": torch.tensor([sample.prompts for sample in samples]),
@@ -147,16 +140,11 @@ def Sample2DataProto(samples: List[Sample]):
         "seq_final_reward": np.array([sample.seq_final_reward for sample in samples]),
         "seq_reward": np.array([sample.seq_reward for sample in samples]),
     }
-    meta = MetaInfo()
-    meta_info = {
-        "validate": meta.validate,
-        "metrics": meta.metrics,
-        "temperature": meta.temperature,
-        "total_input_tokens": meta.total_input_tokens,
-        "total_output_tokens": meta.total_output_tokens,
-        "global_token_num": meta.global_token_num
-    }
-    # 3. 实例化Dataproto并返回（假设Dataproto接受这两个参数）
+    
+    # 3. Restore meta_info from the first sample (it's the same for the whole batch)
+    meta_info = samples[0].meta_info
+
+    # 4. 实例化Dataproto并返回
     print(f"[hujr] DataProto2Sample token_level_rewards {tensordict.get('token_level_rewards', [])}")
     return DataProto(
         batch=tensordict,
@@ -226,14 +214,11 @@ def DataProto2Sample(data:DataProto):
         })
         
         # 创建Sample对象并添加到列表
-        samples.append(Sample(** sample_kwargs))
-    meta = MetaInfo()
-    meta.global_token_num = (torch.sum(data.batch["attention_mask"], dim=-1)).tolist()
-    meta.validate = data.meta_info.get("validate", False)
-    meta.metrics = data.meta_info.get("metrics", {})
-    meta.temperature = data.meta_info.get("temperature", 0)
-    meta.total_input_tokens = data.meta_info.get("total_input_tokens", 0)
-    meta.total_output_tokens = data.meta_info.get("total_output_tokens", 0)
+        sample = Sample(**sample_kwargs)
+        # Attach the batch's meta_info to each sample for transit
+        sample.meta_info = data.meta_info
+        samples.append(sample)
+
     print(f"[hujr] DataProto2Sample token_level_rewards {data.batch.get('token_level_rewards', [])}")
     return samples
     

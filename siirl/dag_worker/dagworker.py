@@ -317,6 +317,11 @@ class DAGWorker(Worker):
                             if batch is None:
                                 logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
                                 return None  # Abort the entire step
+                    else:
+                        # The entry node gets its data directly from the dataloader.
+                        # We must convert the dictionary from the dataloader into a DataProto object,
+                        # which is the standard data format for nodes.
+                        batch = DataProto.from_single_dict(initial_data)
 
                     if self.enable_perf:
                         with timer(self.enable_perf, "get_data_from_buffer_barrier", timing_raw):
