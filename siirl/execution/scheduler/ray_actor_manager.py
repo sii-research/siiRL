@@ -82,7 +82,7 @@ class RayActorManager(WorkerGroup):
         base_config: SiiRLArguments,
         process_manager: ProcessGroupManager,
         rank_taskgraph_mapping: Dict[int, "TaskGraph"],
-        data_buffer_handles: List[ActorHandle],
+        data_coordinator_handle: ActorHandle,
         bin_pack: bool = True,
         name_prefix: Optional[str] = None,
         ray_wait_register_center_timeout: int = 300,
@@ -97,7 +97,7 @@ class RayActorManager(WorkerGroup):
             base_config: Base configuration arguments for the workers.
             process_manager: Manager for the distributed process group.
             rank_taskgraph_mapping: Mapping of worker ranks to their task graphs.
-            data_buffer_handles: List of handles to shared data buffers.
+            data_coordinator_handle: Handle to the central DataCoordinator actor.
             bin_pack: If True, use strict packing strategy for placement groups.
             name_prefix: A custom prefix for actor names. A random one is
                          generated if None.
@@ -118,7 +118,7 @@ class RayActorManager(WorkerGroup):
         self.base_config = base_config
         self.process_manager = process_manager
         self.rank_taskgraph_mapping = rank_taskgraph_mapping
-        self.data_buffer_handles = data_buffer_handles
+        self.data_coordinator_handle = data_coordinator_handle
         self.device_name = device_name
 
         # Prepare the Ray actor class with its initial arguments.
@@ -127,7 +127,7 @@ class RayActorManager(WorkerGroup):
             config=self.base_config,
             process_group_manager=self.process_manager,
             taskgraph_mapping=self.rank_taskgraph_mapping,
-            data_buffers=self.data_buffer_handles,
+            data_coordinator=self.data_coordinator_handle,
             device_name=self.device_name,
         )
 

@@ -37,9 +37,9 @@ from siirl.execution.dag.node import NodeRole, NodeType, Node
 from siirl.execution.scheduler.reward import compute_reward, create_reward_manager
 from siirl.execution.scheduler.process_group_manager import ProcessGroupManager
 from siirl.execution.scheduler.enums import AdvantageEstimator
-from siirl.data_coordinator import DataProto
+from siirl.data_coordinator.sample import Sample, SampleInfo, DataProto2Sample, Sample2DataProto
 from siirl.data_coordinator.dataloader import DataLoaderNode
-from siirl.data_coordinator.protocol import collate_fn
+from siirl.data_coordinator.protocol import DataProto
 from siirl.dag_worker.data_structures import NodeOutput, ValidationPayload, ValidationResult
 from siirl.dag_worker.constants import DAGConstants, DAGInitializationError
 from siirl.dag_worker.core_algos import (
@@ -105,13 +105,15 @@ class DAGWorker(Worker):
         config: SiiRLArguments,
         process_group_manager: ProcessGroupManager,
         taskgraph_mapping: Dict[int, TaskGraph],
-        data_buffers: List["ray.actor.ActorHandle"]
+        data_coordinator: "ray.actor.ActorHandle",
+        device_name="cuda",
     ):
         super().__init__()
         self.config = config
         self.process_group_manager = process_group_manager
         self.taskgraph_mapping = taskgraph_mapping
-        self.data_buffers = data_buffers
+        self.data_coordinator = data_coordinator
+        self.device_name = device_name
         self.enable_perf = os.environ.get("SIIRL_ENABLE_PERF", "0") == "1" or config.dag.enable_perf
 
         # State attributes
@@ -127,7 +129,7 @@ class DAGWorker(Worker):
         self.progress_bar = None
         self._rank: int = -1
         self.taskgraph: Optional[TaskGraph] = None
-        self.internal_data_cache: Dict[str, DataProto] = {}
+        self.internal_data_cache: Dict[str, Any] = {}
         self.agent_critic_worker: Any
         # Finish flag
         self.taskgraph_execute_finished = False
@@ -139,7 +141,7 @@ class DAGWorker(Worker):
 
         # Add a cache to hold data from an insufficient batch for the next training step.
         # This is the core state-carrying mechanism for dynamic sampling.
-        self.sampling_leftover_cache: Optional[DataProto] = None
+        self.sampling_leftover_cache: Optional[Any] = None
 
         # multi agent
         self._multi_agent = False
@@ -277,7 +279,15 @@ class DAGWorker(Worker):
         with timer(self.enable_perf, "step", timing_raw):
             # --- 1. Data Loading ---
             with timer(self.enable_perf, "data_loading", timing_raw):
-                batch = DataProto.from_single_dict(self.dataloader.run(epoch=epoch, is_validation_step=False))
+                # Data loader now returns a dictionary that can be converted to Samples
+                # For now, we assume it returns a dict that can be processed.
+                # The concept of a monolithic DataProto batch is removed.
+                batch_dict = self.dataloader.run(epoch=epoch, is_validation_step=False)
+                # Let's assume the entry node receives this dict.
+                # In the new architecture, individual nodes will handle Samples.
+                # For now, we'll pass the dict to the first node.
+                # TODO: Adapt this to the new Sample-based data flow.
+                initial_data = batch_dict
 
             with timer(self.enable_perf, "get_entry_node", timing_raw):
                 node_queue = self.taskgraph.get_entry_nodes()
@@ -304,23 +314,20 @@ class DAGWorker(Worker):
                     # --- 3. Get Input Data ---
                     if cur_node.node_id != entry_node_id:
                         with timer(self.enable_perf, "get_data_from_buffer", timing_raw):
-                            if self._multi_agent and cur_node.node_role == NodeRole.ADVANTAGE:
-                                batch = self.multi_agent_get_log(key=cur_node.node_id, cur_dp_rank = cur_dp_rank, agent_group = cur_node.agent_group,timing_raw = timing_raw)
-                            else:
-                                batch = self.get_data_from_buffers(key=cur_node.node_id, my_current_dp_rank=cur_dp_rank, my_current_dp_size=cur_dp_size, timing_raw=timing_raw)
+                            batch = self.get_data_from_buffers(key=cur_node.node_id, timing_raw=timing_raw)
                             if batch is None:
                                 logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
                                 return None  # Abort the entire step
-                            batch = remove_prefix_from_dataproto(batch, cur_node)
-                            if batch is None:
-                                logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
-                                return None  # Abort the entire step
-                            logger.debug(f"current node({cur_node.node_id}) get data from databuffer batch size: {batch.batch.size()}")
+                    else:
+                        # The entry node gets its data directly from the dataloader.
+                        # We must convert the dictionary from the dataloader into a DataProto object,
+                        # which is the standard data format for nodes.
+                        batch = DataProto.from_single_dict(initial_data)
+
                     if self.enable_perf:
                         with timer(self.enable_perf, "get_data_from_buffer_barrier", timing_raw):
                             dist.barrier(self._gather_group)
                     # --- 4. Node Execution ---
-
                     node_name_timer = f"{cur_node.node_role.name.lower()}"
                     if cur_node.only_forward_compute and cur_node.node_role == NodeRole.ACTOR:
                         node_name_timer = "actor_log_prob"
@@ -374,19 +381,7 @@ class DAGWorker(Worker):
                         if next_nodes := self.taskgraph.get_downstream_nodes(cur_node.node_id):
                             # Currently supports single downstream node, can be extended to a loop.
                             next_node = next_nodes[0]
-                            next_dp_size, _, _, _, _, _ = self._get_node_dp_info(next_node)
-                            node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node)
-                            is_current_last_pp_tp_rank0 = (cur_pp_rank == cur_pp_size - 1 and cur_tp_rank == 0)
-                            if whether_put_data(self._rank, is_current_last_pp_tp_rank0, next_dp_size, cur_dp_size, cur_node, next_node):
-                                with timer(self.enable_perf, "put_data_to_buffer", timing_raw):
-                                    if self._multi_agent and next_node.node_role == NodeRole.ADVANTAGE:
-                                        self.multi_agent_put_log(key=next_node.node_id, data=node_output.batch, next_dp_size = next_dp_size, agent_group = next_node.agent_group, timing_raw = timing_raw)
-                                    else:
-                                        enforce_buffer = (self._multi_agent) and (cur_node.node_role == NodeRole.ADVANTAGE)
-                                        self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch, source_dp_size=cur_dp_size, dest_dp_size=next_dp_size, enforce_buffer = enforce_buffer,timing_raw=timing_raw)
-                        elif self._multi_agent:
-                            # last_node add prefix for metrics
-                            node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node) 
+                            self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch, timing_raw=timing_raw)
                         if self.enable_perf:
                             with timer(self.enable_perf, "put_data_to_buffer_barrier", timing_raw):
                                 dist.barrier(self._gather_group)
@@ -1256,155 +1251,105 @@ class DAGWorker(Worker):
     def put_data_to_buffers(
         self, key: str, 
         data: DataProto,
-        source_dp_size: int, 
-        dest_dp_size: int, 
-        enforce_buffer: bool, 
-        timing_raw: Dict[str, float]):
-        """Puts data into shared Ray plasma store for consumption by downstream nodes."""
+        timing_raw: Dict[str, float]
+    ):
+        """
+        Puts data into the DataCoordinator by converting it into individual Samples.
+        The data is tagged with a 'key' to be retrieved by the correct downstream node.
+        """
         try:
-            logger.debug(f"Rank {self._rank}: Starting put_data_to_buffers for key '{key}', source_dp_size={source_dp_size}, dest_dp_size={dest_dp_size}")
+            logger.debug(f"Rank {self._rank}: Starting put_data_to_buffers for key '{key}'")
+
+            samples = DataProto2Sample(data)
+            if not samples:
+                logger.warning(f"Rank {self._rank}: DataProto for key '{key}' converted to 0 samples. Nothing to put.")
+                return
             
-            data.meta_info["padding_values"] = {"input_ids": self.validate_tokenizer.pad_token_id, "responses": self.validate_tokenizer.pad_token_id, "labels": -100, "attention_mask": 0, "response_mask": 0}
-            data.meta_info["padding_side"] = self.validate_tokenizer.padding_side
-
-            if (not enforce_buffer) and source_dp_size == dest_dp_size:
-                with timer(self.enable_perf, f"put_intern_data_{key}", timing_raw):
-                    logger.debug(f"Rank {self._rank}: DP size match ({source_dp_size}). Storing data for key '{key}' in local cache.")
-                    self.internal_data_cache[key] = data
-                    logger.debug(f"Rank {self._rank}: Successfully stored data for key '{key}' in local cache.")
-            else:
-                logger.debug(f"Rank {self._rank}: DP size mismatch (source={source_dp_size}, dest={dest_dp_size}). Using Ray buffers for key '{key}'.")
-                try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    logger.debug(f"Rank {self._rank}: Creating new event loop for key '{key}'")
-                    loop = asyncio.new_event_loop()
-
-                with timer(self.enable_perf, f"put_ray_proto_data_{key}", timing_raw):
-                    chunks = data.chunk(chunks=len(self.data_buffers))
-                    logger.debug(f"Rank {self._rank}: Created {len(chunks)} chunks for key '{key}'")
-                    put_futures = [buf.put.remote(key, chunk) for buf, chunk in zip(self.data_buffers, chunks)]
+            loop = asyncio.get_event_loop()
+            put_futures = []
+            
+            with timer(self.enable_perf, f"put_samples_to_coordinator_{key}", timing_raw):
+                for sample in samples:
+                    info = SampleInfo(
+                        sum_tokens=getattr(sample, 'sum_tokens', len(sample.input_ids)),
+                        prompt_length=getattr(sample, 'prompt_length', 0),
+                        response_length=getattr(sample, 'response_length', 0),
+                        uid=getattr(sample, 'uid', uuid.uuid4().int),
+                        dict_info={'key': key} # Tag the sample with the key
+                    )
+                    sample_ref = ray.put(sample)
+                    put_futures.append(self.data_coordinator.put.remote(info, sample_ref))
                 
-                with timer(self.enable_perf, f"put_proto_data_{key}", timing_raw):
-                    try:
-                        loop.run_until_complete(asyncio.gather(*put_futures))
-                        logger.debug(f"Rank {self._rank}: Successfully stored all chunks for key '{key}' in Ray buffers")
-                    except Exception as e:
-                        logger.error(f"Rank {self._rank}: Failed to store chunks for key '{key}' in Ray buffers: {e}")
-                        raise
+                if put_futures:
+                    loop.run_until_complete(asyncio.gather(*put_futures))
+                    logger.debug(f"Rank {self._rank}: Successfully put {len(samples)} samples for key '{key}' into DataCoordinator.")
+
         except Exception as e:
-            logger.error(f"Rank {self._rank}: Unexpected error in put_data_to_buffers for key '{key}': {e}")
-            raise  # Re-raise the exception to maintain the original behavior
+            logger.error(f"Rank {self._rank}: Unexpected error in put_data_to_buffers for key '{key}': {e}", exc_info=True)
+            raise
 
     def get_data_from_buffers(
         self, 
         key: str, 
-        my_current_dp_rank: int, 
-        my_current_dp_size: int, 
         timing_raw: Dict[str, float]
-        ) -> Optional[DataProto]:
-        """Gets data from shared buffers that was produced by an upstream node."""
+    ) -> Optional[DataProto]:
+        """
+        Gets data from the DataCoordinator by filtering for a specific key,
+        then collates the resulting Samples back into a single DataProto.
+        """
         try:
-            # First, check the high-speed internal cache.
-            with timer(self.enable_perf, f"get_intern_data_{key}", timing_raw):
-                if key in self.internal_data_cache:
-                    logger.debug(f"Rank {self._rank}: Found data for key '{key}' in local cache. Bypassing Ray.")
-                    return self.internal_data_cache.pop(key)
+            logger.debug(f"Rank {self._rank}: Fetching data from DataCoordinator for key '{key}'.")
 
-            # If not in the local cache, fall back to remote Ray buffers.
-            logger.debug(f"Rank {self._rank}: Data for key '{key}' not in local cache. Fetching from remote buffers.")
-            if not self.data_buffers:
-                logger.error(f"Rank {self._rank}: data_buffers is None, cannot get data for key '{key}'")
-                return None
+            def key_filter(sample_info: SampleInfo) -> bool:
+                return sample_info.dict_info.get('key') == key
 
             try:
                 loop = asyncio.get_event_loop()
             except RuntimeError:
-                logger.debug(f"Rank {self._rank}: Creating new event loop for key '{key}'")
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
+            
+            with timer(self.enable_perf, f"get_samples_from_coordinator_{key}", timing_raw):
+                # Use the new get_all_by_filter method
+                sample_refs = loop.run_until_complete(self.data_coordinator.get_all_by_filter.remote(key_filter))
 
-            try:
-                logger.debug(f"Rank {self._rank}: Attempting Ray remote call for key '{key}'")
-                first_item = loop.run_until_complete(self.data_buffers[0].get.remote(key, my_current_dp_rank, my_current_dp_size))
-                logger.debug(f"Rank {self._rank}: Completed Ray remote call for key '{key}', got result type: {type(first_item)}")
-            except Exception as e:
-                logger.error(f"Rank {self._rank}: Error getting data from Ray buffer for key '{key}': {e}")
+            if not sample_refs:
+                logger.warning(f"Rank {self._rank}: Found no samples in DataCoordinator for key '{key}'.")
                 return None
+            
+            logger.debug(f"Rank {self._rank}: Retrieved {len(sample_refs)} sample references for key '{key}'.")
 
-            if first_item is None:
-                logger.error(f"Rank {self._rank}: first_item is None for key '{key}'")
-                return None
+            with timer(self.enable_perf, f"ray_get_samples_{key}", timing_raw):
+                samples = ray.get(sample_refs)
 
-            if isinstance(first_item, ray.ObjectRef):
-                with timer(self.enable_perf, f"get_ref_data_{key}", timing_raw):
-                    try:
-                        return loop.run_until_complete(first_item)
-                    except Exception as e:
-                        logger.error(f"Rank {self._rank}: Error resolving Ray ObjectRef for key '{key}': {e}")
-                        return None
-            elif isinstance(first_item, DataProto):
-                try:
-                    # If data was chunked, retrieve all chunks and concatenate
-                    with timer(self.enable_perf, f"get_proto_data_{key}", timing_raw):
-                        other_chunks_futures = [b.get.remote(key, my_current_dp_rank, my_current_dp_size) for b in self.data_buffers[1:]]
-                        other_chunks = loop.run_until_complete(asyncio.gather(*other_chunks_futures))
-                    with timer(self.enable_perf, f"get_proto_data_concat_chunks_{key}", timing_raw):
-                        return DataProto.concat([first_item] + other_chunks)
-                except Exception as e:
-                    logger.error(f"Rank {self._rank}: Error concatenating chunks for key '{key}': {e}")
-                    return None
-            logger.error(f"Rank {self._rank}: first_item type {type(first_item)} is neither ray.ObjectRef nor DataProto for key '{key}'")
-            return None
+            with timer(self.enable_perf, f"collate_samples_{key}", timing_raw):
+                # Collate the list of Sample objects back into a single DataProto
+                data_proto = Sample2DataProto(samples)
+
+            return data_proto
 
         except Exception as e:
-            logger.error(f"Rank {self._rank}: Unexpected error in get_data_from_buffers for key '{key}': {e}")
+            logger.error(f"Rank {self._rank}: Unexpected error in get_data_from_buffers for key '{key}': {e}", exc_info=True)
             return None
 
     def reset_data_buffer(self, all_keys: List[str]):
         """
-        Reset the data buffer for a given list of keys.
+        DEPRECATED with DataCoordinator. The get calls are now consuming.
+        This can be a no-op, but for safety, we could implement a clear if needed.
+        For now, it does nothing as intended.
         """
-        if self._rank == 0:
-            loop = asyncio.get_event_loop()
-            for data_buffer in self.data_buffers:
-                loop.run_until_complete(data_buffer.reset.remote())
+        logger.debug("`reset_data_buffer` is a no-op with the new DataCoordinator model as gets are consuming.")
+        pass
 
     def multi_agent_put_log(self, key: str, data: DataProto, agent_group: int, next_dp_size: int, timing_raw):
-        def uuid_hex_to_bucket(uuid_hex: str, num_buckets: int = 8) -> int:
-            return consistent_hash(uuid_hex) % num_buckets
-        data_size = len(data)
-        put_futures = []
-        meta_info = data.meta_info
-        with timer(self.enable_perf, f"put_ray_proto_data_{key}", timing_raw):
-            for i in range(data_size):
-                cur_data = data[i]
-                request_id = cur_data.non_tensor_batch[f"agent_group_{agent_group}_request_id"]
-                next_dp_rank = uuid_hex_to_bucket(request_id, next_dp_size)
-                cur_key = key + f"_{next_dp_rank}"
-                buf = random.choice(self.data_buffers)
-                # slice of DataProto is DataProtoItem, will loss meta_info, need to recompute when use
-                cur_data = collate_fn([cur_data])
-                cur_data.meta_info = meta_info
-                put_futures.append(buf.put.remote(cur_key, cur_data))
-        with timer(self.enable_perf, f"put_proto_data_{key}", timing_raw):
-            loop = asyncio.get_event_loop()
-            loop.run_until_complete(asyncio.gather(*put_futures))
+        # This logic needs to be adapted to the new model. For now, it's a warning.
+        logger.warning("`multi_agent_put_log` is not yet refactored for DataCoordinator and is a no-op.")
+        pass
 
     def multi_agent_get_log(self, key: str, cur_dp_rank: int, agent_group: int, timing_raw):
-        loop = asyncio.get_event_loop()
-        key = key + f"_{cur_dp_rank}"
-        prefix_key = f"agent_group_{agent_group}_"
-        with timer(self.enable_perf, f"get_ref_data_{key}", timing_raw):
-            tasks = [buf.get.remote(key) for buf in self.data_buffers]
-            temp_data =loop.run_until_complete(asyncio.gather(*tasks))
-            # temp_data = self.data_buffers.get(key) 
-            datas = [item for t in temp_data if t is not None for item in t]
-            sorted_datas = sorted(datas, key = lambda x : (x.non_tensor_batch[prefix_key + 'request_id'], -x.non_tensor_batch[prefix_key + 'traj_step']))
-            meta_info = sorted_datas[0].meta_info
-            dataproto = collate_fn(sorted_datas)
-            dataproto.meta_info = meta_info
-        return dataproto
+        # This logic needs to be adapted.
+        logger.warning("`multi_agent_get_log` is not yet refactored for DataCoordinator and is a no-op.")
+        return None
 
     def check_spmd_mode(self):
         return self.rollout_mode == 'sync' and self._multi_agent == False
