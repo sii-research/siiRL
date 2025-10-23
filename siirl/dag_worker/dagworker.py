@@ -90,6 +90,7 @@ from siirl.utils.metrics.metric_utils import (
     )
 from siirl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from siirl.execution.rollout_flow.multiturn.agent_loop import AgentLoopManager
+from siirl.dag_worker.checkpoint_manager import CheckpointManager
 
 device_name = get_device_name()
 
@@ -228,7 +229,7 @@ class DAGWorker(Worker):
 
                     # Save checkpoint at the configured frequency.
                     if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
-                        self._save_checkpoint()
+                        self.checkpoint_manager.save_checkpoint(self.global_steps)
 
                     # (Logging and validation logic remains unchanged)
                     metrics_dict = dict(ordered_metrics)
@@ -643,6 +644,9 @@ class DAGWorker(Worker):
         self._initialize_node_workers()
         self._profiler = DistProfiler(rank=self._rank, config=self.config.profiler)
 
+        # Initialize CheckpointManager - Note: will be fully initialized after workers are created
+        self.checkpoint_manager = None
+
         if self._rank == 0:
             logger.info("Rank 0: Initializing tracking logger...")
             from siirl.utils.logger.tracking import Tracking
@@ -988,7 +992,22 @@ class DAGWorker(Worker):
         # this is needed by async rollout manager
         self._set_node_executables()
         self.init_model()
-        self._load_checkpoint()
+
+        # Initialize CheckpointManager after workers are created
+        self.checkpoint_manager = CheckpointManager(
+            config=self.config,
+            rank=self._rank,
+            gather_group=self._gather_group,
+            workers=self.workers,
+            taskgraph=self.taskgraph,
+            dataloader=self.dataloader,
+            first_rollout_node=self.first_rollout_node,
+            get_node_dp_info_fn=self._get_node_dp_info
+        )
+
+        # Use CheckpointManager to load checkpoint
+        self.global_steps = self.checkpoint_manager.load_checkpoint()
+
         # Ensure all models are initialized and checkpoints are loaded before starting.
         dist.barrier(self._gather_group)
 
@@ -1233,171 +1252,6 @@ class DAGWorker(Worker):
 # ==========================================================================================
 # Module 5: Utilities
 # ==========================================================================================
-
-    def _save_checkpoint(self):
-        """
-        Saves a checkpoint in a fully distributed, robust, and multi-agent compatible manner.
-        - Each agent's state is saved to a unique, agent-specific subdirectory.
-        - A barrier ensures all file writes are complete before committing.
-        - Only Rank 0 updates the tracker file, effectively "committing" the checkpoint atomically.
-        """
-        from siirl.execution.dag.node import NodeType
-
-        step_dir = os.path.join(self.config.trainer.default_local_dir, f"global_step_{self.global_steps}")
-        os.makedirs(step_dir, exist_ok=True)
-        dist.barrier(self._gather_group)
-
-        logger.info(f"Rank {self._rank}: Saving checkpoint for global_step {self.global_steps} to {step_dir}")
-
-        # --- 1. All ranks save their sharded data ---
-        # Save states for trainable models (Actor and Critic) for all agents.
-        saved_worker_keys = set()
-        for node in self.taskgraph.nodes.values():
-            if node.node_type == NodeType.MODEL_TRAIN and node.node_role in [NodeRole.ACTOR, NodeRole.CRITIC]:
-                node_worker_key = generate_node_worker_key(node)
-                if node_worker_key in saved_worker_keys:
-                    continue
-
-                worker = self.workers[node_worker_key]
-
-                # Create an agent-specific subdirectory name to prevent different agents
-                # from overwriting each other's checkpoints.
-                sub_dir_name = f"{node.node_role.name.lower()}_agent_{node.agent_group}"
-                checkpoint_path = os.path.join(step_dir, sub_dir_name)
-
-                # The config key for max checkpoints is still role-based (e.g., max_actor_ckpt_to_keep).
-                role_name_for_config = node.node_role.name.lower()
-                max_ckpt_keep = getattr(self.config.trainer, f"max_{role_name_for_config}_ckpt_to_keep", 10)
-
-                worker.save_checkpoint(
-                    local_path=checkpoint_path, global_step=self.global_steps, max_ckpt_to_keep=max_ckpt_keep
-                )
-                saved_worker_keys.add(node_worker_key)
-
-        # In each DP group, only TP rank 0 saves the DataLoader state to avoid redundancy.
-        _, dp_rank, tp_rank, _, pp_rank, _ = self._get_node_dp_info(self.first_rollout_node)
-        if tp_rank == 0 and pp_rank == 0:
-            # The filename is based on the DP rank to distinguish different data partitions.
-            dataloader_path = os.path.join(step_dir, f"data_dp_rank_{dp_rank}.pt")
-            dataloader_state = self.dataloader.state_dict()
-            torch.save(dataloader_state, dataloader_path)
-            logger.debug(f"Rank {self._rank} (DP_Rank {dp_rank}, TP_Rank {tp_rank}, PP_Rank {pp_rank}): Saved dataloader state.")
-
-        # --- 2. All ranks wait for I/O to complete ---
-        # This barrier ensures all data is written BEFORE committing the checkpoint via the tracker file.
-        logger.debug(f"Rank {self._rank}: All data saved. Waiting at barrier before committing checkpoint.")
-        dist.barrier(self._gather_group)
-
-        # --- 3. Only Rank 0 commits the checkpoint by writing the tracker file ---
-        if self._rank == 0:
-            tracker_file = os.path.join(self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt")
-            with open(tracker_file, "w") as f:
-                f.write(str(self.global_steps))
-            logger.info(f"Rank 0: Checkpoint for step {self.global_steps} successfully committed.")
-
-        # Final barrier to ensure the tracker file is visible before any rank proceeds.
-        dist.barrier(self._gather_group)
-        logger.info(f"Rank {self._rank}: Finished saving and committing checkpoint for step {self.global_steps}.")
-
-    def _load_checkpoint(self):
-        """
-        Loads a checkpoint in a fully distributed and consistent manner.
-        - It relies on Rank 0 to be the single source of truth for which checkpoint to load and broadcasts that
-          decision. This is essential to prevent inconsistencies from filesystem latency.
-        - It constructs agent-specific paths to load the correct state for each agent.
-        """
-        from siirl.execution.dag.node import NodeType
-
-        if self.config.trainer.resume_mode == "disable":
-            if self._rank == 0:
-                logger.info("Checkpoint loading is disabled. Starting from scratch.")
-            self.global_steps = 0
-            return
-
-        # --- 1. Only Rank 0 determines the path to load ---
-        checkpoint_path_container = [None]
-        if self._rank == 0:
-            checkpoint_dir = self.config.trainer.default_local_dir
-            resume_from_path = self.config.trainer.resume_from_path
-
-            path_to_load = None
-            if self.config.trainer.resume_mode == "auto":
-                # This now reads from an atomically-written tracker file.
-                latest_path = find_latest_ckpt_path(checkpoint_dir)
-                if latest_path:
-                    logger.info(f"Rank 0: Auto-found latest checkpoint at {latest_path}")
-                    path_to_load = latest_path
-            elif self.config.trainer.resume_mode == "resume_path" and resume_from_path:
-                logger.info(f"Rank 0: Attempting to load from specified path: {resume_from_path}")
-                path_to_load = resume_from_path
-
-            if path_to_load and os.path.exists(path_to_load):
-                checkpoint_path_container[0] = path_to_load
-            else:
-                logger.warning(
-                    f"Rank 0: Checkpoint path not found or invalid: '{path_to_load}'. Starting from scratch."
-                )
-
-        # --- 2. Rank 0 broadcasts the decision to all other ranks ---
-        # This is the crucial step for ensuring consistency.
-        dist.broadcast_object_list(checkpoint_path_container, src=0)
-        global_step_folder = checkpoint_path_container[0]
-
-        # --- 3. All ranks act on the broadcasted decision ---
-        if global_step_folder is None:
-            if self._rank == 0:
-                logger.info("No valid checkpoint to load. Training will start from step 0.")
-            self.global_steps = 0
-            dist.barrier(self._gather_group)
-            return
-
-        try:
-            self.global_steps = int(os.path.basename(global_step_folder).split("global_step_")[-1])
-            logger.info(f"Rank {self._rank}: Resuming from checkpoint. Setting global_steps to {self.global_steps}.")
-        except (ValueError, IndexError) as e:
-            raise ValueError(f"Could not parse global step from checkpoint path: {global_step_folder}") from e
-
-        # Load sharded model states for all agents.
-        loaded_worker_keys = set()
-        for node in self.taskgraph.nodes.values():
-            if node.node_type == NodeType.MODEL_TRAIN and node.node_role in [NodeRole.ACTOR, NodeRole.CRITIC]:
-                node_worker_key = generate_node_worker_key(node)
-                if node_worker_key in loaded_worker_keys:
-                    continue
-
-                worker = self.workers[node_worker_key]
-
-                # Construct the agent-specific subdirectory name to load from.
-                sub_dir_name = f"{node.node_role.name.lower()}_agent_{node.agent_group}"
-                checkpoint_path = os.path.join(global_step_folder, sub_dir_name)
-
-                if os.path.exists(checkpoint_path):
-                    worker.load_checkpoint(
-                        local_path=checkpoint_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
-                    )
-                    loaded_worker_keys.add(node_worker_key)
-                else:
-                    logger.warning(
-                        f"Rank {self._rank}: Checkpoint for agent {node.agent_group}'s {node.node_role.name} not found "
-                        f"at {checkpoint_path}. Weights will be from initialization."
-                        f"If has multi-agent, will share the same checkpoint in agents"
-                    )
-
-        # Load dataloader state. All ranks in a DP group load from the same file.
-        _, dp_rank, _, _, _, _ = self._get_node_dp_info(self.first_rollout_node)
-        dataloader_path = os.path.join(global_step_folder, f"data_dp_rank_{dp_rank}.pt")
-        if os.path.exists(dataloader_path):
-            dataloader_state = torch.load(dataloader_path, map_location="cpu")
-            self.dataloader.load_state_dict(dataloader_state)
-        else:
-            logger.warning(
-                f"Rank {self._rank} (DP_Rank {dp_rank}): Dataloader checkpoint not found at {dataloader_path}. Sampler "
-                f"state will not be restored, which may lead to data inconsistency."
-            )
-
-        # Barrier to ensure all ranks are synchronized after loading.
-        dist.barrier(self._gather_group)
-        logger.info(f"Rank {self._rank}: Finished loading all checkpoint components.")
 
     def put_data_to_buffers(
         self, key: str, 
