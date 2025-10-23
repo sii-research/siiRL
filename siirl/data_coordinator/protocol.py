@@ -1101,16 +1101,12 @@ class DataProtoFuture:
         return output
 
 
-def all_gather_data_proto(data: DataProto, process_group):
+def all_gather_data_proto(data: TensorDict, process_group):
     # Note that this is an inplace operator just like torch.distributed.all_gather
     group_size = torch.distributed.get_world_size(group=process_group)
     print(f"all gather dataproto process_group size:{group_size}")
-    assert isinstance(data, DataProto)
-    prev_device = data.batch.device
-    data.batch = data.batch.to(get_device_id())
-    data.batch = allgather_dict_tensors(data.batch.contiguous(), size=group_size, group=process_group, dim=0)
-    data.batch = data.batch.to(prev_device)
-    # all gather non_tensor_batch
-    all_non_tensor_batch = [None for _ in range(group_size)]
-    torch.distributed.all_gather_object(all_non_tensor_batch, data.non_tensor_batch, group=process_group)
-    data.non_tensor_batch = {k: np.concatenate([d[k] for d in all_non_tensor_batch]) for k in data.non_tensor_batch}
+    assert isinstance(data, TensorDict)
+    prev_device = data.device
+    data = data.to(get_device_id())
+    data = allgather_dict_tensors(data.contiguous(), size=group_size, group=process_group, dim=0)
+    data = data.to(prev_device)

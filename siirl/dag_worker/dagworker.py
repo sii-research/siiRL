@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import pickle
 import os
 import uuid
 import ray
@@ -37,7 +37,12 @@ from siirl.execution.dag.node import NodeRole, NodeType, Node
 from siirl.execution.scheduler.reward import compute_reward, create_reward_manager
 from siirl.execution.scheduler.process_group_manager import ProcessGroupManager
 from siirl.execution.scheduler.enums import AdvantageEstimator
-from siirl.data_coordinator.sample import Sample, SampleInfo, DataProto2Sample, Sample2DataProto
+
+from siirl.data_coordinator import preprocess_dataloader, Samples2Dict, Dict2Samples, SampleManager, MetaInfo, SampleInfo
+from tensordict import TensorDict
+from tensordict.tensorclass import NonTensorData
+from siirl.data_coordinator import DataProto
+
 from siirl.data_coordinator.dataloader import DataLoaderNode
 from siirl.data_coordinator.protocol import DataProto
 from siirl.dag_worker.data_structures import NodeOutput, ValidationPayload, ValidationResult
@@ -279,16 +284,8 @@ class DAGWorker(Worker):
         with timer(self.enable_perf, "step", timing_raw):
             # --- 1. Data Loading ---
             with timer(self.enable_perf, "data_loading", timing_raw):
-                # Data loader now returns a dictionary that can be converted to Samples
-                # For now, we assume it returns a dict that can be processed.
-                # The concept of a monolithic DataProto batch is removed.
-                batch_dict = self.dataloader.run(epoch=epoch, is_validation_step=False)
-                # Let's assume the entry node receives this dict.
-                # In the new architecture, individual nodes will handle Samples.
-                # For now, we'll pass the dict to the first node.
-                # TODO: Adapt this to the new Sample-based data flow.
-                initial_data = batch_dict
-
+                # batch = DataProto.from_single_dict(self.dataloader.run(epoch=epoch, is_validation_step=False))
+                batch = preprocess_dataloader(self.dataloader.run(epoch=epoch, is_validation_step=False), self.config.actor_rollout_ref.rollout.n)
             with timer(self.enable_perf, "get_entry_node", timing_raw):
                 node_queue = self.taskgraph.get_entry_nodes()
                 if not node_queue:
@@ -318,12 +315,8 @@ class DAGWorker(Worker):
                             if batch is None:
                                 logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
                                 return None  # Abort the entire step
-                    else:
-                        # The entry node gets its data directly from the dataloader.
-                        # We must convert the dictionary from the dataloader into a DataProto object,
-                        # which is the standard data format for nodes.
-                        batch = DataProto.from_single_dict(initial_data)
-
+                            # batch = remove_prefix_from_dataproto(batch, cur_node)
+                            logger.debug(f"current node({cur_node.node_id}) get data from databuffer batch size: {batch.size}")
                     if self.enable_perf:
                         with timer(self.enable_perf, "get_data_from_buffer_barrier", timing_raw):
                             dist.barrier(self._gather_group)
@@ -367,16 +360,16 @@ class DAGWorker(Worker):
                     # --- 5. Process Output & Pass to Children ---
                     with timer(self.enable_perf, "graph_output_handling", timing_raw):
                         if cur_node.node_role == NodeRole.POSTPROCESS_SAMPLING:
-                            if len(node_output.batch) == 0:
-                                logger.warning(f"Rank {self._rank}: Data after postprocess_sampling is insufficient. Caching and skipping the rest of the training step.")
+                            if node_output.batch.size(0) == 0:
+                                logger.warning(f"Rank {self._rank}: Data after postprocess_sampling is insufficient. Caching and skipping the rest of the training step. {node_output.batch}")
                                 self._cleanup_step_buffers(visited_nodes, timing_raw)
                                 return None
                             if "postprocess_status" in node_output.metrics:
                                 del node_output.metrics["postprocess_status"]
 
                         if self._rank == 0 and node_output.metrics:
-                            if self._multi_agent:
-                                node_output.metrics = add_prefix_to_metrics(node_output.metrics, cur_node)
+                            # if self._multi_agent:
+                            #     node_output.metrics = add_prefix_to_metrics(node_output.metrics, cur_node)
                             ordered_metrics.extend(sorted(node_output.metrics.items()))
                         if next_nodes := self.taskgraph.get_downstream_nodes(cur_node.node_id):
                             # Currently supports single downstream node, can be extended to a loop.
@@ -431,33 +424,22 @@ class DAGWorker(Worker):
                 node.executable = executable_func
 
     @DistProfiler.annotate(role="generate")
-    def generate_sync_mode(self, worker_group_index: int, batch: DataProto, **kwargs) -> NodeOutput:
+    def generate_sync_mode(self, worker_group_index: int, batch: TensorDict, **kwargs) -> NodeOutput:
         """Sync mode"""
-        gen_batch:DataProto = prepare_generation_batch(batch)
-        if self.config.actor_rollout_ref.rollout.name == 'sglang':
-            gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-        gen_output = self.agent_group_worker[worker_group_index][NodeRole.ROLLOUT].generate_sequences(gen_batch)
-        metrics = gen_output.meta_info.get("metrics", {})
-        gen_output.meta_info = {}
-        batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))])
-        batch = batch.repeat(self.config.actor_rollout_ref.rollout.n, interleave=True).union(gen_output)
-        if "response_mask" not in batch.batch:
-            batch.batch["response_mask"] = compute_response_mask(batch)
-        return NodeOutput(batch=batch, metrics=metrics)
+        gen_output = self.agent_group_worker[worker_group_index][NodeRole.ROLLOUT].generate_sequences(batch)
+        if "response_mask" not in batch:
+            gen_output["response_mask"] = compute_response_mask(gen_output)
+        return NodeOutput(batch=gen_output, metrics=gen_output.pop("metrics", {})[0].data)
 
     @DistProfiler.annotate(role="generate")
     def generate_async_mode(self, worker_group_index: int, batch: DataProto, **kwargs) -> NodeOutput:
         """Async mode"""
         if self._async_rollout_manager is not None:
-            gen_batch = prepare_generation_batch(batch)
             loop = asyncio.get_event_loop()
-            gen_output = loop.run_until_complete(self._async_rollout_manager.generate_sequences(gen_batch))
-            metrics = gen_output.meta_info.get("metrics", {})
-            gen_output.meta_info = {}
-            batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))])
-            batch = batch.repeat(self.config.actor_rollout_ref.rollout.n, interleave=True).union(gen_output)
-            if "response_mask" not in batch.batch:
-                batch.batch["response_mask"] = compute_response_mask(batch)
+            gen_output = loop.run_until_complete(self._async_rollout_manager.generate_sequences(batch))
+            metrics = gen_output["metrics"]
+            if "response_mask" not in batch:
+                batch["response_mask"] = compute_response_mask(batch)
             return NodeOutput(batch=batch, metrics=metrics)
         return NodeOutput(batch=batch, metrics={})
 
@@ -480,7 +462,7 @@ class DAGWorker(Worker):
         return NodeOutput(batch=batch, metrics={})
 
     @DistProfiler.annotate(role="generate")
-    def generate(self, worker_group_index: int, batch: DataProto, **kwargs) -> NodeOutput:
+    def generate(self, worker_group_index: int, batch: List[SampleManager], **kwargs) -> NodeOutput:
         """Generates sequences for a training batch using the rollout model."""
         if self._multi_agent is False:
             if self.rollout_mode == 'sync':
@@ -491,60 +473,57 @@ class DAGWorker(Worker):
             return self.generate_multi_agent_mode(worker_group_index, batch, **kwargs)
                     
     @DistProfiler.annotate(role="compute_reward")
-    def compute_reward(self, batch: DataProto, tp_size: int, **kwargs) -> NodeOutput:
+    def compute_reward(self, batch: TensorDict, tp_size: int, **kwargs) -> NodeOutput:
         """Calculates rewards for a batch of generated sequences."""
-        if "token_level_rewards" in batch.batch:
+        if "token_level_rewards" in batch and batch["token_level_rewards"].numel() > 0:
             return NodeOutput(batch=batch, metrics={})
-        batch.meta_info["global_token_num"] = (torch.sum(batch.batch["attention_mask"], dim=-1) // tp_size).tolist()
+        batch["global_token_num"] = NonTensorData((torch.sum(batch["attention_mask"], dim=-1) // tp_size).tolist())
+
         reward_tensor, extra_infos = compute_reward(batch, self.reward_fn)
-        batch.batch["token_level_scores"] = reward_tensor
+        batch["token_level_scores"] = reward_tensor
 
         if extra_infos:
-            batch.non_tensor_batch.update({k: np.array(v) for k, v in extra_infos.items()})
+            batch.update({k: np.array(v) for k, v in extra_infos.items()}, inplace=True)
 
         metrics = {}
         if self.config.algorithm.use_kl_in_reward:
             batch, kl_metrics = apply_kl_penalty(batch, self.kl_ctrl_in_reward, self.config.algorithm.kl_penalty)
             metrics.update(kl_metrics)
         else:
-            batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+            batch["token_level_rewards"] = batch["token_level_scores"]
         return NodeOutput(batch=batch, metrics=metrics)
 
     @DistProfiler.annotate(role="compute_old_log_prob")
-    def compute_old_log_prob(self, batch: DataProto, worker_group_index: int, **kwargs) -> NodeOutput:
+    def compute_old_log_prob(self, batch: TensorDict, worker_group_index: int, **kwargs) -> NodeOutput:
         """Computes log probabilities from the actor model before the policy update."""
-        if "global_token_num" not in batch.meta_info:
+        meta_info = MetaInfo()
+        if not meta_info.global_token_num:
             # in multi-agent, agentA may don't have reward node
             # insert some info needed
-            batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+            meta_info.global_token_num = torch.sum(batch["attention_mask"], dim=-1).tolist()
         processed_data = self.agent_group_worker[worker_group_index][NodeRole.ACTOR].compute_log_prob(batch)
         process_group = self._get_node_process_group(self._get_node(NodeRole.ACTOR, worker_group_index))
 
-        local_metrics = processed_data.meta_info.get("metrics", {})
-        if "entropys" in processed_data.batch:
-            entropy = agg_loss(processed_data.batch["entropys"], processed_data.batch["response_mask"].to("cpu"), self.config.actor_rollout_ref.actor.loss_agg_mode)
+        local_metrics = processed_data["metrics"]  if "metrics" in processed_data else {}
+        if "entropys" in processed_data:
+            entropy = agg_loss(processed_data["entropys"], processed_data["response_mask"].to("cpu"), self.config.actor_rollout_ref.actor.loss_agg_mode)
             local_metrics["actor/entropy_loss"] = entropy.item()
         metrics = self._reduce_and_broadcast_metrics(local_metrics, process_group)
 
-        processed_data.meta_info.pop("metrics", None)
-        processed_data.batch.pop("entropys", None)
+        processed_data.pop("metrics", None)
+        processed_data.pop("entropys", None)
 
-        if "rollout_log_probs" in processed_data.batch and self._rank == 0:
-            rollout_probs, actor_probs = torch.exp(processed_data.batch["rollout_log_probs"]), torch.exp(processed_data.batch["old_log_probs"])
-            rollout_probs_diff = torch.masked_select(torch.abs(rollout_probs.cpu() - actor_probs), processed_data.batch["response_mask"].bool().cpu())
-            if rollout_probs_diff.numel() > 0:
-                metrics.update({"training/rollout_probs_diff_max": torch.max(rollout_probs_diff).item(), "training/rollout_probs_diff_mean": torch.mean(rollout_probs_diff).item(), "training/rollout_probs_diff_std": torch.std(rollout_probs_diff).item()})
         return NodeOutput(batch=processed_data, metrics=metrics)
 
     @DistProfiler.annotate(role="compute_ref_log_prob")
-    def compute_ref_log_prob(self, batch: DataProto, worker_group_index: int, **kwargs) -> NodeOutput:
+    def compute_ref_log_prob(self, batch: TensorDict, worker_group_index: int, **kwargs) -> NodeOutput:
         """Computes log probabilities from the frozen reference model."""
         processed_data = self.agent_group_worker[worker_group_index][NodeRole.REFERENCE].compute_ref_log_prob(batch)
-        metrics = processed_data.meta_info.get("metrics", {})
+        metrics = processed_data["metrics"] if "metrics" in processed_data else {}
         return NodeOutput(batch=processed_data, metrics=metrics)
 
     @DistProfiler.annotate(role="compute_value")
-    def compute_value(self, batch: DataProto, worker_group_index: int, **kwargs) -> NodeOutput:
+    def compute_value(self, batch: TensorDict, worker_group_index: int, **kwargs) -> NodeOutput:
         """Computes value estimates from the critic model."""
         processed_data = self.agent_group_worker[worker_group_index][NodeRole.CRITIC].compute_values(batch)
         return NodeOutput(batch=processed_data)
@@ -604,24 +583,25 @@ class DAGWorker(Worker):
         )
 
     @DistProfiler.annotate(role="train_critic")
-    def train_critic(self, batch: DataProto, worker_group_index: int, **kwargs) -> NodeOutput:
+    def train_critic(self, batch: TensorDict, worker_group_index: int, **kwargs) -> NodeOutput:
         """Performs a single training step on the critic model."""
         processed_data = self.agent_group_worker[worker_group_index][NodeRole.CRITIC].update_critic(batch)
         process_group = self._get_node_process_group(self._get_node(NodeRole.CRITIC, worker_group_index))
-        metrics = self._reduce_and_broadcast_metrics(processed_data.meta_info.get("metrics"), process_group)
+        metrics = self._reduce_and_broadcast_metrics(processed_data["metrics"], process_group)
         return NodeOutput(batch=processed_data, metrics=metrics)
 
     @DistProfiler.annotate(role="train_actor")
-    def train_actor(self, batch: DataProto, worker_group_index: int, **kwargs) -> NodeOutput:
+    def train_actor(self, batch: TensorDict, worker_group_index: int, **kwargs) -> NodeOutput:
         """Performs a single training step on the actor (policy) model."""
         if self.config.trainer.critic_warmup > self.global_steps:
             return NodeOutput(batch=batch)  # Skip actor update during critic warmup
 
-        batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+        batch["multi_turn"] = NonTensorData(self.config.actor_rollout_ref.rollout.multi_turn.enable)
         processed_data = self.agent_group_worker[worker_group_index][NodeRole.ACTOR].update_actor(batch)
         process_group = self._get_node_process_group(self._get_node(NodeRole.ACTOR, worker_group_index))
-        metrics = self._reduce_and_broadcast_metrics(processed_data.meta_info.get("metrics"), process_group)
+        metrics = self._reduce_and_broadcast_metrics(processed_data["metrics"], process_group)
         return NodeOutput(batch=processed_data, metrics=metrics)
+    
 
 # ==========================================================================================
 # Module 3: Worker and Environment Initialization
@@ -1056,8 +1036,8 @@ class DAGWorker(Worker):
                 logger.debug(f"Processing validation batch {i + 1}/{self.dataloader.num_val_batches}")
 
             with timer(self.enable_perf, "prep_and_generate", self.val_timedict):
-                batch_proto = self._prepare_validation_batch()
-                generated_proto = self._generate_for_validation(batch_proto)
+                batch = self._prepare_validation_batch()
+                generated_proto = self._generate_for_validation(batch)
                 dist.barrier(self._gather_group)  
 
             with timer(self.enable_perf, "score_and_package", self.val_timedict):
@@ -1087,66 +1067,59 @@ class DAGWorker(Worker):
         
         return final_metrics if self._rank == 0 else {}
 
-    def _prepare_validation_batch(self) -> DataProto:
+    def _prepare_validation_batch(self) -> TensorDict:
         """Fetches and prepares a single batch for validation."""
         test_batch = self.dataloader.run(is_validation_step=True)
-        test_batch_proto = DataProto.from_single_dict(test_batch)
+        test_batch = preprocess_dataloader(test_batch, 1)
         n_samples = self.config.actor_rollout_ref.rollout.val_kwargs.n
-        return test_batch_proto.repeat(n_samples, interleave=True)
+        return test_batch.repeat_interleave(n_samples)
 
-    def _generate_for_validation(self, batch_proto: DataProto) -> DataProto:
+    def _generate_for_validation(self, batch: TensorDict) -> TensorDict:
         """Generates sequences using the rollout worker for a validation batch."""
         rollout_worker = self.agent_group_worker[0][NodeRole.ROLLOUT]
         val_kwargs = self.config.actor_rollout_ref.rollout.val_kwargs
 
         prompt_texts = self.validate_tokenizer.batch_decode(
-            batch_proto.batch["input_ids"], skip_special_tokens=True
+            batch["input_ids"], skip_special_tokens=True
         )
-        batch_proto.non_tensor_batch["prompt_texts"] = prompt_texts
-
-        gen_batch = prepare_generation_batch(batch_proto)
-
-        if self.config.actor_rollout_ref.rollout.agent.rewards_with_env and "reward_model" in batch_proto.non_tensor_batch:
-            gen_batch.non_tensor_batch["reward_model"] = batch_proto.non_tensor_batch["reward_model"] 
-        gen_batch.meta_info = {
+        batch["prompt_texts"] = prompt_texts
+        
+        batch["meta_info"] = NonTensorData({
             "eos_token_id": self.validate_tokenizer.eos_token_id,
             "pad_token_id": self.validate_tokenizer.pad_token_id,
             "recompute_log_prob": False,
             "do_sample": val_kwargs.do_sample,
             "validate": True,
-        }
-        logger.info(f"_generate_for_validation gen batch meta_info: {gen_batch.meta_info}")
+        })
+        logger.info(f"_generate_for_validation gen batch meta_info: {batch['meta_info']}")
         
         output = None
         if self._multi_agent is False:
             if self.rollout_mode == 'sync':
-                output = rollout_worker.generate_sequences(gen_batch)
+                output = rollout_worker.generate_sequences(batch)
             elif self._async_rollout_manager:
                 loop = asyncio.get_event_loop()
-                output = loop.run_until_complete(self._async_rollout_manager.generate_sequences(gen_batch))
+                output = loop.run_until_complete(self._async_rollout_manager.generate_sequences(batch))
         else:
-            output = self.multi_agent_loop.generate_sequence(gen_batch)
-            if output:
-                return output
-            return batch_proto
-        if output:
-            batch_proto.union(output)
-        return batch_proto
+            output = self.multi_agent_loop.generate_sequence(batch)
+        if output is not None:
+            return output
+        return batch
 
-    def _score_and_package_results(self, generated_proto: DataProto) -> List[ValidationResult]:
+    def _score_and_package_results(self, generated_proto: TensorDict) -> List[ValidationResult]:
         """Scores generated sequences and packages them into ValidationResult objects."""
         if self.rollout_mode == 'async' and self._async_rollout_manager is None:
             return []
-        if self._multi_agent and 'responses' not in generated_proto.batch:
+        if self._multi_agent and 'responses' not in generated_proto:
             return []
-        if "token_level_rewards" in generated_proto.batch:
-            reward_result = {"reward_tensor": generated_proto.batch["token_level_rewards"],
+        if "token_level_rewards" in generated_proto:
+            reward_result = {"reward_tensor": generated_proto["token_level_rewards"],
                              "reward_extra_info": {}}
         else:    
             reward_result = self.val_reward_fn(generated_proto, return_dict=True)
         scores = reward_result["reward_tensor"].sum(-1).cpu()
 
-        input_texts = generated_proto.non_tensor_batch.get("prompt_texts")
+        input_texts = generated_proto["prompt_texts"] if "prompt_texts" in generated_proto else None
         if input_texts is None:
             logger.error(
                 "FATAL: `prompt_texts` not found in `non_tensor_batch`. "
@@ -1155,12 +1128,12 @@ class DAGWorker(Worker):
             )
             # Fallback to prevent a crash, but the output is known to be wrong.
             input_texts = self.validate_tokenizer.batch_decode(
-                generated_proto.batch["input_ids"], skip_special_tokens=True
+                generated_proto["input_ids"], skip_special_tokens=True
             )
 
-        output_texts = self.validate_tokenizer.batch_decode(generated_proto.batch["responses"], skip_special_tokens=True)
-        data_sources = generated_proto.non_tensor_batch.get("data_source", ["unknown"] * len(scores))
-        extra_info = generated_proto.non_tensor_batch.get("extra_info", [None] * len(scores))
+        output_texts = self.validate_tokenizer.batch_decode(generated_proto["responses"], skip_special_tokens=True)
+        data_sources = generated_proto["data_source"] if "data_source" in generated_proto else ["unknown"] * len(scores)
+        extra_info = generated_proto["extra_info"] if "data_source" in generated_proto else [None] * len(scores)
 
         packaged_results = []
         for i in range(len(scores)):
@@ -1250,7 +1223,7 @@ class DAGWorker(Worker):
 
     def put_data_to_buffers(
         self, key: str, 
-        data: DataProto,
+        data: TensorDict,
         timing_raw: Dict[str, float]
     ):
         """
@@ -1260,17 +1233,17 @@ class DAGWorker(Worker):
         try:
             logger.debug(f"Rank {self._rank}: Starting put_data_to_buffers for key '{key}'")
 
-            samples = DataProto2Sample(data)
+            samples = Dict2Samples(data)
             if not samples:
                 logger.warning(f"Rank {self._rank}: DataProto for key '{key}' converted to 0 samples. Nothing to put.")
                 return
-            
             loop = asyncio.get_event_loop()
             put_futures = []
             
             with timer(self.enable_perf, f"put_samples_to_coordinator_{key}", timing_raw):
                 for sample in samples:
-                    info = SampleInfo(
+                    # may need modify
+                    sample_info = SampleInfo(
                         sum_tokens=getattr(sample, 'sum_tokens', len(sample.input_ids)),
                         prompt_length=getattr(sample, 'prompt_length', 0),
                         response_length=getattr(sample, 'response_length', 0),
@@ -1278,7 +1251,7 @@ class DAGWorker(Worker):
                         dict_info={'key': key} # Tag the sample with the key
                     )
                     sample_ref = ray.put(sample)
-                    put_futures.append(self.data_coordinator.put.remote(info, sample_ref))
+                    put_futures.append(self.data_coordinator.put.remote(sample_info, sample_ref))
                 
                 if put_futures:
                     loop.run_until_complete(asyncio.gather(*put_futures))
@@ -1324,9 +1297,9 @@ class DAGWorker(Worker):
 
             with timer(self.enable_perf, f"collate_samples_{key}", timing_raw):
                 # Collate the list of Sample objects back into a single DataProto
-                data_proto = Sample2DataProto(samples)
+                tensordict = Samples2Dict(samples)
 
-            return data_proto
+            return tensordict
 
         except Exception as e:
             logger.error(f"Rank {self._rank}: Unexpected error in get_data_from_buffers for key '{key}': {e}", exc_info=True)
@@ -1449,7 +1422,7 @@ class DAGWorker(Worker):
         # (2) For PP: only PP rank 0 contributes to avoid double counting within PP groups
         # The aggregation will average across DP groups and multiply by world size to get global estimate
         if pp_rank_in_group == 0:
-            local_token_sum = sum(batch.meta_info.get("global_token_num", [0]))
+            local_token_sum = sum(batch["global_token_num"])
             metrics_to_aggregate["perf/total_num_tokens/mean"] = float(local_token_sum)
 
         # --- 3. Perform the aggregated, distributed reduction ---
@@ -1513,7 +1486,7 @@ class DAGWorker(Worker):
         # --- 5. Add timing and other rank-0-only metrics ---
         # Only rank 0 needs to compute these for logging.
         if self._rank == 0:
-            batch.meta_info["global_token_num"] = [final_metrics.get("perf/total_num_tokens", 0)]
+            batch["global_token_num"] = NonTensorData([final_metrics.get("perf/total_num_tokens", 0)])
             final_metrics.update(compute_throughout_metrics(batch, timing_raw, dist.get_world_size()))
             final_metrics["perf/process_cpu_mem_used_gb"] = psutil.Process(os.getpid()).memory_info().rss / (1024**3)
             timing_metrics = compute_timing_metrics(batch, timing_raw)

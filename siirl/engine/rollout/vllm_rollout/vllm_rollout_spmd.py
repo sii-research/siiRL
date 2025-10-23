@@ -62,13 +62,14 @@ from vllm.lora.request import LoRARequest
 from vllm.worker.worker_base import WorkerWrapperBase
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 
-from siirl import DataProto
+from siirl.data_coordinator import SampleManager, Sample, MetaInfo
 from siirl.utils.debug import GPUMemoryLogger
 from siirl.utils.model_utils.torch_functional import get_response_mask, pad_2d_list_to_length
 from siirl.global_config.params import RolloutArguments
 from siirl.engine.rollout.base import BaseRollout
 from siirl.utils.extras.device import is_cuda_available, device_synchronize
-
+from siirl.utils.extras.device import get_device_id
+from tensordict.tensorclass import NonTensorData
 # TODO
 # 1. support pp in vllm
 # 2. passing tokenizer is not necessary? no encoding/decoding is happending here
@@ -212,7 +213,7 @@ class vLLMRollout(BaseRollout):
             if hasattr(SamplingParams(), str(k)) and k != "seed":
                 kwargs[k] = dictConfig.get(k)
 
-        # kwargs["n"] = 1  # already repeat in ray_trainer
+        kwargs["n"] = 1  # already repeat in ray_trainer
 
         logger.info(f"kwargs: {kwargs}")
         self.sampling_params = SamplingParams(**kwargs)
@@ -258,30 +259,24 @@ class vLLMRollout(BaseRollout):
 
     @GPUMemoryLogger(role="vllm rollout spmd", logger=logger)
     @torch.no_grad()
-    def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
-        idx = prompts.batch["input_ids"]  # (bs, prompt_length)
-        # left-padded attention_mask
-        attention_mask = prompts.batch["attention_mask"]
-        position_ids = prompts.batch["position_ids"]
-
+    def generate_sequences(self, prompts: TensorDict, **kwargs) -> TensorDict:
+        idx = prompts["input_ids"]
+        # left-padded attention_mask 
+        attention_mask = prompts["attention_mask"]
+        position_ids = prompts["position_ids"]
+        raw_prompt_ids = prompts.pop("raw_prompt_ids").data
+        
         # used to construct attention_mask
-        eos_token_id = prompts.meta_info["eos_token_id"]
-
+        eos_token_id = prompts["eos_token_id"]
         batch_size = idx.size(0)
-
-        non_tensor_batch = prompts.non_tensor_batch
-        if "raw_prompt_ids" not in non_tensor_batch:
-            non_tensor_batch["raw_prompt_ids"] = np.array([_pre_process_inputs(self.pad_token_id, idx[i]) for i in range(batch_size)], dtype=object)
-
-        if batch_size != len(non_tensor_batch["raw_prompt_ids"]):
+        if batch_size != len(raw_prompt_ids):
             raise RuntimeError("vllm sharding manager is not work properly.")
-
-        if "multi_modal_data" in non_tensor_batch:
+        if "multi_modal_data" in prompts:
             vllm_inputs = []
-            for raw_prompt_ids, multi_modal_data in zip(non_tensor_batch.pop("raw_prompt_ids"), non_tensor_batch.pop("multi_modal_data")):
-                vllm_inputs.append({"prompt_token_ids": raw_prompt_ids, "multi_modal_data": multi_modal_data})
+            for raw_prompt_id, multi_modal_data in zip(raw_prompt_ids, prompts.pop("multi_modal_data").data):
+                vllm_inputs.append({"prompt_token_ids": raw_prompt_id, "multi_modal_data": multi_modal_data})
         else:
-            vllm_inputs = [{"prompt_token_ids": raw_prompt_ids} for raw_prompt_ids in non_tensor_batch.pop("raw_prompt_ids")]
+            vllm_inputs = [{"prompt_token_ids": raw_prompt_id} for raw_prompt_id in raw_prompt_ids]
 
         # ensure the type of `prompt_token_ids` passed to vllm is list[int]
         # https://github.com/volcengine/verl/pull/772
@@ -299,8 +294,9 @@ class vLLMRollout(BaseRollout):
             device_synchronize()
             start_time = time.time()
 
-        do_sample = prompts.meta_info.get("do_sample", True)
-        is_validate = prompts.meta_info.get("validate", False)
+        
+        do_sample = prompts.get("do_sample", True)
+        is_validate = prompts.get("validate", False)
 
         if not do_sample:
             kwargs = {
@@ -377,13 +373,12 @@ class vLLMRollout(BaseRollout):
 
             # TODO(sgm): disable logprob when recompute_log_prob is enable
             # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
-
-            meta_info = {"total_input_tokens": 0, "total_output_tokens": 0}
+            total_input_tokens = 0
+            total_output_tokens = 0
             for input_data in vllm_inputs:
-                meta_info["total_input_tokens"] += len(input_data["prompt_token_ids"])
+                total_input_tokens += len(input_data["prompt_token_ids"])
 
             response = []
-            rollout_log_probs = []
             for output in outputs:
                 for sample_id in range(len(output.outputs)):
                     response_ids = output.outputs[sample_id].token_ids
@@ -391,30 +386,10 @@ class vLLMRollout(BaseRollout):
                     curr_log_prob = []
                     for i, logprob in enumerate(output.outputs[sample_id].logprobs):
                         curr_log_prob.append(logprob[response_ids[i]].logprob)
-                    rollout_log_probs.append(curr_log_prob)
-                meta_info["total_output_tokens"] += len(output.outputs[0].token_ids)
+                total_output_tokens += len(output.outputs[0].token_ids)
+            prompts["total_input_tokens"] = NonTensorData(total_input_tokens, batch_size=None)
+            prompts["total_output_tokens"] = NonTensorData(total_output_tokens, batch_size=None)
             response = pad_2d_list_to_length(response, self.pad_token_id, max_length=self.config.response_length).to(idx.device)
-            rollout_log_probs = pad_2d_list_to_length(rollout_log_probs, -1, max_length=self.config.response_length).to(idx.device)
-            rollout_log_probs = rollout_log_probs.to(torch.float32)
-
-            if self.sampling_params.n > 1 and do_sample:
-                idx = _repeat_interleave(idx, self.sampling_params.n)
-                attention_mask = _repeat_interleave(attention_mask, self.sampling_params.n)
-                position_ids = _repeat_interleave(position_ids, self.sampling_params.n)
-                batch_size = batch_size * self.sampling_params.n
-                if "multi_modal_inputs" in non_tensor_batch.keys():
-                    non_tensor_batch["multi_modal_inputs"] = _repeat_interleave(non_tensor_batch["multi_modal_inputs"], self.sampling_params.n)
-                # NOTE(linjunrong): for multi-turn https://github.com/volcengine/verl/pull/1037
-                if "tools_kwargs" in non_tensor_batch.keys():
-                    non_tensor_batch["tools_kwargs"] = _repeat_interleave(non_tensor_batch["tools_kwargs"], self.sampling_params.n)
-                if "interaction_kwargs" in non_tensor_batch.keys():
-                    non_tensor_batch["interaction_kwargs"] = _repeat_interleave(
-                        non_tensor_batch["interaction_kwargs"], self.sampling_params.n
-                    )
-                if "raw_prompt" in non_tensor_batch.keys():
-                    non_tensor_batch["raw_prompt"] = _repeat_interleave(
-                        non_tensor_batch["raw_prompt"], self.sampling_params.n
-                    )
 
             seq = torch.cat([idx, response], dim=-1)
 
@@ -432,21 +407,15 @@ class vLLMRollout(BaseRollout):
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
         response_attention_mask = get_response_mask(response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype)
         attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
-
+        # left-padded attention_mask 
         # all the tp ranks should contain the same data here. data in all ranks are valid
-        batch = TensorDict(
-            {
-                "prompts": idx,
-                "responses": response,
-                "input_ids": seq,  # here input_ids become the whole sentences
-                'rollout_log_probs': rollout_log_probs,  # we will recompute old log prob with actor
-                "attention_mask": attention_mask,
-                "position_ids": position_ids,
-            },
-            batch_size=batch_size,
-        )
+        prompts["prompts"] = idx
+        prompts["attention_mask"] = attention_mask
+        prompts["position_ids"] = position_ids
+        prompts["responses"] = response
+        prompts["input_ids"] = seq  # here input_ids become the whole sentences
+        return prompts
 
-        return DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info=meta_info)
 
 
 

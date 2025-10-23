@@ -412,7 +412,6 @@ class RolloutArguments:
     multi_turn: MultiTurnArguments = field(default_factory=MultiTurnArguments)
     micro_batch_size: Optional[int] = field(default=None, metadata={"help": "Inference micro-batch size"})
     engine_kwargs: EngineArguments = field(default_factory=EngineArguments)
-    calculate_log_probs: bool = field(default=False, metadata={"help": "support logging rollout prob for debugging purpose"})
     agent: AgentArguments = field(default_factory=AgentArguments)
     multi_stage_wake_up: bool = field(default=False, metadata={"help": "# Whether to wake up inference engine in multi-stage. (Wake up model weights first, then resume kv cache)"})
 

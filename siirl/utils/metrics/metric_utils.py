@@ -29,6 +29,7 @@ import os
 from pathlib import Path
 from datetime import datetime
 from siirl import DataProto
+from tensordict import TensorDict
 import json
 
 
@@ -47,14 +48,14 @@ def _compute_response_info(batch: DataProto) -> Dict[str, Any]:
             - prompt_length: Tensor of prompt lengths for each item in the batch
             - response_length: Tensor of response lengths for each item in the batch
     """
-    response_length = batch.batch["responses"].shape[-1]
+    response_length = batch["responses"].shape[-1]
 
-    prompt_mask = batch.batch["attention_mask"][:, :-response_length]
+    prompt_mask = batch["attention_mask"][:, :-response_length]
 
-    if "response_mask" not in batch.batch:
-        response_mask = batch.batch["attention_mask"][:, -response_length:]
+    if "response_mask" not in batch:
+        response_mask = batch["attention_mask"][:, -response_length:]
     else:
-        response_mask = batch.batch["response_mask"]
+        response_mask = batch["response_mask"]
 
     prompt_length = prompt_mask.sum(-1).float()
     response_length = response_mask.sum(-1).float()  # (batch_size,)
@@ -66,7 +67,7 @@ def _compute_response_info(batch: DataProto) -> Dict[str, Any]:
     )
 
 
-def compute_timing_metrics(batch: DataProto, timing_raw: Dict[str, float]) -> Dict[str, Any]:
+def compute_timing_metrics(batch: TensorDict, timing_raw: Dict[str, float]) -> Dict[str, Any]:
     """
     Computes timing metrics for different processing stages in PPO training.
 
@@ -75,7 +76,7 @@ def compute_timing_metrics(batch: DataProto, timing_raw: Dict[str, float]) -> Di
     value computation, advantage computation, and model updates.
 
     Args:
-        batch: A DataProto object containing batch data with responses and attention masks.
+        batch: A Tensordict object containing batch data with responses and attention masks.
         timing_raw: A dictionary mapping stage names to their execution times in seconds.
 
     Returns:
@@ -105,7 +106,7 @@ def compute_timing_metrics(batch: DataProto, timing_raw: Dict[str, float]) -> Di
     }
 
 
-def compute_throughout_metrics(batch: DataProto, timing_raw: Dict[str, float], n_gpus: int) -> Dict[str, Any]:
+def compute_throughout_metrics(batch: TensorDict, timing_raw: Dict[str, float], n_gpus: int) -> Dict[str, Any]:
     """
     Computes throughput metrics for PPO training.
 
@@ -129,7 +130,7 @@ def compute_throughout_metrics(batch: DataProto, timing_raw: Dict[str, float], n
         The throughput is calculated as total_tokens / (time * n_gpus) to normalize
         across different GPU counts.
     """
-    total_num_tokens = sum(batch.meta_info["global_token_num"])
+    total_num_tokens = sum(batch["global_token_num"])
     time = timing_raw["step"]
     # estimated_flops, promised_flops = flops_function.estimate_flops(num_tokens, time)
     # f'Actual TFLOPs/s/GPU​': estimated_flops/(n_gpus),

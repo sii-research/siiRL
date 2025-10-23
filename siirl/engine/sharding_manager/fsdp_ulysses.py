@@ -14,7 +14,7 @@
 """
 Contains a resharding manager that binds weights from FSDP zero3 to XPerfGPT
 """
-
+from tensordict import TensorDict
 from torch.distributed.device_mesh import DeviceMesh
 
 from siirl import DataProto
@@ -49,7 +49,7 @@ class FSDPUlyssesShardingManager(BaseShardingManager):
             set_ulysses_sequence_parallel_group(self.prev_sp_group)
             # TODO: check how to set seed for each model
 
-    def preprocess_data(self, data: DataProto) -> DataProto:
+    def preprocess_data(self, data: TensorDict) -> TensorDict:
         """
         AllGather data from sp region
         This is because the data is first sharded along the FSDP dimension as we utilize the DP_COMPUTE
@@ -61,7 +61,7 @@ class FSDPUlyssesShardingManager(BaseShardingManager):
             all_gather_data_proto(data=data, process_group=group)
         return data
 
-    def postprocess_data(self, data: DataProto) -> DataProto:
+    def postprocess_data(self, data: TensorDict) -> TensorDict:
         """
         Split the data to follow FSDP partition
         """

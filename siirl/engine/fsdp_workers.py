@@ -32,9 +32,12 @@ from peft import LoraConfig, TaskType, get_peft_model
 from safetensors.torch import save_file
 from torch.distributed import ProcessGroup, init_device_mesh
 from torch.distributed.device_mesh import DeviceMesh
-
+from tensordict import TensorDict
+from tensordict.tensorclass import NonTensorData
 import siirl.utils.model_utils.torch_functional as F
 from siirl import DataProto
+from siirl.data_coordinator import MetaInfo, SampleManager
+from typing import Any, Dict, List, Optional, Union, Set
 from siirl.models.loader import load_tokenizer
 from siirl.models.transformers.monkey_patch import apply_monkey_patch
 from siirl.engine.base_worker import Worker
@@ -605,7 +608,7 @@ class ActorRolloutRefWorker(Worker):
                 model=self.actor_module_fsdp, optimizer=self.actor.actor_optimizer, lr_scheduler=self.actor_lr_scheduler, processing_class=self.processor if self.processor is not None else self.tokenizer, checkpoint_contents=self.config.actor.checkpoint.contents, tokenizer=self.tokenizer
             )
 
-    def update_actor(self, data: DataProto):
+    def update_actor(self, data: TensorDict):
         # Support all hardwares
         data = data.to(get_device_id())
 
@@ -621,7 +624,7 @@ class ActorRolloutRefWorker(Worker):
             with Timer(name="update_policy", logger=None) as timer:
                 metrics = self.actor.update_policy(data=data)
             delta_time = timer.last
-            global_num_tokens = data.meta_info["global_token_num"]
+            global_num_tokens = data["global_token_num"]
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
             metrics["perf/mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops
             metrics["perf/delta_time/actor"] = delta_time
@@ -634,7 +637,7 @@ class ActorRolloutRefWorker(Worker):
             self.actor_lr_scheduler.step()
 
             # TODO: here, we should return all metrics
-            data.meta_info["metrics"] = metrics
+            data["metrics"] = NonTensorData(metrics)
             processed_data = self.ulysses_sharding_manager.postprocess_data(data=data)
             processed_data = processed_data.to("cpu")
 
@@ -647,17 +650,13 @@ class ActorRolloutRefWorker(Worker):
 
         return processed_data
 
-    def generate_sequences(self, prompts: DataProto):
+    def generate_sequences(self, prompts: TensorDict):
         # Support all hardwares
         prompts = prompts.to(get_device_id())
-
         assert self._is_rollout
-
-        meta_info = {
-            "eos_token_id": self.generation_config.eos_token_id if self.generation_config is not None else self.tokenizer.eos_token_id,
-            "pad_token_id": self.generation_config.pad_token_id if self.generation_config is not None else self.tokenizer.pad_token_id,
-        }
-        prompts.meta_info.update(meta_info)
+        prompts["eos_token_id"] = NonTensorData(self.generation_config.eos_token_id if self.generation_config is not None else self.tokenizer.eos_token_id)
+        prompts["pad_token_id"] = NonTensorData(self.generation_config.pad_token_id if self.generation_config is not None else self.tokenizer.pad_token_id)
+        
         with self.rollout_sharding_manager:
             log_gpu_memory_usage("After entering rollout sharding manager", logger=logger)
 
@@ -671,14 +670,14 @@ class ActorRolloutRefWorker(Worker):
             else:
                 with Timer(name="generate_sequences", logger=None) as timer:
                     output = self.rollout.generate_sequences(prompts=prompts)
-                total_input_tokens = output.meta_info.get("total_input_tokens", 0)
-                total_output_tokens = output.meta_info.get("total_output_tokens", 0)
+                total_input_tokens = output["total_input_tokens"] if "total_input_tokens" in output else 0
+                total_output_tokens = output["total_output_tokens"] if "total_output_tokens" in output else 0
                 delta_time = timer.last
                 estimated_flops, promised_flops = self.flops_counter.estimate_flops([total_input_tokens, total_output_tokens], delta_time)
                 metrics = {}
                 metrics["perf/mfu/rollout"] = estimated_flops / promised_flops / self.config.rollout.tensor_model_parallel_size
                 metrics["perf/delta_time/rollout"] = delta_time
-                output.meta_info.update({"metrics": metrics})
+                output["metrics"] = NonTensorData(metrics, batch_size=None)
             log_gpu_memory_usage("After rollout generation", logger=logger)
 
         output = output.to("cpu")
@@ -687,7 +686,7 @@ class ActorRolloutRefWorker(Worker):
         get_torch_device().empty_cache()
         return output
 
-    def compute_log_prob(self, data: DataProto):
+    def compute_log_prob(self, data: TensorDict):
         # when is_lora is True, we use the actor without lora applied to calculate the log_prob
         # which is mostly used for ref log_prob calculation
         assert self._is_actor
@@ -696,31 +695,31 @@ class ActorRolloutRefWorker(Worker):
 
         # Support all hardwares
         from contextlib import nullcontext
-
-        is_lora = data.meta_info.pop("is_lora", False)
+        is_lora = data.pop("is_lora", False)
         adapter_ctx = self.actor.actor_module.disable_adapter() if is_lora else nullcontext()
         data = data.to(get_device_id())
+        
         # we should always recompute old_log_probs when it is HybridEngine
-        data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
-        data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
-        data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
-        data.meta_info["temperature"] = self.config.rollout.temperature
+        data["micro_batch_size"] = NonTensorData(self.config.rollout.log_prob_micro_batch_size_per_gpu)  
+        data["max_token_len"] = NonTensorData(self.config.rollout.log_prob_max_token_len_per_gpu)
+        data["use_dynamic_bsz"] = NonTensorData(self.config.rollout.log_prob_use_dynamic_bsz)
+        data["temperature"] = NonTensorData(self.config.rollout.temperature)
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
             with Timer(name="compute_actor_log_prob", logger=None) as timer, adapter_ctx:
                 output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
             delta_time = timer.last
-            global_num_tokens = data.meta_info["global_token_num"]
+            global_num_tokens = data["global_token_num"]
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
             metrics = {
                 # actor forward
                 "perf/mfu/actor_log_prob": estimated_flops / promised_flops / 3,
                 "perf/delta_time/actor_log_prob": delta_time,
             }
-            data.batch["old_log_probs"] = output
-            data.batch["entropys"] = entropys
-            data.meta_info["metrics"] = metrics
+            data["old_log_probs"] = output
+            data["entropys"] = entropys
+            data["metrics"] = NonTensorData(metrics)
             processed_data = self.ulysses_sharding_manager.postprocess_data(data)
 
         processed_data = processed_data.to("cpu")
@@ -736,13 +735,13 @@ class ActorRolloutRefWorker(Worker):
 
         return processed_data
 
-    def compute_ref_log_prob(self, data: DataProto):
+    def compute_ref_log_prob(self, data: TensorDict):    
         if self._is_lora:
             # if _is_lora, actor without lora applied is the ref
-            data.meta_info["is_lora"] = True
+            data["is_lora"] = NonTensorData(True)
             data = self.compute_log_prob(data)
             # this old_log_probs is in fact ref_log_prob
-            data = DataProto.from_dict(tensors={"ref_log_prob": data.batch["old_log_probs"]})
+            data = TensorDict({"ref_log_prob": data["old_log_probs"]})
             return data
         assert self._is_ref
         # else:
@@ -752,21 +751,21 @@ class ActorRolloutRefWorker(Worker):
 
         metrics = {}
         micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
-        data.meta_info["micro_batch_size"] = micro_batch_size
-        data.meta_info["temperature"] = self.config.rollout.temperature
-        data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
-        data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
+        data["micro_batch_size"] = NonTensorData(micro_batch_size)
+        data["temperature"] = NonTensorData(self.config.rollout.temperature)
+        data["max_token_len"] = NonTensorData(self.config.ref.log_prob_max_token_len_per_gpu)
+        data["use_dynamic_bsz"] = NonTensorData(self.config.ref.log_prob_use_dynamic_bsz)
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
             with Timer(name="compute_log_prob", logger=None) as timer:
                 output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
             delta_time = timer.last
-            global_num_tokens = data.meta_info["global_token_num"]
+            global_num_tokens = data["global_token_num"]
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
             metrics["perf/mfu/ref"] = estimated_flops / promised_flops
             metrics["perf/delta_time/ref"] = delta_time
-            data.batch["ref_log_prob"] = output
-            data.meta_info["metrics"] = metrics
+            data["ref_log_prob"] = output
+            data["metrics"] = NonTensorData(metrics)
             processed_data = self.ulysses_sharding_manager.postprocess_data(data)
 
         processed_data = processed_data.to("cpu")
@@ -1067,21 +1066,21 @@ class CriticWorker(Worker):
             model=self.critic_module, optimizer=self.critic_optimizer, lr_scheduler=self.critic_lr_scheduler, processing_class=self.processor if self.processor is not None else self.tokenizer, checkpoint_contents=self.config.checkpoint.contents, tokenizer=self.tokenizer
         )
 
-    def compute_values(self, data: DataProto):
+    def compute_values(self, data: TensorDict):
         # Support all hardwares
         data = data.to(get_device_id())
 
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.critic_module)
         micro_batch_size = self.config.ppo_micro_batch_size_per_gpu
-        data.meta_info["micro_batch_size"] = micro_batch_size
-        data.meta_info["max_token_len"] = self.config.forward_max_token_len_per_gpu
-        data.meta_info["use_dynamic_bsz"] = self.config.use_dynamic_bsz
+        data["micro_batch_size"] = NonTensorData(micro_batch_size)
+        data["max_token_len"] = NonTensorData(self.config.forward_max_token_len_per_gpu)
+        data["use_dynamic_bsz"] = NonTensorData(self.config.use_dynamic_bsz)
         # perform forward computation
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data=data)
             values = self.critic.compute_values(data=data)
-            data.batch["values"] = values
+            data["values"] = values
             processed_data = self.ulysses_sharding_manager.postprocess_data(data=data)
 
         processed_data = processed_data.to("cpu")
@@ -1105,7 +1104,7 @@ class CriticWorker(Worker):
                 metrics = self.critic.update_critic(data=data)
             delta_time = timer.last
 
-            global_num_tokens = data.meta_info["global_token_num"]
+            global_num_tokens = data["global_token_num"]
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
             metrics["perf/mfu/critic"] = estimated_flops * self.config.ppo_epochs / promised_flops
 
@@ -1113,7 +1112,7 @@ class CriticWorker(Worker):
             lr = self.critic_lr_scheduler.get_last_lr()[0]
             metrics["critic/lr"] = lr
 
-            data.meta_info["metrics"] = metrics
+            data["metrics"] = NonTensorData(metrics)
             processed_data = self.ulysses_sharding_manager.postprocess_data(data=data)
 
         if self._is_offload_param:

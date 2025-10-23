@@ -23,7 +23,7 @@ import os
 import sys
 from functools import partial
 from typing import Any, Callable, Dict, Optional, Tuple, Union
-
+from tensordict import TensorDict
 import ray
 from loguru import logger
 
@@ -171,7 +171,7 @@ def create_reward_manager(
     )
 
 
-def compute_reward(data: DataProto, reward_fn: Callable) -> Tuple[RewardTensor, Dict[str, Any]]:
+def compute_reward(data: TensorDict, reward_fn: Callable) -> Tuple[RewardTensor, Dict[str, Any]]:
     """
     Computes the reward for a given batch of data using the provided function.
 

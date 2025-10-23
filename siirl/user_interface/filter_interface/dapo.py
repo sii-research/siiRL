@@ -16,13 +16,13 @@ from collections import defaultdict
 from typing import Any, Dict
 
 import numpy as np
-
+from tensordict import TensorDict
 from siirl.global_config.params import SiiRLArguments
 from siirl.dag_worker.data_structures import NodeOutput
 from siirl.data_coordinator import DataProto
+from siirl.data_coordinator.sample import filter_tensordict
 
-
-def dynamic_sampling(siirl_args: SiiRLArguments, batch: DataProto, node_config: Dict[str, Any], **kwargs: Any) -> NodeOutput:
+def dynamic_sampling(siirl_args: SiiRLArguments, batch: TensorDict, node_config: Dict[str, Any], **kwargs: Any) -> NodeOutput:
     """
     Performs dynamic sampling by filtering trajectory groups based on metric variance.
 
@@ -47,25 +47,25 @@ def dynamic_sampling(siirl_args: SiiRLArguments, batch: DataProto, node_config: 
         return NodeOutput(batch=batch, metrics={"sampling/kept_trajectories_ratio": 1.0})
 
     metric_name = filter_config.metric
-    initial_traj_count = len(batch.batch) if batch.batch is not None else 0
+    initial_traj_count = len(batch) if batch is not None else 0
 
     # Ensure the filtering metric exists. If not, try to compute it on-the-fly,
     # mirroring the behavior of dapo_ray_trainer.py.
-    if metric_name not in batch.non_tensor_batch:
+    if metric_name not in batch:
         if metric_name == "seq_final_reward" and "token_level_rewards" in batch.batch:
             # Calculate from token-level rewards if necessary.
-            batch.non_tensor_batch["seq_final_reward"] = batch.batch["token_level_rewards"].sum(dim=-1).cpu().numpy()
-        elif metric_name == "seq_reward" and "token_level_scores" in batch.batch:
+            batch["seq_final_reward"] = batch["token_level_rewards"].sum(dim=-1).cpu().numpy()
+        elif metric_name == "seq_reward" and "token_level_scores" in batch:
             # Calculate from token-level scores if necessary.
-            batch.non_tensor_batch["seq_reward"] = batch.batch["token_level_scores"].sum(dim=-1).cpu().numpy()
+            batch["seq_reward"] = batch["token_level_scores"].sum(dim=-1).cpu().numpy()
         else:
             # If the metric cannot be found or computed, it's a configuration error.
-            raise KeyError(f"Metric '{metric_name}' for group filtering not found in batch and could not be computed. Available non-tensor keys: {list(batch.non_tensor_batch.keys())}")
+            raise KeyError(f"Metric '{metric_name}' for group filtering not found in batch and could not be computed. Available non-tensor keys: {list(batch.keys())}")
 
     # Group trajectories by UID and collect their corresponding metric values.
     prompt_uid_to_metric_vals = defaultdict(list)
-    uids = batch.non_tensor_batch["uid"]
-    metric_values = batch.non_tensor_batch[metric_name]
+    uids = batch["uid"]
+    metric_values = batch[metric_name]
 
     for i in range(len(uids)):
         prompt_uid_to_metric_vals[uids[i]].append(metric_values[i])
@@ -86,10 +86,10 @@ def dynamic_sampling(siirl_args: SiiRLArguments, batch: DataProto, node_config: 
 
     # Filter the original batch by slicing it with the collected indices.
     # The DataProto object natively supports this slicing operation.
-    filtered_batch = batch[kept_traj_indices]
+    filtered_batch = filter_tensordict(batch, kept_traj_indices)
 
     # Calculate and return metrics about the filtering process for logging and analysis.
-    final_traj_count = len(filtered_batch.batch) if filtered_batch.batch is not None else 0
+    final_traj_count = len(filtered_batch) if filtered_batch is not None else 0
     kept_ratio = final_traj_count / initial_traj_count if initial_traj_count > 0 else 1.0
     metrics = {"dapo_sampling/kept_trajectories_ratio": kept_ratio, "dapo_sampling/initial_trajectories": initial_traj_count, "dapo_sampling/final_trajectories": final_traj_count, "dapo_sampling/kept_groups": len(kept_prompt_uids), "dapo_sampling/total_groups": len(prompt_uid_to_metric_vals)}
 

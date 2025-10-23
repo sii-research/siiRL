@@ -14,7 +14,7 @@
 
 import os
 from collections import defaultdict
-
+from tensordict import TensorDict
 import torch
 from loguru import logger
 from torch import distributed as dist
@@ -33,33 +33,32 @@ class NaiveRewardManager:
         self.reward_fn_key = reward_fn_key
         self.rank = int(os.environ.get("RANK", "0"))
 
-    def __call__(self, data: DataProto, return_dict=False):
+    def __call__(self, data: TensorDict, return_dict=False):
         """We will expand this function gradually based on the available datasets"""
 
         # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
-        if "rm_scores" in data.batch.keys():
+        if "rm_scores" in data.keys():
             if return_dict:
-                return {"reward_tensor": data.batch["rm_scores"]}
+                return {"reward_tensor": data["rm_scores"]}
             else:
-                return data.batch["rm_scores"]
-
-        reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+                return data["rm_scores"]
+        reward_tensor = torch.zeros_like(data["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)
 
         already_print_data_sources = {}
 
         for i in range(len(data)):
-            data_item = data[i]  # DataProtoItem
+            data_item = data[i] 
 
-            prompt_ids = data_item.batch["prompts"]
+            prompt_ids = data_item["prompts"]
 
             prompt_length = prompt_ids.shape[-1]
 
-            valid_prompt_length = data_item.batch["attention_mask"][:prompt_length].sum()
+            valid_prompt_length = data_item["attention_mask"][:prompt_length].sum()
             valid_prompt_ids = prompt_ids[-valid_prompt_length:]
 
-            response_ids = data_item.batch["responses"]
-            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+            response_ids = data_item["responses"]
+            valid_response_length = data_item["attention_mask"][prompt_length:].sum()
             valid_response_ids = response_ids[:valid_response_length]
 
             # decode
@@ -70,13 +69,12 @@ class NaiveRewardManager:
 
             if IMG_CONTEXT_TOKEN in prompt_str:
                 prompt_str = prompt_str.replace(IMG_CONTEXT_TOKEN, "")
+            ground_truth = data["reward_model"][i]["ground_truth"]
 
-            ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
+            data_source = data[self.reward_fn_key][i]
 
-            data_source = data_item.non_tensor_batch[self.reward_fn_key]
-
-            extra_info = data_item.non_tensor_batch.get("extra_info", None)
-
+            extra_info =  data["extra_info"][i] if "extra_info" in data else None
+            
             score = self.compute_score(
                 data_source=data_source,
                 solution_str=response_str,

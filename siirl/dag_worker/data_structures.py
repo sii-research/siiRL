@@ -17,7 +17,7 @@ from typing import Any, Dict
 
 import torch
 
-from siirl.data_coordinator import DataProto
+from tensordict import TensorDict
 
 
 @dataclass
@@ -46,5 +46,5 @@ class ValidationPayload:
 class NodeOutput:
     """A standardized return object for all node execution functions."""
 
-    batch: DataProto
+    batch: TensorDict
     metrics: Dict[str, Any] = field(default_factory=dict)

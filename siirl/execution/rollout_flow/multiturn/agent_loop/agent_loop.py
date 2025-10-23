@@ -25,7 +25,7 @@ import torch
 from cachetools import LRUCache
 from omegaconf import DictConfig
 from pydantic import BaseModel
-from tensordict import TensorDict
+from tensordict import TensorDict, NonTensorData
 from transformers import AutoTokenizer
 
 from siirl import DataProto
@@ -164,7 +164,7 @@ class AgentLoopWorker:
         tokenizer_module = load_tokenizer(model_args=self.config.model)
         self.tokenizer, self.processor = tokenizer_module["tokenizer"], tokenizer_module["processor"]
 
-    async def generate_sequences(self, batch: DataProto) -> DataProto:
+    async def generate_sequences(self, batch: TensorDict) -> TensorDict:
         """Generate sequences from agent loop.
 
         Args:
@@ -193,17 +193,16 @@ class AgentLoopWorker:
         )
 
         # override sampling params for validation
-        if batch.meta_info.get("validate", False):
+        if batch.get("validate", False):
             sampling_params["top_p"] = config.val_kwargs.top_p
             sampling_params["temperature"] = config.val_kwargs.temperature
 
-        n = 1 if batch.meta_info.get("validate", False) else config.n
         tasks = []
         # by default, we assume it's a single turn agent
         agent_name = self.config.rollout.agent.agent_name
         
         # agent_names = batch.non_tensor_batch["agent_name"].repeat(n, axis=0)
-        raw_prompts = batch.non_tensor_batch["raw_prompt"].repeat(n, axis=0)
+        raw_prompts = batch["raw_prompt"]
         target_size = raw_prompts.shape[0]
         agent_names = np.full(target_size, agent_name)
         
@@ -211,7 +210,8 @@ class AgentLoopWorker:
             tasks.append(asyncio.create_task(self._run_agent_loop(agent_name, messages.tolist(), sampling_params)))
         outputs = await asyncio.gather(*tasks)
         output = self._postprocess(outputs)
-        return output
+        batch.update(output)
+        return batch
 
     async def _run_agent_loop(
         self, agent_name: str, messages: List[Dict[str, Any]], sampling_params: Dict[str, Any]
@@ -232,7 +232,7 @@ class AgentLoopWorker:
             return ToolAgentLoop
         raise ValueError(f"Unknown agent_name: {agent_name}")
 
-    def _postprocess(self, inputs: List[AgentLoopOutput]) -> DataProto:
+    def _postprocess(self, inputs: List[AgentLoopOutput]) -> TensorDict:
         # NOTE: consistent with batch version of generate_sequences in vllm_rollout_spmd.py
         # prompts: left pad
         # responses: right pad
@@ -294,8 +294,9 @@ class AgentLoopWorker:
 
         num_turns = np.array([input.num_turns for input in inputs], dtype=np.int32)
         metrics = [input.metrics.model_dump() for input in inputs]
-        return DataProto(batch=batch, non_tensor_batch={"__num_turns__": num_turns}, meta_info={"metrics": metrics})
-
+        batch["__num_turns__"] = NonTensorData(num_turns)
+        batch["metrics"] = NonTensorData(metrics)
+        return batch
 
 class AgentLoopManager:
     """Agent loop manager that manages a group of agent loop workers."""
@@ -335,14 +336,14 @@ class AgentLoopManager:
         self.agent_loop_worker = AgentLoopWorker(self.config, self.async_llm_server)
             
 
-    async def generate_sequences(self, prompts: DataProto) -> DataProto:
+    async def generate_sequences(self, prompts: TensorDict) -> TensorDict:
         """Split input batch and dispatch to agent loop workers.
 
         Args:
-            prompts (DataProto): Input batch.
+            prompts (TensorDict): Input batch.
 
         Returns:
-            DataProto: Output batch.
+            TensorDict: Output batch.
         """
         if self.config.rollout.free_cache_engine:
             await self.wake_up()
@@ -351,13 +352,13 @@ class AgentLoopManager:
             await self.sleep()
 
         # calculate performance metrics
-        metrics = [output.meta_info["metrics"]]  # List[List[Dict[str, str]]]
+        metrics = [output["metrics"]]  # List[List[Dict[str, str]]]
         timing = self._performance_metrics(metrics, output)
     
-        output.meta_info = {"timing": timing}
+        output["metrics"] = NonTensorData(timing)
         return output
 
-    def _performance_metrics(self, metrics: List[List[Dict[str, str]]], output: DataProto) -> Dict[str, float]:
+    def _performance_metrics(self, metrics: List[List[Dict[str, str]]], output: TensorDict) -> Dict[str, float]:
         timing = {}
         t_generate_sequences = np.array([metric["generate_sequences"] for chunk in metrics for metric in chunk])
         t_tool_calls = np.array([metric["tool_calls"] for chunk in metrics for metric in chunk])
@@ -370,8 +371,8 @@ class AgentLoopManager:
 
         # batch sequence generation is bounded by the slowest sample
         slowest = np.argmax(t_generate_sequences + t_tool_calls)
-        attention_mask = output.batch["attention_mask"][slowest]
-        prompt_length = output.batch["prompts"].shape[1]
+        attention_mask = output["attention_mask"][slowest]
+        prompt_length = output["prompts"].shape[1]
         timing["agent_loop/slowest/generate_sequences"] = t_generate_sequences[slowest]
         timing["agent_loop/slowest/tool_calls"] = t_tool_calls[slowest]
         timing["agent_loop/slowest/prompt_length"] = attention_mask[:prompt_length].sum().item()
