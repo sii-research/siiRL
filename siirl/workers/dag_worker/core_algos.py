@@ -917,8 +917,8 @@ def compute_policy_loss_vanilla(
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
-    config: Optional[DictConfig | AlgorithmArguments] = None,
-    rollout_log_probs: torch.Tensor | None = None,
+    config: Optional[ActorArguments] = None,
+    rollout_is_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the clipped policy objective and related metrics for PPO.
@@ -937,7 +937,7 @@ def compute_policy_loss_vanilla(
             Mask indicating which tokens to include in the loss, shape (batch_size, response_length).
         loss_agg_mode (str, optional):
             Aggregation mode for `agg_loss`. Defaults to "token-mean".
-        config: `(verl.trainer.config.ActorArguments)`:
+        config: `(ActorArguments)`:
             config for the actor.
         rollout_log_probs: `(torch.Tensor)`:
             log probabilities of actions under the rollout policy, shape (batch_size, response_length).
@@ -948,9 +948,7 @@ def compute_policy_loss_vanilla(
     clip_ratio = config.clip_ratio  # Clipping parameter ε for standard PPO. See https://arxiv.org/abs/1707.06347.
     clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else clip_ratio
     clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else clip_ratio
-    clip_ratio_c = (
-        config.clip_ratio_c if config.clip_ratio_c is not None else 3.0
-    )  # Lower bound of the ratio for dual-clip PPO. See https://arxiv.org/pdf/1912.09729.
+    clip_ratio_c = config.clip_ratio_c
 
     cliprange = clip_ratio
     cliprange_low = clip_ratio_low
@@ -988,11 +986,9 @@ def compute_policy_loss_vanilla(
 
     pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
 
-    if config.tis_imp_ratio_cap > 0 and rollout_log_probs is not None:
-        # Apply truncated importance sampling -> https://fengyao.notion.site/off-policy-rl
-        tis_imp_ratio = torch.exp(old_log_prob - rollout_log_probs)
-        tis_imp_ratio = torch.clamp(tis_imp_ratio, max=config.tis_imp_ratio_cap)
-        pg_losses = pg_losses * tis_imp_ratio
+    # Apply rollout importance sampling weights if provided
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
 
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
@@ -1076,8 +1072,8 @@ def compute_policy_loss_gpg(
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
-    config: Optional[AlgorithmArguments] = None,
-    rollout_log_probs: torch.Tensor | None = None,
+    config: Optional[ActorArguments] = None,
+    rollout_is_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Adapted from
     https://github.com/AMAP-ML/GPG/blob/main/VisualThinker-R1-Zero/src/open-r1-multimodal/src/open_r1/trainer/grpo_trainer.py#L495
@@ -1094,6 +1090,10 @@ def compute_policy_loss_gpg(
     """
     pg_losses = -log_prob * advantages
 
+    # Apply rollout importance sampling weights if provided
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
     return pg_loss, torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0)
 
@@ -1105,8 +1105,8 @@ def compute_policy_loss_clip_cov(
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
-    config: Optional[DictConfig | AlgorithmArguments] = None,
-    rollout_log_probs: torch.Tensor | None = None,
+    config: Optional[ActorArguments] = None,
+    rollout_is_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the clipped policy objective and related metrics for Clip-Cov.
@@ -1140,7 +1140,7 @@ def compute_policy_loss_clip_cov(
             Upper bound for clipping covariance. Defaults to 5.0.
     """
     assert config is not None
-    assert not isinstance(config, AlgorithmArguments), "passing AlgorithmArguments not supported yet"
+    assert not isinstance(config, ActorArguments), "passing AlgoConfig not supported yet"
     assert config.policy_loss is not None
 
     clip_cov_ratio = config.policy_loss.clip_cov_ratio if config.policy_loss.clip_cov_ratio is not None else 0.0002
@@ -1188,6 +1188,11 @@ def compute_policy_loss_clip_cov(
     pg_clipfrac = siirl_F.masked_mean((corr == 0).float(), response_mask)
 
     pg_losses = torch.maximum(pg_losses1, pg_losses2) * corr
+
+    # Apply rollout importance sampling weights if provided
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
     return pg_loss, pg_clipfrac, ppo_kl, torch.tensor(0.0)
@@ -1200,8 +1205,8 @@ def compute_policy_loss_kl_cov(
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
-    config: Optional[DictConfig | AlgorithmArguments] = None,
-    rollout_log_probs: torch.Tensor | None = None,
+    config: Optional[ActorArguments] = None,
+    rollout_is_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the clipped policy objective and related metrics for Clip-Cov.
@@ -1226,7 +1231,7 @@ def compute_policy_loss_kl_cov(
             Coefficient for the KL penalty term in the loss. Defaults to 1.
     """
     assert config is not None
-    assert not isinstance(config, AlgorithmArguments), "passing AlgorithmArguments not supported yet"
+    assert not isinstance(config, ActorArguments), "passing AlgoConfig not supported yet"
     assert config.policy_loss is not None
 
     kl_cov_ratio = config.policy_loss.kl_cov_ratio if config.policy_loss.kl_cov_ratio is not None else 0.0002
@@ -1260,6 +1265,10 @@ def compute_policy_loss_kl_cov(
                 large_cov_idxs // advantages.shape[1], large_cov_idxs % advantages.shape[1]
             ]
 
+    # Apply rollout importance sampling weights if provided
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
     return pg_loss, torch.tensor(0.0), ppo_kl_abs, torch.tensor(0.0)
@@ -1272,8 +1281,8 @@ def compute_policy_loss_geo_mean(
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
-    config: Optional[DictConfig | AlgorithmArguments] = None,
-    rollout_log_probs: torch.Tensor | None = None,
+    config: Optional[ActorArguments] = None,
+    rollout_is_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the clipped policy objective and related metrics for GMPO.
@@ -1295,7 +1304,7 @@ def compute_policy_loss_geo_mean(
     """
 
     assert config is not None
-    assert not isinstance(config, AlgorithmArguments)
+    assert not isinstance(config, ActorArguments)
     clip_ratio = config.clip_ratio  # Clipping parameter. See https://arxiv.org/abs/1707.06347.
     clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else clip_ratio
     clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else clip_ratio
@@ -1326,6 +1335,17 @@ def compute_policy_loss_geo_mean(
     # otherwise, below would be not consistent with the paper
     advantage = (advantages * response_mask).sum(dim=-1) / (response_mask_sum + 1e-8)
     pg_losses = -advantage * ratio
+
+    # Apply rollout importance sampling weights if provided
+    # For geo_mean, IS weights are 2D (batch_size, seq_length) and need to be aggregated to sequence level
+    if rollout_is_weights is not None:
+        # Aggregate token-level weights to sequence level using geometric mean for consistency
+        # Note: rollout_is_weights is always 2D regardless of rollout_is_level
+        seq_is_weights = torch.exp(
+            (torch.log(rollout_is_weights + 1e-10) * response_mask).sum(dim=-1) / (response_mask_sum + 1e-8)
+        )
+        pg_losses = pg_losses * seq_is_weights
+
     pg_loss = torch.mean(pg_losses)
 
     # higher: ratio is too large that need clamp to clip_high (when adv > 0)
