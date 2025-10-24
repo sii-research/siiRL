@@ -798,6 +798,65 @@ def compute_gpg_outcome_advantage(
     return scores, scores
 
 
+def compute_cpgd_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    weight_factor_in_cpgd: str = "STD_weight",
+):
+    """
+    Compute advantage for CPGD, operating only on Outcome reward
+    (with only one scalar reward for each response).
+    Args:
+        token_level_rewards: `(torch.Tensor)`
+            shape: (bs, response_length)
+        response_mask: `(torch.Tensor)`
+            shape: (bs, response_length)
+        weight_factor_in_cpgd: (str)
+            whether to use the STD weight as GRPO or clip_filter_like_weight.
+            choices: {STD_weight, clip_filter_like_weight, naive}
+
+    Returns:
+        advantages: `(torch.Tensor)`
+            shape: (bs, response_length)
+        Returns: `(torch.Tensor)`
+            shape: (bs, response_length)
+    """
+    scores = token_level_rewards.sum(dim=-1)
+
+    id2score = defaultdict(list)
+    id2mean = {}
+    id2std = {}
+
+    with torch.no_grad():
+        bsz = scores.shape[0]
+        for i in range(bsz):
+            id2score[index[i]].append(scores[i])
+        for idx in id2score:
+            if len(id2score[idx]) == 1:
+                id2mean[idx] = torch.tensor(0.0)
+                id2std[idx] = torch.tensor(1.0)
+            elif len(id2score[idx]) > 1:
+                id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
+                id2std[idx] = torch.std(torch.tensor([id2score[idx]]))
+            else:
+                raise ValueError(f"no score in prompt index: {idx}")
+        for i in range(bsz):
+            if weight_factor_in_cpgd == "STD_weight":
+                scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+            elif weight_factor_in_cpgd == "clip_filter_like_weight":
+                count_no_0_adv = sum(v != 0 for v in id2std.values())
+                scores[i] = (scores[i] - id2mean[index[i]]) * (bsz / count_no_0_adv).clamp(max=3.0)
+            elif weight_factor_in_cpgd == "naive":
+                scores[i] = scores[i] - id2mean[index[i]]
+            else:
+                raise NotImplementedError
+        scores = scores.unsqueeze(-1) * response_mask
+
+    return scores, scores
+
+
 def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
     """Compute token-level rewards with KL penalty.
 
