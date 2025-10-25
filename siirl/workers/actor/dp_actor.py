@@ -71,7 +71,6 @@ class DataParallelPPOActor(BasePPOActor):
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
 
         if self.config.entropy_from_logits_with_chunking:
-            # NOTE: This assumes 'F.entropy_from_logits_with_chunking' exists
             entropy_from_logits = F.entropy_from_logits_with_chunking
         else:
             entropy_from_logits = F.entropy_from_logits
@@ -392,7 +391,6 @@ class DataParallelPPOActor(BasePPOActor):
             for batch_idx, mini_batch in enumerate(mini_batches):
                 if self.config.use_dynamic_bsz:
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
-                    # NOTE: This now uses 'prepare_dynamic_batch' (imported at top)
                     micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
                 else:
                     self.gradient_accumulation = (
@@ -452,7 +450,6 @@ class DataParallelPPOActor(BasePPOActor):
                     # gpg -> core_algos.compute_policy_loss_gpg
                     # clip_cov -> core_algos.compute_policy_loss_clip_cov
 
-                    # NOTE: This now uses 'get_policy_loss_fn' (imported at top)
                     policy_loss_fn = get_policy_loss_fn(loss_mode)
 
                     # Compute policy loss (all functions return 4 values)

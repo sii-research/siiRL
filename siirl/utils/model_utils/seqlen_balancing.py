@@ -235,60 +235,6 @@ def roundup_divisible(a, b):
     return ((a + b - 1) // b) * b
 
 
-# def rearrange_micro_batches(batch, max_token_len, dp_group=None, num_batches_divided_by=None,
-# same_micro_num_in_dp=True,
-# min_num_micro_batch=None):
-#     """
-#     Split a batch into micro-batches by total token count, with optional DP sync and padding.
-#
-#     Args:
-#         batch (TensorDict): must include "attention_mask" (B*S); other fields are sliced similarly.
-#         max_token_len (int): max sum of attention_mask per micro-batch.
-#         dp_group (optional): torch.distributed group for data-parallel sync.
-#         num_batches_divided_by (optional): virtual pipeline parallel size, for megatron.
-#         same_micro_num_in_dp (bool): if True and dp_group set, pad all ranks to the same count.
-#         min_num_micro_batch (int, optional): force at least this many splits (pads empty ones).
-#
-#     Returns:
-#         List[TensorDict]: the micro-batches.
-#         List[List[int]]: index lists mapping each micro-batch back to original positions.
-#     """
-#     # this is per local micro_bsz
-#     max_seq_len = batch["attention_mask"].shape[-1]
-#     assert max_token_len >= max_seq_len, f"max_token_len must be greater than the sequence length. Got {
-#     max_token_len=} and {max_seq_len=}"
-#     seq_len_effective: torch.Tensor = batch["attention_mask"].sum(dim=1)
-#     total_seqlen = seq_len_effective.sum().item()
-#     # NOTE: num_microbatches <= batch_size, so take the min of this two.
-#     num_micro_batches = min(len(seq_len_effective), ceildiv(total_seqlen, max_token_len))
-#     if min_num_micro_batch is not None:
-#         # used to support pp
-#         num_micro_batches = max(min_num_micro_batch, num_micro_batches)
-#     if dist.is_initialized() and same_micro_num_in_dp:
-#         num_micro_batches = torch.tensor([num_micro_batches], device=get_device_name())
-#         dist.all_reduce(num_micro_batches, op=dist.ReduceOp.MAX, group=dp_group)
-#         num_micro_batches = num_micro_batches.cpu().item()
-#     if num_batches_divided_by is not None:
-#         num_micro_batches = roundup_divisible(num_micro_batches, num_batches_divided_by)
-#
-#     seq_len_effective = seq_len_effective.tolist()
-#     assert num_micro_batches <= len(seq_len_effective)
-#
-#     micro_bsz_idx = get_seqlen_balanced_partitions(seq_len_effective, num_micro_batches, equal_size=False)
-#
-#     micro_batches = []
-#
-#     for partition in micro_bsz_idx:
-#         curr_micro_batch = []
-#         for idx in partition:
-#             curr_micro_batch.append(batch[idx : idx + 1])
-#         curr_micro_batch = torch.cat(curr_micro_batch)
-#
-#         micro_batches.append(curr_micro_batch)
-#
-#     return micro_batches, micro_bsz_idx
-
-
 def rearrange_micro_batches(
     batch,
     max_token_len,

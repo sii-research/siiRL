@@ -14,6 +14,7 @@ export ALG=gspo
 export MODEL_NAME=qwen3-235b-a22b
 
 # --- Path Definitions ---
+export HOME={your_home_path}
 export TRAIN_DATA_PATH=$HOME/data/datasets/$DATASET/train.parquet
 export TEST_DATA_PATH=$HOME/data/datasets/$DATASET/test.parquet
 export MODEL_PATH=$HOME/data/models/Qwen3-235B-A22B
