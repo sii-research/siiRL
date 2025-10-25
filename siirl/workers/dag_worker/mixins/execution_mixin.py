@@ -23,9 +23,14 @@ from tqdm import tqdm
 from siirl.utils.debug import DistProfiler
 from siirl.workers.dag.node import Node, NodeType
 from siirl.workers.dag_worker.constants import DAGConstants
-from siirl.workers.dag_worker.dag_utils import add_prefix_to_dataproto, remove_prefix_from_dataproto, add_prefix_to_metrics
+from siirl.workers.dag_worker.dag_utils import (
+    add_prefix_to_dataproto,
+    add_prefix_to_metrics,
+    remove_prefix_from_dataproto,
+)
 from siirl.workers.dag_worker.data_structures import NodeOutput
 from siirl.workers.databuffer import DataProto
+
 
 class ExecutionMixin:
     """Handles the core DAG execution and training loop logic."""
@@ -84,11 +89,13 @@ class ExecutionMixin:
     compute_reward: Any
     compute_advantage: Any
     check_spmd_mode: Any
-    
+
     def execute_task_graph(self):
         """Main entry point to start the DAG execution pipeline."""
         logger.info(f"Rank {self._rank}: Starting DAG execution pipeline...")
-        logger.success(f"Rank {self._rank}: All components initialized. Starting training loop from step {self.global_steps + 1}.")
+        logger.success(
+            f"Rank {self._rank}: All components initialized. Starting training loop from step {self.global_steps + 1}."
+        )
 
         if self.val_reward_fn and self.config.trainer.val_before_train:
             # _validate handles multi-rank logic internally
@@ -114,11 +121,15 @@ class ExecutionMixin:
         self.total_training_steps = self.dataloader.total_training_steps
         if self.dataloader.num_train_batches <= 0:
             if self._rank == 0:
-                logger.warning(f"num_train_batches is {self.dataloader.num_train_batches}. The training loop will be skipped.")
+                logger.warning(
+                    f"num_train_batches is {self.dataloader.num_train_batches}. The training loop will be skipped."
+                )
             return
 
         if self._rank == 0:
-            self.progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
+            self.progress_bar = tqdm(
+                total=self.total_training_steps, initial=self.global_steps, desc="Training Progress"
+            )
 
         last_val_metrics = None
 
@@ -157,12 +168,18 @@ class ExecutionMixin:
                     is_last_step = self.global_steps >= self.total_training_steps
 
                     # Save checkpoint at the configured frequency.
-                    if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
+                    if self.config.trainer.save_freq > 0 and (
+                        is_last_step or self.global_steps % self.config.trainer.save_freq == 0
+                    ):
                         self._save_checkpoint()
 
                     # (Logging and validation logic remains unchanged)
                     metrics_dict = dict(ordered_metrics)
-                    if self.val_reward_fn and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
+                    if (
+                        self.val_reward_fn
+                        and self.config.trainer.test_freq > 0
+                        and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
+                    ):
                         val_metrics = self._validate()
                         if self._rank == 0 and val_metrics:
                             metrics_dict.update(val_metrics)
@@ -263,25 +280,47 @@ class ExecutionMixin:
                             continue
                         visited_nodes.add(cur_node.node_id)
 
-                        cur_dp_size, cur_dp_rank, cur_tp_rank, cur_tp_size, cur_pp_rank, cur_pp_size = self._get_node_dp_info(cur_node)
-                        logger.debug(f"current node({cur_node.node_id}) dp_size: {cur_dp_size}, dp_rank: {cur_dp_rank}, tp_rank: {cur_tp_rank}, pp_rank: {cur_pp_rank}, pp_size: {cur_pp_size}")
+                        cur_dp_size, cur_dp_rank, cur_tp_rank, cur_tp_size, cur_pp_rank, cur_pp_size = (
+                            self._get_node_dp_info(cur_node)
+                        )
+                        logger.debug(
+                            f"current node({cur_node.node_id}) dp_size: {cur_dp_size}, dp_rank: {cur_dp_rank}, "
+                            f"tp_rank: {cur_tp_rank}, pp_rank: {cur_pp_rank}, pp_size: {cur_pp_size}"
+                        )
                     from siirl.workers.dag.node import NodeRole
-                
+
                     # --- 3. Get Input Data ---
                     if cur_node.node_id != entry_node_id:
                         with self._timer("get_data_from_buffer", timing_raw):
                             if self._multi_agent and cur_node.node_role == NodeRole.ADVANTAGE:
-                                batch = self.multi_agent_get_log(key=cur_node.node_id, cur_dp_rank = cur_dp_rank, agent_group = cur_node.agent_group,timing_raw = timing_raw)
+                                batch = self.multi_agent_get_log(
+                                    key=cur_node.node_id,
+                                    cur_dp_rank=cur_dp_rank,
+                                    agent_group=cur_node.agent_group,
+                                    timing_raw=timing_raw,
+                                )
                             else:
-                                batch = self.get_data_from_buffers(key=cur_node.node_id, my_current_dp_rank=cur_dp_rank, my_current_dp_size=cur_dp_size, timing_raw=timing_raw)
+                                batch = self.get_data_from_buffers(
+                                    key=cur_node.node_id,
+                                    my_current_dp_rank=cur_dp_rank,
+                                    my_current_dp_size=cur_dp_size,
+                                    timing_raw=timing_raw,
+                                )
                             if batch is None:
-                                logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
+                                logger.error(
+                                    f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step."
+                                )
                                 return None  # Abort the entire step
                             batch = remove_prefix_from_dataproto(batch, cur_node)
                             if batch is None:
-                                logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
+                                logger.error(
+                                    f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step."
+                                )
                                 return None  # Abort the entire step
-                            logger.debug(f"current node({cur_node.node_id}) get data from databuffer batch size: {batch.batch.size()}")
+                            logger.debug(
+                                f"current node({cur_node.node_id}) get data from databuffer "
+                                f"batch size: {batch.batch.size()}"
+                            )
                     if self.enable_perf:
                         with self._timer("get_data_from_buffer_barrier", timing_raw):
                             dist.barrier(self._gather_group)
@@ -298,19 +337,23 @@ class ExecutionMixin:
                                 node_output = self.compute_reward(batch, cur_tp_size)
                         elif cur_node.node_role == NodeRole.ADVANTAGE:
                             if self.check_spmd_mode():
-                                node_output = self.compute_advantage(batch, cur_node = cur_node)
+                                node_output = self.compute_advantage(batch, cur_node=cur_node)
                             elif cur_tp_rank == 0:
-                                node_output = self.compute_advantage(batch, cur_node = cur_node)
+                                node_output = self.compute_advantage(batch, cur_node=cur_node)
                         elif cur_node.executable:
                             if cur_node.agent_options and cur_node.agent_options.train_cycle:
                                 cycle_round = self.global_steps // cur_node.agent_options.train_cycle
                                 agent_num = len(self.agent_group_worker)
                                 if cycle_round % agent_num == cur_node.agent_group:
-                                    node_output = cur_node.run(batch=batch, worker_group_index=cur_node.agent_group, siirl_args=self.config)
+                                    node_output = cur_node.run(
+                                        batch=batch, worker_group_index=cur_node.agent_group, siirl_args=self.config
+                                    )
                                 else:
                                     node_output = NodeOutput(batch=batch)
                             else:
-                                node_output = cur_node.run(batch=batch, worker_group_index=cur_node.agent_group, siirl_args=self.config)
+                                node_output = cur_node.run(
+                                    batch=batch, worker_group_index=cur_node.agent_group, siirl_args=self.config
+                                )
                         else:  # Passthrough node
                             logger.warning(f"Node {cur_node.node_id} has no executable. Passing data through.")
                             node_output = NodeOutput(batch=batch)
@@ -322,12 +365,15 @@ class ExecutionMixin:
                         while next_nodes[0].node_role == NodeRole.ROLLOUT:
                             cur_node = next_nodes[0]
                             next_nodes = self.taskgraph.get_downstream_nodes(cur_node.node_id)
-                            
+
                     # --- 5. Process Output & Pass to Children ---
                     with self._timer("graph_output_handling", timing_raw):
-                        if cur_node.node_role == NodeRole.POSTPROCESS_SAMPLING:
+                        if cur_node.node_role == NodeRole.DATA_REBALANCE:
                             if len(node_output.batch) == 0:
-                                logger.warning(f"Rank {self._rank}: Data after postprocess_sampling is insufficient. Caching and skipping the rest of the training step.")
+                                logger.warning(
+                                    f"Rank {self._rank}: Data after data_rebalance is insufficient. Caching "
+                                    f"and skipping the rest of the training step."
+                                )
                                 self._cleanup_step_buffers(visited_nodes, timing_raw)
                                 return None
                             if "postprocess_status" in node_output.metrics:
@@ -342,17 +388,34 @@ class ExecutionMixin:
                             next_node = next_nodes[0]
                             next_dp_size, _, _, _, _, _ = self._get_node_dp_info(next_node)
                             node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node)
-                            is_current_last_pp_tp_rank0 = (cur_pp_rank == cur_pp_size - 1 and cur_tp_rank == 0)
-                            if self._whether_put_data(is_current_last_pp_tp_rank0, next_dp_size, cur_dp_size, cur_node, next_node):
+                            is_current_last_pp_tp_rank0 = cur_pp_rank == cur_pp_size - 1 and cur_tp_rank == 0
+                            if self._whether_put_data(
+                                is_current_last_pp_tp_rank0, next_dp_size, cur_dp_size, cur_node, next_node
+                            ):
                                 with self._timer("put_data_to_buffer", timing_raw):
                                     if self._multi_agent and next_node.node_role == NodeRole.ADVANTAGE:
-                                        self.multi_agent_put_log(key=next_node.node_id, data=node_output.batch, next_dp_size = next_dp_size, agent_group = next_node.agent_group, timing_raw = timing_raw)
+                                        self.multi_agent_put_log(
+                                            key=next_node.node_id,
+                                            data=node_output.batch,
+                                            next_dp_size=next_dp_size,
+                                            agent_group=next_node.agent_group,
+                                            timing_raw=timing_raw,
+                                        )
                                     else:
-                                        enforce_buffer = (self._multi_agent) and (cur_node.node_role == NodeRole.ADVANTAGE)
-                                        self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch, source_dp_size=cur_dp_size, dest_dp_size=next_dp_size, enforce_buffer = enforce_buffer,timing_raw=timing_raw)
+                                        enforce_buffer = (self._multi_agent) and (
+                                            cur_node.node_role == NodeRole.ADVANTAGE
+                                        )
+                                        self.put_data_to_buffers(
+                                            key=next_node.node_id,
+                                            data=node_output.batch,
+                                            source_dp_size=cur_dp_size,
+                                            dest_dp_size=next_dp_size,
+                                            enforce_buffer=enforce_buffer,
+                                            timing_raw=timing_raw,
+                                        )
                         elif self._multi_agent:
                             # last_node add prefix for metrics
-                            node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node) 
+                            node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node)
                         if self.enable_perf:
                             with self._timer("put_data_to_buffer_barrier", timing_raw):
                                 dist.barrier(self._gather_group)

@@ -14,7 +14,8 @@
 
 import inspect
 import os
-from typing import Dict, Type
+from datetime import timedelta
+from typing import Dict, Tuple, Type
 
 import ray
 import torch
@@ -27,12 +28,10 @@ from siirl.scheduler.enums import AlgorithmType
 from siirl.scheduler.reward import create_reward_manager
 from siirl.utils.debug import DistProfiler
 from siirl.utils.extras.device import get_device_name, get_nccl_backend
+from siirl.utils.import_string import import_string
 from siirl.workers.base_worker import Worker
 from siirl.workers.dag.node import NodeRole, NodeType
 from siirl.workers.dag_worker.constants import DAGConstants
-from siirl.utils.import_string import import_string
-from datetime import timedelta
-from typing import Tuple
 
 device_name = get_device_name()
 
@@ -77,7 +76,7 @@ class InitializationMixin:
     validate_tokenizer: Any
     role_worker_mapping: Dict[NodeRole, Type[Worker]]
     _profiler: DistProfiler
-    postsampling_masters_group: Optional[ProcessGroup] = None
+    data_rebalance_masters_group: Optional[ProcessGroup] = None
 
     multi_agent_loop: Any
 
@@ -132,8 +131,9 @@ class InitializationMixin:
         try:
             timeout_seconds = int(timeout_str)
         except (ValueError, TypeError):
-            logger.warning(f"Warning: Invalid value '{timeout_str}' for {env_var}. "
-                         f"Using default of {default_seconds} seconds.")
+            logger.warning(
+                f"Warning: Invalid value '{timeout_str}' for {env_var}. Using default of {default_seconds} seconds."
+            )
 
         return timedelta(seconds=timeout_seconds)
 
@@ -148,7 +148,6 @@ class InitializationMixin:
         gloo_timeout = self._get_timeout_from_env(gloo_env_var, default_gloo_timeout)
 
         return nccl_timeout, gloo_timeout
-
 
     def _setup_distributed_environment(self):
         """Initializes the default process group and all required subgroups."""
@@ -179,20 +178,23 @@ class InitializationMixin:
         else:
             # For GPU, the original logic is preserved for backward compatibility.
             # The gather group is only created if world_size < backend_threshold.
-            self._gather_group = dist.new_group(
-                backend="gloo", timeout=gloo_timeout) if self.world_size < self.config.dag.backend_threshold else None
+            self._gather_group = (
+                dist.new_group(backend="gloo", timeout=gloo_timeout)
+                if self.world_size < self.config.dag.backend_threshold
+                else None
+            )
         self._build_all_process_groups()
         self._resolve_taskgraph_process_groups()
 
         # try create post sampling process_groups for dapo
         if self.config.algorithm.algorithm_name == AlgorithmType.DAPO.value:
-            self._create_postsampling_masters_group()
+            self._create_data_rebalance_masters_group()
 
         # Ensure all ranks have finished group creation before proceeding.
         dist.barrier(self._gather_group)
         logger.info(f"Rank {self._rank}: Distributed environment setup complete.")
 
-    def _create_postsampling_masters_group(self):
+    def _create_data_rebalance_masters_group(self):
         """
         Creates a dedicated process group containing only master ranks (tp_rank=0).
         This group is used for post-sampling rebalancing logic to prevent deadlocks.
@@ -204,7 +206,7 @@ class InitializationMixin:
             rollout_nodes = [n for n in self.taskgraph.nodes.values() if n.node_type == NodeType.MODEL_INFERENCE]
             if not rollout_nodes:
                 logger.warning("No MODEL_INFERENCE nodes found. Skipping creation of post-sampling masters group.")
-                self.postsampling_masters_group = None
+                self.data_rebalance_masters_group = None
                 return
 
             first_rollout_node = rollout_nodes[0]
@@ -214,22 +216,22 @@ class InitializationMixin:
             if self.world_size > 1 and tp_size > 1:
                 all_ranks = list(range(self.world_size))
                 master_ranks = [rank for rank in all_ranks if (rank % tp_size) == 0]
-                self.postsampling_masters_group = dist.new_group(ranks=master_ranks)
+                self.data_rebalance_masters_group = dist.new_group(ranks=master_ranks)
                 logger.success(
-                    f"Rank {self._rank}: Successfully created 'postsampling_masters_group' with ranks: {master_ranks}"
+                    f"Rank {self._rank}: Successfully created 'data_rebalance_masters_group' with ranks: {master_ranks}"
                 )
             else:
                 logger.info(
-                    f"Rank {self._rank}: No need to create 'postsampling_masters_group' (world_size={self.world_size}, "
-                    f"tp_size={tp_size})."
+                    f"Rank {self._rank}: No need to create 'data_rebalance_masters_group' ("
+                    f"world_size={self.world_size}, tp_size={tp_size})."
                 )
-                self.postsampling_masters_group = None
+                self.data_rebalance_masters_group = None
 
         except (AttributeError, KeyError) as e:
             logger.error(
                 f"Failed to create post-sampling masters group due to missing config. Error: {e}", exc_info=True
             )
-            self.postsampling_masters_group = None
+            self.data_rebalance_masters_group = None
 
     def _build_all_process_groups(self):
         """Builds all process groups defined in the ProcessGroupManager."""
@@ -372,22 +374,22 @@ class InitializationMixin:
             }
         elif strategy in DAGConstants.MEGATRON_STRATEGYS:
             from siirl.workers.megatron_workers import (
-                ActorWorker, 
-                RolloutWorker, 
-                AsyncRolloutWorker, 
-                ReferenceWorker, 
-                CriticWorker, 
-                RewardModelWorker
+                ActorWorker,
+                AsyncRolloutWorker,
+                CriticWorker,
+                ReferenceWorker,
+                RewardModelWorker,
+                RolloutWorker,
             )
 
             is_async_mode = self.config.actor_rollout_ref.rollout.mode == "async"
-            
+
             return {
                 NodeRole.ACTOR: ActorWorker,
                 NodeRole.ROLLOUT: AsyncRolloutWorker if is_async_mode else RolloutWorker,
                 NodeRole.REFERENCE: ReferenceWorker,
                 NodeRole.CRITIC: CriticWorker,
-                NodeRole.REWARD: RewardModelWorker
+                NodeRole.REWARD: RewardModelWorker,
             }
         raise NotImplementedError(f"Strategy '{strategy}' is not supported.")
 
@@ -448,22 +450,25 @@ class InitializationMixin:
                 elif hasattr(config, "optim"):
                     config.optim.total_training_steps = self.dataloader.total_training_steps
                 worker_args = {"config": config, "process_group": node_process_group}
-               
+
                 # For separated workers (Megatron backend), no role parameter is needed
                 # Only legacy ActorRolloutRefWorker needs the role parameter
-                if hasattr(worker_cls, '__name__') and 'ActorRolloutRefWorker' in worker_cls.__name__:
+                if hasattr(worker_cls, "__name__") and "ActorRolloutRefWorker" in worker_cls.__name__:
                     if node.node_role in DAGConstants.WORKER_ROLE_MAPPING:
                         worker_args["role"] = DAGConstants.WORKER_ROLE_MAPPING[node.node_role]
                 if node.agent_options and node.agent_options.share_instance:
                     # cur agent share same critic with target agent
-                    self.agent_group_worker[node.agent_group][node.node_role] = self.agent_group_worker[node.agent_options.share_instance][node.node_role]
+                    self.agent_group_worker[node.agent_group][node.node_role] = self.agent_group_worker[
+                        node.agent_options.share_instance
+                    ][node.node_role]
                 else:
                     worker_instance = worker_cls(**worker_args)
                     self.workers[node_worker_key] = worker_instance
                     self.agent_group_worker[node.agent_group][node.node_role] = worker_instance
                     self.agent_group_process_group[node.agent_group][node.node_role] = node_process_group
                     logger.success(
-                        f"Rank {self._rank}: Successfully created worker '{worker_cls.__name__}' for node: {node.node_id}"
+                        f"Rank {self._rank}: Successfully created worker '{worker_cls.__name__}' "
+                        f"for node: {node.node_id}"
                     )
 
             except Exception as e:
@@ -473,9 +478,10 @@ class InitializationMixin:
                     f"Failed to create worker for node {node.node_id} with class {worker_cls.__name__}.", exc_info=True
                 )
                 raise RuntimeError(f"Worker instantiation failed for node {node.node_id}") from e
-        
+
         if len(self.agent_group_worker) > 1:
             self._multi_agent = True
+
     def _generate_node_worker_key(self, node: Node) -> str:
         """Generates a unique string key for a node's worker instance."""
         return f"{node.agent_group}_{node.node_type.value}_{node.node_role.value}"
@@ -489,7 +495,10 @@ class InitializationMixin:
         if node.agent_options and node.agent_options.share_instance:
             # has been initialized in target agent node
             return False
-        return node.node_type in [NodeType.MODEL_TRAIN, NodeType.MODEL_INFERENCE] and node.node_role in self.role_worker_mapping
+        return (
+            node.node_type in [NodeType.MODEL_TRAIN, NodeType.MODEL_INFERENCE]
+            and node.node_role in self.role_worker_mapping
+        )
 
     def _get_node_process_group(self, node: Node) -> ProcessGroup:
         """Retrieves the PyTorch ProcessGroup assigned to a specific graph node."""
@@ -523,7 +532,7 @@ class InitializationMixin:
     def _get_node_dp_info(self, node: Node) -> tuple[int, int, int, int, int, int]:
         """
         Calculates Data Parallel (DP), Tensor Parallel (TP), and Pipeline Parallel (PP) info for a node.
-        
+
         Returns:
             tuple: (dp_size, dp_rank, tp_rank, tp_size, pp_rank, pp_size)
         """
@@ -535,7 +544,10 @@ class InitializationMixin:
                 reference_node = ancestor
             else:
                 # If no non-COMPUTE ancestor is found, it's a critical error.
-                raise RuntimeError(f"Could not find any non-COMPUTE ancestor for COMPUTE node '{node.node_id}'. Please check your DAG graph configuration.")
+                raise RuntimeError(
+                    f"Could not find any non-COMPUTE ancestor for COMPUTE node '{node.node_id}'. "
+                    f"Please check your DAG graph configuration."
+                )
 
         if reference_node.node_type == NodeType.COMPUTE:
             group_world_size = self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes
@@ -547,41 +559,45 @@ class InitializationMixin:
 
         # Get parallelism configuration based on backend strategy
         tp_size, pp_size = self._get_parallelism_config(reference_node)
-        
+
         # Calculate total parallel size (TP * PP)
         total_parallel_size = tp_size * pp_size
-        
+
         if group_world_size % total_parallel_size != 0:
-            raise ValueError(f"Configuration error for node {node.node_id}: Group world size ({group_world_size}) is not divisible by total parallel size (TP={tp_size} * PP={pp_size} = {total_parallel_size}). Check your parallel configuration.")
-        
+            raise ValueError(
+                f"Configuration error for node {node.node_id}: Group world size ({group_world_size}) is not divisible "
+                f"by total parallel size (TP={tp_size} * PP={pp_size} = {total_parallel_size}). "
+                f"Check your parallel configuration."
+            )
+
         dp_size = group_world_size // total_parallel_size
-        
+
         # Calculate ranks within the data parallel group
         dp_rank = group_rank // total_parallel_size
-        
+
         # Calculate position within the TP-PP grid
         local_rank_in_tp_pp_group = group_rank % total_parallel_size
-        
+
         # For 2D parallelism: ranks are arranged as [PP0_TP0, PP0_TP1, ..., PP0_TP(tp_size-1), PP1_TP0, ...]
         pp_rank = local_rank_in_tp_pp_group // tp_size
         tp_rank = local_rank_in_tp_pp_group % tp_size
-        
+
         return dp_size, dp_rank, tp_rank, tp_size, pp_rank, pp_size
-    
+
     def _get_parallelism_config(self, reference_node: Node) -> tuple[int, int]:
         """
         Extract tensor parallel and pipeline parallel sizes based on backend strategy.
         Currently, only FSDP and Megatron backends are supported, in which Megatron supports PP.
-        
+
         Args:
             reference_node: The node to extract parallelism config from
-            
+
         Returns:
             tuple: (tp_size, pp_size)
         """
         tp_size = 1
         pp_size = 1
-        
+
         if intern_config := reference_node.config.get(DAGConstants.INTERN_CONFIG):
             if reference_node.node_type == NodeType.MODEL_INFERENCE:
                 # For rollout nodes, only TP is supported currently.
@@ -594,22 +610,22 @@ class InitializationMixin:
 
             elif reference_node.node_type == NodeType.MODEL_TRAIN:
                 # Extract strategy based on the specific config type
-                strategy = 'fsdp'  # default
-                
-                if hasattr(intern_config, 'actor') and hasattr(intern_config.actor, 'strategy'):
+                strategy = "fsdp"  # default
+
+                if hasattr(intern_config, "actor") and hasattr(intern_config.actor, "strategy"):
                     # For ActorRolloutRefArguments, strategy is in actor
                     strategy = intern_config.actor.strategy
-                elif hasattr(intern_config, 'strategy'):
+                elif hasattr(intern_config, "strategy"):
                     # For CriticArguments, RefArguments, RewardModelArguments, strategy is direct attribute
                     strategy = intern_config.strategy
-                
+
                 if strategy in DAGConstants.MEGATRON_STRATEGYS:
                     # Megatron backend supports both TP and PP
-                    if hasattr(intern_config, 'actor') and hasattr(intern_config.actor, 'megatron'):
+                    if hasattr(intern_config, "actor") and hasattr(intern_config.actor, "megatron"):
                         # ActorRolloutRefArguments case
                         tp_size = intern_config.actor.megatron.tensor_model_parallel_size
                         pp_size = intern_config.actor.megatron.pipeline_model_parallel_size
-                    elif hasattr(intern_config, 'megatron'):
+                    elif hasattr(intern_config, "megatron"):
                         # CriticArguments, RefArguments, RewardModelArguments cases
                         tp_size = intern_config.megatron.tensor_model_parallel_size
                         pp_size = intern_config.megatron.pipeline_model_parallel_size
@@ -665,8 +681,16 @@ class InitializationMixin:
         logger.info("All models and sharding managers initialized successfully.")
         if self._multi_agent:
             from siirl.workers.multi_agent.multiagent_generate import MultiAgentLoop
-            self.multi_agent_loop =  MultiAgentLoop(self, config = self.config.actor_rollout_ref, node_workers = self.workers, local_dag = self.taskgraph, databuffer = self.data_buffers, placement_mode = 'colocate')
-        
+
+            self.multi_agent_loop = MultiAgentLoop(
+                self,
+                config=self.config.actor_rollout_ref,
+                node_workers=self.workers,
+                local_dag=self.taskgraph,
+                databuffer=self.data_buffers,
+                placement_mode="colocate",
+            )
+
     def _setup_sharding_manager(self, agent_group: int, worker_dict: Dict[NodeRole, Worker]):
         """Configures the sharding manager to sync weights between training backend and inference backend."""
         actor_worker = worker_dict[NodeRole.ACTOR]

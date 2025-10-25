@@ -46,9 +46,9 @@ nodes:
     dependencies:
       - "calculate_advantages"
 
-  - node_id: "postprocess_sampling"
+  - node_id: "data_rebalance"
     node_type: "COMPUTE"
-    node_role: "POSTPROCESS_SAMPLING"
+    node_role: "DATA_REBALANCE"
     dependencies:
       - "dynamic_sampling"
 
@@ -57,7 +57,7 @@ nodes:
     node_role: "ACTOR"
     only_forward_compute: true
     dependencies:
-      - "postprocess_sampling"
+      - "data_rebalance"
 
   - node_id: "reference_log_prob"
     node_type: "MODEL_TRAIN"
