@@ -381,7 +381,16 @@ class DAGWorker(Worker):
                         if next_nodes := self.taskgraph.get_downstream_nodes(cur_node.node_id):
                             # Currently supports single downstream node, can be extended to a loop.
                             next_node = next_nodes[0]
-                            self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch, timing_raw=timing_raw)
+                            next_dp_size, _, _, _, _, _ = self._get_node_dp_info(next_node)
+                            # node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node)
+                            is_current_last_pp_tp_rank0 = (cur_pp_rank == cur_pp_size - 1 and cur_tp_rank == 0)
+                            if self._whether_put_data(is_current_last_pp_tp_rank0, next_dp_size, cur_dp_size, cur_node, next_node):
+                                with timer(self.enable_perf, "put_data_to_buffer", timing_raw):
+                                    # if self._multi_agent and next_node.node_role == NodeRole.ADVANTAGE:
+                                    #     self.multi_agent_put_log(key=next_node.node_id, data=node_output.batch, next_dp_size = next_dp_size, agent_group = next_node.agent_group, timing_raw = timing_raw)
+                                    # else:
+                                    # enforce_buffer = (self._multi_agent) and (cur_node.node_role == NodeRole.ADVANTAGE)
+                                    self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch,  source_dp_size=cur_dp_size, dest_dp_size=next_dp_size, timing_raw=timing_raw)
                         # elif self._multi_agent:
                         #     # last_node add prefix for metrics
                         #     node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node) 
@@ -1076,6 +1085,8 @@ class DAGWorker(Worker):
     def put_data_to_buffers(
         self, key: str, 
         data: TensorDict,
+        source_dp_size:int, 
+        dest_dp_size: int,
         timing_raw: Dict[str, float]
     ):
         """
@@ -1089,25 +1100,31 @@ class DAGWorker(Worker):
             if not samples:
                 logger.warning(f"Rank {self._rank}: DataProto for key '{key}' converted to 0 samples. Nothing to put.")
                 return
-            loop = asyncio.get_event_loop()
-            put_futures = []
-            
-            with timer(self.enable_perf, f"put_samples_to_coordinator_{key}", timing_raw):
-                for sample in samples:
-                    # may need modify
-                    sample_info = SampleInfo(
-                        sum_tokens=getattr(sample, 'sum_tokens', len(sample.input_ids)),
-                        prompt_length=getattr(sample, 'prompt_length', 0),
-                        response_length=getattr(sample, 'response_length', 0),
-                        uid=getattr(sample, 'uid', uuid.uuid4().int),
-                        dict_info={'key': key} # Tag the sample with the key
-                    )
-                    sample_ref = ray.put(sample)
-                    put_futures.append(self.data_coordinator.put.remote(sample_info, sample_ref))
+            if source_dp_size == dest_dp_size:
+                with timer(self.enable_perf, f"put_intern_data_{key}", timing_raw):
+                    logger.debug(f"Rank {self._rank}: DP size match ({source_dp_size}). Storing data for key '{key}' in local cache.")
+                    self.internal_data_cache[key] = data
+                    logger.debug(f"Rank {self._rank}: Successfully stored data for key '{key}' in local cache.")
+            else:
+                loop = asyncio.get_event_loop()
+                put_futures = []
                 
-                if put_futures:
-                    loop.run_until_complete(asyncio.gather(*put_futures))
-                    logger.debug(f"Rank {self._rank}: Successfully put {len(samples)} samples for key '{key}' into DataCoordinator.")
+                with timer(self.enable_perf, f"put_samples_to_coordinator_{key}", timing_raw):
+                    for sample in samples:
+                        # may need modify
+                        sample_info = SampleInfo(
+                            sum_tokens=getattr(sample, 'sum_tokens', len(sample.input_ids)),
+                            prompt_length=getattr(sample, 'prompt_length', 0),
+                            response_length=getattr(sample, 'response_length', 0),
+                            uid=getattr(sample, 'uid', uuid.uuid4().int),
+                            dict_info={'key': key} # Tag the sample with the key
+                        )
+                        sample_ref = ray.put(sample)
+                        put_futures.append(self.data_coordinator.put.remote(sample_info, sample_ref))
+                    
+                    if put_futures:
+                        loop.run_until_complete(asyncio.gather(*put_futures))
+                        logger.debug(f"Rank {self._rank}: Successfully put {len(samples)} samples for key '{key}' into DataCoordinator.")
 
         except Exception as e:
             logger.error(f"Rank {self._rank}: Unexpected error in put_data_to_buffers for key '{key}': {e}", exc_info=True)
@@ -1124,7 +1141,10 @@ class DAGWorker(Worker):
         """
         try:
             logger.debug(f"Rank {self._rank}: Fetching data from DataCoordinator for key '{key}'.")
-
+            with timer(self.enable_perf, f"get_intern_data_{key}", timing_raw):
+                if key in self.internal_data_cache:
+                    logger.debug(f"Rank {self._rank}: Found data for key '{key}' in local cache. Bypassing Ray.")
+                    return self.internal_data_cache.pop(key)
             def key_filter(sample_info: SampleInfo) -> bool:
                 return sample_info.dict_info.get('key') == key
 
@@ -1380,3 +1400,24 @@ class DAGWorker(Worker):
             batch = add_prefix_to_dataproto(batch, cur_node)
         return ordered_metrics
 
+    def _whether_put_data(self, is_current_last_pp_tp_rank0, next_dp_size, cur_dp_size, cur_node, next_node) -> bool:
+        # Determine whether to put data into buffer based on node configuration
+        result = False
+        reason = "No condition met"
+        
+        if is_current_last_pp_tp_rank0:
+            result = True
+            reason = "Current last PP rank's TP rank 0"
+        elif next_dp_size == cur_dp_size:
+            if next_node.node_type in [NodeType.COMPUTE, NodeType.MODEL_TRAIN]:
+                result = True
+                reason = f"DP sizes match and next node is {next_node.node_type}"
+        elif cur_node.node_role == next_node.node_role and cur_node.node_role == NodeRole.ROLLOUT:
+            result = True
+            reason = "Both nodes are ROLLOUT"
+            
+        logger.debug(f"Rank {self._rank}: _whether_put_data decision for {cur_node.node_id}->{next_node.node_id}: {result} ({reason}). "
+                    f"is_current_last_pp_tp_rank0={is_current_last_pp_tp_rank0}, next_dp_size={next_dp_size}, cur_dp_size={cur_dp_size}, "
+                    f"cur_node_type={cur_node.node_type}, next_node_type={next_node.node_type}, "
+                    f"cur_node_role={cur_node.node_role}, next_node_role={next_node.node_role}")
+        return result
