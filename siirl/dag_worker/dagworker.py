@@ -36,7 +36,6 @@ from siirl.execution.dag.node import NodeRole, NodeType, Node
 from siirl.execution.scheduler.reward import compute_reward, create_reward_manager
 from siirl.execution.scheduler.process_group_manager import ProcessGroupManager
 from siirl.execution.scheduler.enums import AdvantageEstimator
-
 from siirl.data_coordinator import preprocess_dataloader, Samples2Dict, Dict2Samples, SampleManager, MetaInfo, SampleInfo
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData
@@ -45,6 +44,7 @@ from siirl.data_coordinator import DataProto
 from siirl.data_coordinator.dataloader import DataLoaderNode
 from siirl.data_coordinator.protocol import collate_fn
 from siirl.dag_worker.data_structures import NodeOutput
+
 from siirl.dag_worker.constants import DAGConstants, DAGInitializationError
 from siirl.dag_worker import core_algos
 from siirl.dag_worker.core_algos import (
@@ -105,13 +105,15 @@ class DAGWorker(Worker):
         config: SiiRLArguments,
         process_group_manager: ProcessGroupManager,
         taskgraph_mapping: Dict[int, TaskGraph],
-        data_buffers: List["ray.actor.ActorHandle"]
+        data_coordinator: "ray.actor.ActorHandle",
+        device_name="cuda",
     ):
         super().__init__()
         self.config = config
         self.process_group_manager = process_group_manager
         self.taskgraph_mapping = taskgraph_mapping
-        self.data_buffers = data_buffers
+        self.data_coordinator = data_coordinator
+        self.device_name = device_name
         self.enable_perf = os.environ.get("SIIRL_ENABLE_PERF", "0") == "1" or config.dag.enable_perf
 
         # State attributes
@@ -126,7 +128,7 @@ class DAGWorker(Worker):
         self.progress_bar = None
         self._rank: int = -1
         self.taskgraph: Optional[TaskGraph] = None
-        self.internal_data_cache: Dict[str, DataProto] = {}
+        self.internal_data_cache: Dict[str, Any] = {}
         self.agent_critic_worker: Any
         # Finish flag
         self.taskgraph_execute_finished = False
@@ -138,7 +140,7 @@ class DAGWorker(Worker):
 
         # Add a cache to hold data from an insufficient batch for the next training step.
         # This is the core state-carrying mechanism for dynamic sampling.
-        self.sampling_leftover_cache: Optional[DataProto] = None
+        self.sampling_leftover_cache: Optional[Any] = None
 
         # multi agent
         self._multi_agent = False
@@ -278,6 +280,7 @@ class DAGWorker(Worker):
             with timer(self.enable_perf, "data_loading", timing_raw):
                 # batch = DataProto.from_single_dict(self.dataloader.run(epoch=epoch, is_validation_step=False))
                 batch = preprocess_dataloader(self.dataloader.run(epoch=epoch, is_validation_step=False), self.config.actor_rollout_ref.rollout.n)
+
             with timer(self.enable_perf, "get_entry_node", timing_raw):
                 node_queue = self.taskgraph.get_entry_nodes()
                 if not node_queue:
@@ -303,23 +306,16 @@ class DAGWorker(Worker):
                     # --- 3. Get Input Data ---
                     if cur_node.node_id != entry_node_id:
                         with timer(self.enable_perf, "get_data_from_buffer", timing_raw):
-                            if self._multi_agent and cur_node.node_role == NodeRole.ADVANTAGE:
-                                batch = self.multi_agent_get_log(key=cur_node.node_id, cur_dp_rank = cur_dp_rank, agent_group = cur_node.agent_group,timing_raw = timing_raw)
-                            else:
-                                batch = self.get_data_from_buffers(key=cur_node.node_id, my_current_dp_rank=cur_dp_rank, my_current_dp_size=cur_dp_size, timing_raw=timing_raw)
+                            batch = self.get_data_from_buffers(key=cur_node.node_id, timing_raw=timing_raw)
                             if batch is None:
                                 logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
                                 return None  # Abort the entire step
                             # batch = remove_prefix_from_dataproto(batch, cur_node)
-                            if batch is None:
-                                logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
-                                return None  # Abort the entire step
-                            logger.debug(f"current node({cur_node.node_id}) get data from databuffer batch size: {batch.batch.size()}")
+                            logger.debug(f"current node({cur_node.node_id}) get data from databuffer batch size: {batch.size()}")
                     if self.enable_perf:
                         with timer(self.enable_perf, "get_data_from_buffer_barrier", timing_raw):
                             dist.barrier(self._gather_group)
                     # --- 4. Node Execution ---
-
                     node_name_timer = f"{cur_node.node_role.name.lower()}"
                     if cur_node.only_forward_compute and cur_node.node_role == NodeRole.ACTOR:
                         node_name_timer = "actor_log_prob"
@@ -547,7 +543,7 @@ class DAGWorker(Worker):
                              ) -> NodeOutput:
         """Computes log probabilities from the frozen reference model."""
         processed_data = agent_group_worker[worker_group_index][NodeRole.REFERENCE].compute_ref_log_prob(batch)
-        metrics = processed_data.meta_info.get("metrics", {})
+        metrics = processed_data["metrics"]
         return NodeOutput(batch=processed_data, metrics=metrics)
 
     @DistProfiler.annotate(role="compute_value")
@@ -648,7 +644,7 @@ class DAGWorker(Worker):
                      ) -> NodeOutput:
         """Performs a single training step on the critic model."""
         processed_data = agent_group_worker[worker_group_index][NodeRole.CRITIC].update_critic(batch)
-        metrics = reduce_and_broadcast_metrics(processed_data.meta_info.get("metrics"), process_group)
+        metrics = reduce_and_broadcast_metrics(processed_data["metrics"], process_group)
         return NodeOutput(batch=processed_data, metrics=metrics)
 
     @DistProfiler.annotate(role="train_actor")
@@ -1232,46 +1228,15 @@ class DAGWorker(Worker):
     def get_zeromq_address(self):
         return self.zmq_address
         
-    def multi_agent_put_log(self, key: str, data: DataProto, agent_group: int, next_dp_size: int, timing_raw):
-        def uuid_hex_to_bucket(uuid_hex: str, num_buckets: int = 8) -> int:
-            return consistent_hash(uuid_hex) % num_buckets
-        data_size = len(data)
-        put_futures = []
-        meta_info = data.meta_info
-        with timer(self.enable_perf, f"put_ray_proto_data_{key}", timing_raw):
-            for i in range(data_size):
-                cur_data = data[i]
-                request_id = cur_data.non_tensor_batch[f"agent_group_{agent_group}_request_id"]
-                next_dp_rank = uuid_hex_to_bucket(request_id, next_dp_size)
-                cur_key = key + f"_{next_dp_rank}"
-                buf = random.choice(self.data_buffers)
-                # slice of DataProto is DataProtoItem, will loss meta_info, need to recompute when use
-                cur_data = collate_fn([cur_data])
-                cur_data.meta_info = meta_info
-                put_futures.append(buf.put.remote(cur_key, cur_data))
-        with timer(self.enable_perf, f"put_proto_data_{key}", timing_raw):
-            loop = asyncio.get_event_loop()
-            loop.run_until_complete(asyncio.gather(*put_futures))
-
-    def multi_agent_get_log(self, key: str, cur_dp_rank: int, agent_group: int, timing_raw):
-        loop = asyncio.get_event_loop()
-        key = key + f"_{cur_dp_rank}"
-        prefix_key = f"agent_group_{agent_group}_"
-        with timer(self.enable_perf, f"get_ref_data_{key}", timing_raw):
-            tasks = [buf.get.remote(key) for buf in self.data_buffers]
-            temp_data =loop.run_until_complete(asyncio.gather(*tasks))
-            # temp_data = self.data_buffers.get(key) 
-            datas = [item for t in temp_data if t is not None for item in t]
-            sorted_datas = sorted(datas, key = lambda x : (x.non_tensor_batch[prefix_key + 'request_id'], -x.non_tensor_batch[prefix_key + 'traj_step']))
-            meta_info = sorted_datas[0].meta_info
-            dataproto = collate_fn(sorted_datas)
-            dataproto.meta_info = meta_info
-        return dataproto
+    def multi_agent_put_log(self, key: str, data: TensorDict, agent_group: int, next_dp_size: int, timing_raw):
+        # This logic needs to be adapted to the new model. For now, it's a warning.
+        logger.warning("`multi_agent_put_log` is not yet refactored for DataCoordinator and is a no-op.")
+        pass
 
     def check_spmd_mode(self):
         return self.rollout_mode == 'sync' and self._multi_agent == False
 
-    def _collect_final_metrics(self, batch: DataProto, timing_raw: dict) -> Dict[str, float]:
+    def _collect_final_metrics(self, batch: TensorDict, timing_raw: dict) -> Dict[str, float]:
         """
         Orchestrates the collection and computation of all metrics for a training step
         using a highly efficient, all_reduce-based aggregation strategy.
@@ -1390,25 +1355,11 @@ class DAGWorker(Worker):
                     final_metrics[key.replace("timing_s/", "perf/delta_time/")] = value
 
             # Calculate rollout and actor log probs difference statistics
-            if "rollout_log_probs" in batch.batch and "old_log_probs" in batch.batch:
-                rollout_probs = torch.exp(batch.batch["rollout_log_probs"])
-                actor_probs = torch.exp(batch.batch["old_log_probs"])
-                rollout_probs_diff = torch.masked_select(
-                    torch.abs(rollout_probs.cpu() - actor_probs),
-                    batch.batch["response_mask"].bool().cpu()
-                )
-                if rollout_probs_diff.numel() > 0:
-                    final_metrics.update({
-                        "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).item(),
-                        "training/rollout_probs_diff_mean": torch.mean(rollout_probs_diff).item(),
-                        "training/rollout_probs_diff_std": torch.std(rollout_probs_diff).item()
-                    })
-
         # All ranks return the final metrics. Ranks other than 0 can use them if needed,
         # or just ignore them. This is cleaner than returning an empty dict.
         return final_metrics
 
-    def _collect_multi_final_metrics(self, batch: DataProto, ordered_metrics: dict, timing_raw: dict) -> Dict[str, float]:
+    def _collect_multi_final_metrics(self, batch: TensorDict, ordered_metrics: dict, timing_raw: dict) -> Dict[str, float]:
         node_queue = self.taskgraph.get_entry_nodes()
         visited_nodes = set()
         while node_queue:

@@ -104,9 +104,9 @@ def Dict2Samples(data:TensorDict)-> List[SampleManager]:
         local_sample.position_ids = data['position_ids'][index]
         local_sample.data_source = data['data_source'][index]
         local_sample.reward_model = data['reward_model'][index]
-        local_sample.prompts = data['prompts'][index]
-        local_sample.responses = data['responses'][index]
-        local_sample.response_mask = data['response_mask'][index]
+        local_sample.prompts = data['prompts'][index] if 'prompts' in data else None
+        local_sample.responses = data['responses'][index] if 'responses' in data else None
+        local_sample.response_mask = data['response_mask'][index] if 'response_mask' in data else None
         local_sample.values = data['values'][index] if 'values' in data else None
         local_sample.raw_prompt_ids = data['raw_prompt_ids'][index] if 'raw_prompt_ids' in data else None
         local_sample.advantages = data['advantages'][index] if 'advantages' in data else None

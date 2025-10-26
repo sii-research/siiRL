@@ -39,7 +39,7 @@ class RayTrainer:
     4.  Starting the training process and monitoring its execution until completion or failure.
     """
 
-    def __init__(self, config: SiiRLArguments, process_group_manager: ProcessGroupManager, rank_taskgraph_mapping: Dict[int, "TaskGraph"], unique_graphs_map: Dict[str, "TaskGraph"], data_buffer_handles: List["ray.actor.ActorHandle"], device_name="cuda"):
+    def __init__(self, config: SiiRLArguments, process_group_manager: ProcessGroupManager, rank_taskgraph_mapping: Dict[int, "TaskGraph"], unique_graphs_map: Dict[str, "TaskGraph"], data_coordinator_handle: "ray.actor.ActorHandle", device_name="cuda"):
         """
         Initializes the RayTrainer.
 
@@ -48,13 +48,13 @@ class RayTrainer:
             process_group_manager: Manages communication groups for distributed training.
             rank_taskgraph_mapping: A mapping from a global rank to its assigned TaskGraph.
             unique_graphs_map: A mapping of unique graph IDs to their TaskGraph objects.
-            data_buffer_handles: A list of Ray actor handles for data buffers.
+            data_coordinator_handle: The Ray actor handle for the central DataCoordinator.
         """
         # Store essential configuration and management objects.
         self.base_config = config
         self.process_group_manager = process_group_manager
         self.rank_taskgraph_mapping = rank_taskgraph_mapping
-        self.data_buffer_handles = data_buffer_handles
+        self.data_coordinator_handle = data_coordinator_handle
         self.unique_graphs_map = unique_graphs_map
 
         # Calculate the total number of GPUs available for the training job.
@@ -317,7 +317,7 @@ class RayTrainer:
             base_config=self.base_config,
             process_manager=self.process_group_manager,
             rank_taskgraph_mapping=self.rank_taskgraph_mapping,
-            data_buffer_handles=self.data_buffer_handles,
+            data_coordinator_handle=self.data_coordinator_handle,
             device_name=self.device_name,
             **ray_actor_manager_kwargs,
         )
