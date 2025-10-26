@@ -28,7 +28,7 @@ from siirl.utils.logger.logging_utils import set_basic_config
 from siirl.global_config.params import SiiRLArguments, log_dict_formatted, parse_config
 from siirl.execution.dag import TaskGraph
 from siirl.execution.dag.builtin_pipelines import grpo_pipeline, ppo_pipeline, dapo_pipeline
-from siirl.data_coordinator.data_buffer import init_data_coordinator
+from siirl.data_coordinator import init_data_buffer
 
 
 
@@ -129,6 +129,18 @@ def load_pipeline(siirl_args: SiiRLArguments) -> TaskGraph:
         )
 
 
+def get_databuffer_shard_number(siirl_args: SiiRLArguments) -> int:
+    assert siirl_args.data.train_batch_size % siirl_args.trainer.nnodes == 0, f"Config Error: train_batch_size ({siirl_args.data.train_batch_size}) must be divisible by nnodes ({siirl_args.trainer.nnodes}). Please adjust your configuration."
+
+    batch_size_per_node = siirl_args.data.train_batch_size // siirl_args.trainer.nnodes
+    intermediate_value = batch_size_per_node * siirl_args.actor_rollout_ref.rollout.n
+    SHARDING_FACTOR = 8
+    assert intermediate_value % SHARDING_FACTOR == 0, f"Config Error: The result of '(train_batch_size / nnodes) * rollout_n' ({intermediate_value}) must be divisible by {SHARDING_FACTOR}. Please adjust your configuration."
+    databuffer_number = ((siirl_args.data.train_batch_size // siirl_args.trainer.nnodes) * siirl_args.actor_rollout_ref.rollout.n) // 8
+    databuffer_number = min(databuffer_number, siirl_args.trainer.nnodes)
+    return databuffer_number
+
+
 @ray.remote(num_cpus=MAIN_RUNNER_CPU_RESERVATION)
 class MainRunner:
     """
@@ -154,13 +166,9 @@ class MainRunner:
         start_time = time.time()
 
         # 1. Init DataBuffer
-        logger.info(f"Initializing DataCoordinator with {siirl_args.trainer.nnodes} distributed DataBuffers...")
-        # In the new architecture, the number of buffers is typically the number of nodes.
-        # We pass force_local=False to enable distributed deployment.
-        data_coordinator_handle = init_data_coordinator(
-            num_buffers=siirl_args.trainer.nnodes,
-            force_local=(siirl_args.trainer.nnodes == 1)
-        )
+        logger.info(f"Init DataBuffer with sharding number: {siirl_args.trainer.nnodes}")
+        databuffer_number = get_databuffer_shard_number(siirl_args)
+        data_buffer_handlers = init_data_buffer(databuffer_number)
 
         # 2. Load and configure the workflow task graph (DAG)
         logger.info("Loading training pipeline...")
@@ -193,7 +201,7 @@ class MainRunner:
             process_group_manager=process_group_manager,
             rank_taskgraph_mapping=rank_taskgraph_mapping,
             unique_graphs_map=unique_graphs_map,
-            data_coordinator_handle=data_coordinator_handle,
+            data_buffer_handles=data_buffer_handlers,  # Placeholder for DataBuffer
             device_name=siirl_args.trainer.device,
         )
 

@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 from collections import deque
 from tensordict import TensorDict
-from typing import Dict, Optional, Type, List, Any, Tuple
+from typing import Dict, Optional, Type, List, Any, Tuple, Union
 from loguru import logger
 from tensordict import TensorDict
 
@@ -25,7 +25,11 @@ from siirl.utils.extras.device import get_device_name, device_synchronize
 from siirl.engine.base_worker import Worker
 from siirl.utils.import_string import import_string
 from siirl.dag_worker.constants import DAGConstants
-from siirl.dag_worker.data_structures import ValidationPayload, ValidationResult
+from siirl.dag_worker.data_structures import ValidationResult
+from siirl.dag_worker.metric_aggregator import (
+    DistributedMetricAggregator,
+    _ReduceOp
+)
 
 
 
@@ -317,11 +321,6 @@ def should_create_worker(role_worker_mapping, node: Node) -> bool:
 def generate_node_worker_key(node: Node) -> str:
     """Generates a unique string key for a node's worker instance."""
     return f"{node.agent_group}_{node.node_type.value}_{node.node_role.value}"
-
-
-def generate_agent_group_key(node: Node) -> str:
-    """Generates a unique key for an agent group, used for caching (e.g., tokenizers)."""
-    return f"group_key_{node.agent_group}"
 
 
 def setup_sharding_manager(config, agent_group_process_group, agent_group: int, worker_dict: Dict[NodeRole, Worker]):
@@ -841,3 +840,52 @@ def format_metrics_by_group(metrics: Dict[str, Any], group_order: List[str], ) -
 
 def consistent_hash(s):
     return int(hashlib.md5(s.encode()).hexdigest(), 16)
+
+def reduce_and_broadcast_metrics(
+    local_metrics: Dict[str, Union[float, List[float], torch.Tensor]], group: dist.ProcessGroup
+) -> Dict[str, float]:
+    """
+    Aggregates metrics in a distributed environment using a dedicated helper class.
+    For Pipeline Parallel setups, ensures all ranks have the same metric keys to avoid
+    tensor shape mismatch during all_reduce operations.
+
+    Args:
+        local_metrics: A dictionary of metrics on each rank.
+        group: The process group for the aggregation.
+
+    Returns:
+        A dictionary with the globally aggregated metrics, available on all ranks.
+    """
+    if not isinstance(local_metrics, dict) or not local_metrics:
+        return {}
+
+    world_size = dist.get_world_size(group)
+    if world_size <= 1:
+        # If not in a distributed setting, perform local aggregation only.
+        aggregator = DistributedMetricAggregator(local_metrics, group=None)
+        # The bucketed values are already the final values in a non-distributed case.
+        final_metrics = {}
+        for op_type, data in aggregator.op_buckets.items():
+            for key, value in data:
+                if op_type == _ReduceOp.SUM: # value is a (sum, count) tuple
+                    final_metrics[key] = value[0] / value[1] if value[1] > 0 else 0.0
+                else: # value is a float
+                    final_metrics[key] = float(value)
+        return final_metrics
+
+    # In Megatron with Pipeline Parallel:
+    # 1. First gather all metric keys from all ranks to ensure consistency
+    local_keys = set(local_metrics.keys())
+    all_keys_list = [None] * world_size
+    dist.all_gather_object(all_keys_list, local_keys, group=group)
+    
+    # 2. Union all keys to get the complete set of expected metrics
+    all_expected_keys = set()
+    for keys_set in all_keys_list:
+        all_expected_keys.update(keys_set)
+    
+    # 3. Use the aggregator with unified keys to perform communication
+    aggregator = DistributedMetricAggregator(local_metrics, group)
+    # NOTE(Ping Zhang): Ensure all ranks have the same metrics by adding missing ones with default values
+    aggregator.op_buckets = aggregator._bucket_local_metrics(local_metrics, all_expected_keys)
+    return aggregator.aggregate_and_get_results()

@@ -15,7 +15,6 @@ import pickle
 import os
 import uuid
 import ray
-import time
 import torch
 import asyncio
 import psutil
@@ -26,7 +25,7 @@ from collections import defaultdict
 from pprint import pformat
 from tqdm import tqdm
 from loguru import logger
-from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Type
 from torch.distributed import ProcessGroup
 
 from siirl.models.loader import TokenizerModule, load_tokenizer
@@ -44,9 +43,10 @@ from tensordict.tensorclass import NonTensorData
 from siirl.data_coordinator import DataProto
 
 from siirl.data_coordinator.dataloader import DataLoaderNode
-from siirl.data_coordinator.protocol import DataProto
-from siirl.dag_worker.data_structures import NodeOutput, ValidationPayload, ValidationResult
+from siirl.data_coordinator.protocol import collate_fn
+from siirl.dag_worker.data_structures import NodeOutput
 from siirl.dag_worker.constants import DAGConstants, DAGInitializationError
+from siirl.dag_worker import core_algos
 from siirl.dag_worker.core_algos import (
     agg_loss, 
     apply_kl_penalty, 
@@ -55,9 +55,7 @@ from siirl.dag_worker.core_algos import (
     )
 from siirl.dag_worker.metric_aggregator import (
     METRIC_CONFIG_FULL,
-    METRIC_CONFIG_MEAN_ONLY,
-    DistributedMetricAggregator,
-    _ReduceOp
+    METRIC_CONFIG_MEAN_ONLY
 )
 from siirl.dag_worker.dag_utils import  (
     remove_prefix_from_dataproto,
@@ -69,14 +67,12 @@ from siirl.dag_worker.dag_utils import  (
     log_role_worker_mapping,
     should_create_worker,
     generate_node_worker_key,
-    generate_agent_group_key,
     find_first_non_compute_ancestor,
     setup_sharding_manager,
     get_worker_classes,
     get_parallelism_config,
     prepare_generation_batch,
     prepare_generation_batch, 
-    dump_validation_generations,
     whether_put_data,
     format_metrics_by_group,
     log_metrics_to_console,
@@ -85,15 +81,14 @@ from siirl.dag_worker.dag_utils import  (
     log_core_performance_metrics,
     aggregate_and_write_performance_metrics,
     prepare_local_batch_metrics,
+    reduce_and_broadcast_metrics,
     )
 from siirl.utils.debug import DistProfiler
 from siirl.utils.extras.device import get_device_name, get_nccl_backend, get_device_id
 from siirl.utils.metrics.metric_utils import (
-    aggregate_validation_metrics, 
     compute_throughout_metrics, 
     compute_timing_metrics
     )
-from siirl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from siirl.execution.rollout_flow.multiturn.agent_loop import AgentLoopManager
 from siirl.dag_worker.checkpoint_manager import CheckpointManager
 
@@ -110,15 +105,13 @@ class DAGWorker(Worker):
         config: SiiRLArguments,
         process_group_manager: ProcessGroupManager,
         taskgraph_mapping: Dict[int, TaskGraph],
-        data_coordinator: "ray.actor.ActorHandle",
-        device_name="cuda",
+        data_buffers: List["ray.actor.ActorHandle"]
     ):
         super().__init__()
         self.config = config
         self.process_group_manager = process_group_manager
         self.taskgraph_mapping = taskgraph_mapping
-        self.data_coordinator = data_coordinator
-        self.device_name = device_name
+        self.data_buffers = data_buffers
         self.enable_perf = os.environ.get("SIIRL_ENABLE_PERF", "0") == "1" or config.dag.enable_perf
 
         # State attributes
@@ -129,12 +122,11 @@ class DAGWorker(Worker):
         self.agent_group_process_group: Dict[int, Dict[NodeRole, Any]] = defaultdict(dict)
         self.process_groups: Dict[str, ProcessGroup] = {}
         self.tokenizer_mapping: Dict[str, TokenizerModule] = {}
-        self.kl_ctrl_in_reward = None
         self.logger = None
         self.progress_bar = None
         self._rank: int = -1
         self.taskgraph: Optional[TaskGraph] = None
-        self.internal_data_cache: Dict[str, Any] = {}
+        self.internal_data_cache: Dict[str, DataProto] = {}
         self.agent_critic_worker: Any
         # Finish flag
         self.taskgraph_execute_finished = False
@@ -146,7 +138,7 @@ class DAGWorker(Worker):
 
         # Add a cache to hold data from an insufficient batch for the next training step.
         # This is the core state-carrying mechanism for dynamic sampling.
-        self.sampling_leftover_cache: Optional[Any] = None
+        self.sampling_leftover_cache: Optional[DataProto] = None
 
         # multi agent
         self._multi_agent = False
@@ -169,8 +161,8 @@ class DAGWorker(Worker):
         logger.success(f"Rank {self._rank}: All components initialized. Starting training loop from step {self.global_steps + 1}.")
 
         if self.val_reward_fn and self.config.trainer.val_before_train:
-            # _validate handles multi-rank logic internally
-            val_metrics = self._validate()
+            # Validator handles multi-rank logic internally
+            val_metrics = self.validator.validate(global_step=self.global_steps)
             if self._rank == 0 and val_metrics and self.logger:
                 logger.info(f"Initial validation metrics:\n{pformat(val_metrics)}")
                 self.logger.log(data=val_metrics, step=self.global_steps)
@@ -241,7 +233,7 @@ class DAGWorker(Worker):
                     # (Logging and validation logic remains unchanged)
                     metrics_dict = dict(ordered_metrics)
                     if self.val_reward_fn and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
-                        val_metrics = self._validate()
+                        val_metrics = self.validator.validate(global_step=self.global_steps)
                         if self._rank == 0 and val_metrics:
                             metrics_dict.update(val_metrics)
                         if is_last_step:
@@ -311,40 +303,59 @@ class DAGWorker(Worker):
                     # --- 3. Get Input Data ---
                     if cur_node.node_id != entry_node_id:
                         with timer(self.enable_perf, "get_data_from_buffer", timing_raw):
-                            batch = self.get_data_from_buffers(key=cur_node.node_id, timing_raw=timing_raw)
+                            if self._multi_agent and cur_node.node_role == NodeRole.ADVANTAGE:
+                                batch = self.multi_agent_get_log(key=cur_node.node_id, cur_dp_rank = cur_dp_rank, agent_group = cur_node.agent_group,timing_raw = timing_raw)
+                            else:
+                                batch = self.get_data_from_buffers(key=cur_node.node_id, my_current_dp_rank=cur_dp_rank, my_current_dp_size=cur_dp_size, timing_raw=timing_raw)
                             if batch is None:
                                 logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
                                 return None  # Abort the entire step
                             # batch = remove_prefix_from_dataproto(batch, cur_node)
-                            logger.debug(f"current node({cur_node.node_id}) get data from databuffer batch size: {batch.size}")
+                            if batch is None:
+                                logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
+                                return None  # Abort the entire step
+                            logger.debug(f"current node({cur_node.node_id}) get data from databuffer batch size: {batch.batch.size()}")
                     if self.enable_perf:
                         with timer(self.enable_perf, "get_data_from_buffer_barrier", timing_raw):
                             dist.barrier(self._gather_group)
                     # --- 4. Node Execution ---
+
                     node_name_timer = f"{cur_node.node_role.name.lower()}"
                     if cur_node.only_forward_compute and cur_node.node_role == NodeRole.ACTOR:
                         node_name_timer = "actor_log_prob"
                     with timer(self.enable_perf, node_name_timer, timing_raw):
                         if cur_node.node_role == NodeRole.REWARD:
                             if self.check_spmd_mode():
-                                node_output = self.compute_reward(batch, cur_tp_size)
+                                node_output = self.compute_reward(self.config, batch, cur_tp_size)
                             elif cur_tp_rank == 0:
-                                node_output = self.compute_reward(batch, cur_tp_size)
+                                node_output = self.compute_reward(self.config, batch, cur_tp_size)
                         elif cur_node.node_role == NodeRole.ADVANTAGE:
                             if self.check_spmd_mode():
-                                node_output = self.compute_advantage(batch, cur_node = cur_node)
+                                node_output = self.compute_advantage(self.config, batch, cur_node=cur_node)
                             elif cur_tp_rank == 0:
-                                node_output = self.compute_advantage(batch, cur_node = cur_node)
+                                node_output = self.compute_advantage(self.config, batch, cur_node=cur_node)
                         elif cur_node.executable:
                             if cur_node.agent_options and cur_node.agent_options.train_cycle:
                                 cycle_round = self.global_steps // cur_node.agent_options.train_cycle
                                 agent_num = len(self.agent_group_worker)
                                 if cycle_round % agent_num == cur_node.agent_group:
-                                    node_output = cur_node.run(batch=batch, worker_group_index=cur_node.agent_group, siirl_args=self.config)
+                                    process_group = self._get_node_process_group(cur_node)
+                                    node_output = cur_node.run(batch=batch,
+                                                               config=self.config,
+                                                               process_group=process_group,
+                                                               agent_group_worker=self.agent_group_worker,
+                                                               worker_group_index=cur_node.agent_group,
+                                                               _dag_worker_instance=self)
                                 else:
                                     node_output = NodeOutput(batch=batch)
                             else:
-                                node_output = cur_node.run(batch=batch, worker_group_index=cur_node.agent_group, siirl_args=self.config)
+                                process_group = self._get_node_process_group(cur_node)
+                                node_output = cur_node.run(batch=batch,
+                                                           config=self.config,
+                                                           process_group=process_group,
+                                                           agent_group_worker=self.agent_group_worker,
+                                                           worker_group_index=cur_node.agent_group,
+                                                           _dag_worker_instance=self)
                         else:  # Passthrough node
                             logger.warning(f"Node {cur_node.node_id} has no executable. Passing data through.")
                             node_output = NodeOutput(batch=batch)
@@ -375,6 +386,9 @@ class DAGWorker(Worker):
                             # Currently supports single downstream node, can be extended to a loop.
                             next_node = next_nodes[0]
                             self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch, timing_raw=timing_raw)
+                        # elif self._multi_agent:
+                        #     # last_node add prefix for metrics
+                        #     node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node) 
                         if self.enable_perf:
                             with timer(self.enable_perf, "put_data_to_buffer_barrier", timing_raw):
                                 dist.barrier(self._gather_group)
@@ -406,33 +420,24 @@ class DAGWorker(Worker):
 # Module 2: Graph Node Execution Handlers
 # ==========================================================================================
 
-    def _set_node_executables(self):
-        """Maps node roles to their corresponding execution methods."""
-        ROLE_METHOD_MAPPING = {
-            (NodeRole.ROLLOUT, False): self.generate,
-            (NodeRole.REFERENCE, False): self.compute_ref_log_prob,
-            (NodeRole.ACTOR, True): self.compute_old_log_prob,
-            (NodeRole.ACTOR, False): self.train_actor,
-            (NodeRole.CRITIC, True): self.compute_value,
-            (NodeRole.CRITIC, False): self.train_critic,
-        }
-        for node in self.taskgraph.nodes.values():
-            if node.node_role in [NodeRole.REWARD, NodeRole.ADVANTAGE]:
-                continue
-            key = (node.node_role, node.only_forward_compute)
-            if executable_func := ROLE_METHOD_MAPPING.get(key):
-                node.executable = executable_func
-
     @DistProfiler.annotate(role="generate")
-    def generate_sync_mode(self, worker_group_index: int, batch: TensorDict, **kwargs) -> NodeOutput:
+    def generate_sync_mode(self,
+                           config,
+                           agent_group_worker,
+                           worker_group_index: int,
+                           batch: TensorDict,
+                           ) -> NodeOutput:
         """Sync mode"""
-        gen_output = self.agent_group_worker[worker_group_index][NodeRole.ROLLOUT].generate_sequences(batch)
+        gen_output = agent_group_worker[worker_group_index][NodeRole.ROLLOUT].generate_sequences(batch)
         if "response_mask" not in batch:
             gen_output["response_mask"] = compute_response_mask(gen_output)
         return NodeOutput(batch=gen_output, metrics=gen_output.pop("metrics", {})[0].data)
-
+    
     @DistProfiler.annotate(role="generate")
-    def generate_async_mode(self, worker_group_index: int, batch: DataProto, **kwargs) -> NodeOutput:
+    def generate_async_mode(self, 
+                            config, 
+                            batch: TensorDict, 
+                            ) -> NodeOutput:
         """Async mode"""
         if self._async_rollout_manager is not None:
             loop = asyncio.get_event_loop()
@@ -444,36 +449,49 @@ class DAGWorker(Worker):
         return NodeOutput(batch=batch, metrics={})
 
     @DistProfiler.annotate(role="generate")
-    def generate_multi_agent_mode(self, worker_group_index: int, batch: DataProto, **kwargs) -> NodeOutput:
+    def generate_multi_agent_mode(self, 
+                                  config, 
+                                  batch: DataProto, 
+                                  ) -> NodeOutput:
         """Generates sequences for a training batch using the multi-agent rollout model."""
         gen_batch = prepare_generation_batch(batch)
-        if self.config.actor_rollout_ref.rollout.agent.rewards_with_env and "reward_model" in batch.non_tensor_batch:
+        if config.actor_rollout_ref.rollout.agent.rewards_with_env and "reward_model" in batch.non_tensor_batch:
             gen_batch.non_tensor_batch["reward_model"] = batch.non_tensor_batch["reward_model"] 
-        assert self.config.actor_rollout_ref.rollout.name == 'sglang'
+        assert config.actor_rollout_ref.rollout.name == 'sglang'
         gen_output = self.multi_agent_loop.generate_sequence(gen_batch)
         if gen_output:
             metrics = gen_output.meta_info.get("metrics", {})
             # gen_output.meta_info = {}
             # batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))])
-            # batch = batch.repeat(self.config.actor_rollout_ref.rollout.n, interleave=True).union(gen_output)
+            # batch = batch.repeat(config.actor_rollout_ref.rollout.n, interleave=True).union(gen_output)
             # if "response_mask" not in batch.batch:
             #     batch.batch["response_mask"] = compute_response_mask(batch)
             return NodeOutput(batch=gen_output, metrics=metrics) 
         return NodeOutput(batch=batch, metrics={})
 
     @DistProfiler.annotate(role="generate")
-    def generate(self, worker_group_index: int, batch: List[SampleManager], **kwargs) -> NodeOutput:
+    def generate(self, 
+                 config, 
+                 process_group,
+                 agent_group_worker, 
+                 worker_group_index: int, 
+                 batch: TensorDict, 
+                 ) -> NodeOutput:
         """Generates sequences for a training batch using the rollout model."""
         if self._multi_agent is False:
             if self.rollout_mode == 'sync':
-                return self.generate_sync_mode(worker_group_index, batch, **kwargs)
+                return self.generate_sync_mode(config, agent_group_worker, worker_group_index, batch)
             else: 
-                return self.generate_async_mode(worker_group_index, batch, **kwargs)
+                return self.generate_async_mode(config, batch)
         else:
-            return self.generate_multi_agent_mode(worker_group_index, batch, **kwargs)
+            return self.generate_multi_agent_mode(config, batch)
                     
     @DistProfiler.annotate(role="compute_reward")
-    def compute_reward(self, batch: TensorDict, tp_size: int, **kwargs) -> NodeOutput:
+    def compute_reward(self, 
+                       config, 
+                       batch: TensorDict, 
+                       tp_size: int
+                       ) -> NodeOutput:
         """Calculates rewards for a batch of generated sequences."""
         if "token_level_rewards" in batch and batch["token_level_rewards"].numel() > 0:
             return NodeOutput(batch=batch, metrics={})
@@ -486,29 +504,33 @@ class DAGWorker(Worker):
             batch.update({k: np.array(v) for k, v in extra_infos.items()}, inplace=True)
 
         metrics = {}
-        if self.config.algorithm.use_kl_in_reward:
-            batch, kl_metrics = apply_kl_penalty(batch, self.kl_ctrl_in_reward, self.config.algorithm.kl_penalty)
+        if config.algorithm.use_kl_in_reward:
+            kl_ctrl_in_reward = core_algos.get_kl_controller(config.algorithm.kl_ctrl)
+            batch, kl_metrics = apply_kl_penalty(batch, kl_ctrl_in_reward, config.algorithm.kl_penalty)
             metrics.update(kl_metrics)
         else:
             batch["token_level_rewards"] = batch["token_level_scores"]
         return NodeOutput(batch=batch, metrics=metrics)
 
     @DistProfiler.annotate(role="compute_old_log_prob")
-    def compute_old_log_prob(self, batch: TensorDict, worker_group_index: int, **kwargs) -> NodeOutput:
+    def compute_old_log_prob(self,
+                             config,
+                             batch: TensorDict,
+                             process_group,
+                             agent_group_worker,
+                             worker_group_index: int
+                             ) -> NodeOutput:
         """Computes log probabilities from the actor model before the policy update."""
-        meta_info = MetaInfo()
-        if not meta_info.global_token_num:
+        if "global_token_num" not in batch:
             # in multi-agent, agentA may don't have reward node
             # insert some info needed
-            meta_info.global_token_num = torch.sum(batch["attention_mask"], dim=-1).tolist()
-        processed_data = self.agent_group_worker[worker_group_index][NodeRole.ACTOR].compute_log_prob(batch)
-        process_group = self._get_node_process_group(self._get_node(NodeRole.ACTOR, worker_group_index))
-
+            batch["global_token_num"] = NonTensorData(torch.sum(batch["attention_mask"], dim=-1).tolist())
+        processed_data = agent_group_worker[worker_group_index][NodeRole.ACTOR].compute_log_prob(batch)
         local_metrics = processed_data["metrics"]  if "metrics" in processed_data else {}
         if "entropys" in processed_data:
-            entropy = agg_loss(processed_data["entropys"], processed_data["response_mask"].to("cpu"), self.config.actor_rollout_ref.actor.loss_agg_mode)
+            entropy = agg_loss(processed_data["entropys"], processed_data["response_mask"].to("cpu"), config.actor_rollout_ref.actor.loss_agg_mode)
             local_metrics["actor/entropy_loss"] = entropy.item()
-        metrics = self._reduce_and_broadcast_metrics(local_metrics, process_group)
+        metrics = reduce_and_broadcast_metrics(local_metrics, process_group)
 
         processed_data.pop("metrics", None)
         processed_data.pop("entropys", None)
@@ -516,22 +538,38 @@ class DAGWorker(Worker):
         return NodeOutput(batch=processed_data, metrics=metrics)
 
     @DistProfiler.annotate(role="compute_ref_log_prob")
-    def compute_ref_log_prob(self, batch: TensorDict, worker_group_index: int, **kwargs) -> NodeOutput:
+    def compute_ref_log_prob(self, 
+                             config,
+                             batch: TensorDict,
+                             process_group,
+                             agent_group_worker,
+                             worker_group_index: int
+                             ) -> NodeOutput:
         """Computes log probabilities from the frozen reference model."""
-        processed_data = self.agent_group_worker[worker_group_index][NodeRole.REFERENCE].compute_ref_log_prob(batch)
-        metrics = processed_data["metrics"] if "metrics" in processed_data else {}
+        processed_data = agent_group_worker[worker_group_index][NodeRole.REFERENCE].compute_ref_log_prob(batch)
+        metrics = processed_data.meta_info.get("metrics", {})
         return NodeOutput(batch=processed_data, metrics=metrics)
 
     @DistProfiler.annotate(role="compute_value")
-    def compute_value(self, batch: TensorDict, worker_group_index: int, **kwargs) -> NodeOutput:
+    def compute_value(self,
+                      config,
+                      batch: TensorDict,
+                      process_group,
+                      agent_group_worker,
+                      worker_group_index: int
+                      ) -> NodeOutput:
         """Computes value estimates from the critic model."""
-        processed_data = self.agent_group_worker[worker_group_index][NodeRole.CRITIC].compute_values(batch)
+        processed_data = agent_group_worker[worker_group_index][NodeRole.CRITIC].compute_values(batch)
         return NodeOutput(batch=processed_data)
 
     @DistProfiler.annotate(role="compute_advantage")
-    def compute_multi_agent_advantage(self, batch: DataProto, **kwargs) -> NodeOutput:
-        adv_config = self.config.algorithm
-        rollout_config = self.config.actor_rollout_ref.rollout
+    def compute_multi_agent_advantage(self, 
+                                      config, 
+                                      batch: DataProto, 
+                                      **kwargs
+                                      ) -> NodeOutput:
+        adv_config = config.algorithm
+        rollout_config = config.actor_rollout_ref.rollout
         cur_node = kwargs["cur_node"]
         if "token_level_rewards" not in batch.batch :
             # make sure rewards of angentB has been compute
@@ -563,43 +601,71 @@ class DAGWorker(Worker):
                     
         return NodeOutput(
             batch=compute_advantage(
-                batch, adv_estimator=adv_config.adv_estimator, gamma=adv_config.gamma, lam=adv_config.lam, num_repeat=rollout_config.n, norm_adv_by_std_in_grpo=adv_config.norm_adv_by_std_in_grpo, weight_factor_in_cpgd=adv_config.weight_factor_in_cpgd, multi_turn=rollout_config.multi_turn.enable,
+                batch, 
+                adv_estimator=adv_config.adv_estimator, 
+                gamma=adv_config.gamma, 
+                lam=adv_config.lam, 
+                num_repeat=rollout_config.n, 
+                norm_adv_by_std_in_grpo=adv_config.norm_adv_by_std_in_grpo, 
+                weight_factor_in_cpgd=adv_config.weight_factor_in_cpgd, 
+                multi_turn=rollout_config.multi_turn.enable,
                 **kwargs
             )
         )        
         
     @DistProfiler.annotate(role="compute_advantage")
-    def compute_advantage(self, batch: DataProto, **kwargs) -> NodeOutput:
+    def compute_advantage(self,
+                          config,
+                          batch: DataProto,
+                          **kwargs
+                          ) -> NodeOutput:
         """Computes advantages and returns for PPO using GAE."""
         if self._multi_agent:
-            return self.compute_multi_agent_advantage(batch, **kwargs)
-        adv_config = self.config.algorithm
-        rollout_config = self.config.actor_rollout_ref.rollout
+            return self.compute_multi_agent_advantage(config, batch, **kwargs)
+        adv_config = config.algorithm
+        rollout_config = config.actor_rollout_ref.rollout
         return NodeOutput(
             batch=compute_advantage(
-                batch, adv_estimator=adv_config.adv_estimator, gamma=adv_config.gamma, lam=adv_config.lam, num_repeat=rollout_config.n, norm_adv_by_std_in_grpo=adv_config.norm_adv_by_std_in_grpo, weight_factor_in_cpgd=adv_config.weight_factor_in_cpgd, multi_turn=rollout_config.multi_turn.enable,
+                batch,
+                adv_estimator=adv_config.adv_estimator,
+                gamma=adv_config.gamma,
+                lam=adv_config.lam,
+                num_repeat=rollout_config.n,
+                norm_adv_by_std_in_grpo=adv_config.norm_adv_by_std_in_grpo,
+                weight_factor_in_cpgd=adv_config.weight_factor_in_cpgd,
+                multi_turn=rollout_config.multi_turn.enable,
                 **kwargs
             )
         )
 
     @DistProfiler.annotate(role="train_critic")
-    def train_critic(self, batch: TensorDict, worker_group_index: int, **kwargs) -> NodeOutput:
+    def train_critic(self, 
+                     config,  
+                     batch: TensorDict, 
+                     process_group,
+                     agent_group_worker,
+                     worker_group_index: int, 
+                     ) -> NodeOutput:
         """Performs a single training step on the critic model."""
-        processed_data = self.agent_group_worker[worker_group_index][NodeRole.CRITIC].update_critic(batch)
-        process_group = self._get_node_process_group(self._get_node(NodeRole.CRITIC, worker_group_index))
-        metrics = self._reduce_and_broadcast_metrics(processed_data["metrics"], process_group)
+        processed_data = agent_group_worker[worker_group_index][NodeRole.CRITIC].update_critic(batch)
+        metrics = reduce_and_broadcast_metrics(processed_data.meta_info.get("metrics"), process_group)
         return NodeOutput(batch=processed_data, metrics=metrics)
 
     @DistProfiler.annotate(role="train_actor")
-    def train_actor(self, batch: TensorDict, worker_group_index: int, **kwargs) -> NodeOutput:
+    def train_actor(self,
+                    config,
+                    batch: TensorDict,
+                    process_group,
+                    agent_group_worker,
+                    worker_group_index: int,
+                    ) -> NodeOutput:
         """Performs a single training step on the actor (policy) model."""
-        if self.config.trainer.critic_warmup > self.global_steps:
+        global_steps = batch["global_steps"] if "global_steps" in batch else 0 
+        if config.trainer.critic_warmup > global_steps:
             return NodeOutput(batch=batch)  # Skip actor update during critic warmup
-
         batch["multi_turn"] = NonTensorData(self.config.actor_rollout_ref.rollout.multi_turn.enable)
-        processed_data = self.agent_group_worker[worker_group_index][NodeRole.ACTOR].update_actor(batch)
-        process_group = self._get_node_process_group(self._get_node(NodeRole.ACTOR, worker_group_index))
-        metrics = self._reduce_and_broadcast_metrics(processed_data["metrics"], process_group)
+        processed_data = agent_group_worker[worker_group_index][NodeRole.ACTOR].update_actor(batch)
+        metrics = reduce_and_broadcast_metrics(processed_data["metrics"], process_group)
         return NodeOutput(batch=processed_data, metrics=metrics)
     
 
@@ -614,13 +680,17 @@ class DAGWorker(Worker):
         
         self._setup_distributed_environment()
         self._setup_tokenizers()
-        self._setup_dataloader_and_reward()
+        self._setup_dataloader()
+        self._setup_reward_managers()
         self._setup_role_worker_mapping()
         self._initialize_node_workers()
         self._profiler = DistProfiler(rank=self._rank, config=self.config.profiler)
 
         # Initialize CheckpointManager - Note: will be fully initialized after workers are created
         self.checkpoint_manager = None
+
+        # Initialize Validator - Note: will be initialized in init_graph() after all workers are ready
+        self.validator = None
 
         if self._rank == 0:
             logger.info("Rank 0: Initializing tracking logger...")
@@ -637,9 +707,6 @@ class DAGWorker(Worker):
 
     def _setup_distributed_environment(self):
         """Initializes the default process group and all required subgroups."""
-        # gloo_socket_ifname = 'bond0'
-        # os.environ["GLOO_SOCKET_IFNAME"] = gloo_socket_ifname
-        # os.environ["GLOO_LOG_LEVEL"] = "DEBUG"
         
         if not dist.is_initialized():
             backend = (
@@ -700,7 +767,7 @@ class DAGWorker(Worker):
             return
 
         for node in model_nodes:
-            agent_key = generate_agent_group_key(node)
+            agent_key = f"group_key_{node.agent_group}"
             if agent_key not in self.tokenizer_mapping:
                 # Add robust check for missing configuration.
                 intern_config = node.config.get(DAGConstants.INTERN_CONFIG)
@@ -714,11 +781,11 @@ class DAGWorker(Worker):
                 self.tokenizer_mapping[agent_key] = tokenizer_module
         logger.info(f"Rank {self._rank}: Initialized {len(self.tokenizer_mapping)} tokenizer(s).")
 
-    def _setup_dataloader_and_reward(self):
-        """Initializes the data loader and reward functions."""
+    def _setup_dataloader(self):
+        """Initializes the data loader for training and validation."""
         rollout_nodes = [n for n in self.taskgraph.nodes.values() if n.node_type == NodeType.MODEL_INFERENCE]
         if not rollout_nodes:
-            raise ValueError("At least one MODEL_INFERENCE node is required for dataloader and reward setup.")
+            raise ValueError("At least one MODEL_INFERENCE node is required for dataloader setup.")
         self.first_rollout_node = rollout_nodes[0]
 
         pg_assignment = self.process_group_manager.get_node_assignment(self.first_rollout_node.node_id)
@@ -746,7 +813,10 @@ class DAGWorker(Worker):
                 "auto_repeat": self.config.data.auto_repeat,
             },
         )
+        logger.info(f"Rank {self._rank}: DataLoader initialized with {self.dataloader.total_training_steps} total training steps.")
 
+    def _setup_reward_managers(self):
+        """Initializes reward managers for training and validation."""
         self.validate_tokenizer = next(iter(self.tokenizer_mapping.values()), {}).get("tokenizer")
         if not self.validate_tokenizer:
             logger.warning("No tokenizer loaded; reward functions might fail or use a default one.")
@@ -766,10 +836,7 @@ class DAGWorker(Worker):
             overlong_buffer_cfg=self.config.reward_model.overlong_buffer,
             **self.config.reward_model.reward_kwargs,
         )
-
-        if self.config.algorithm.use_kl_in_reward:
-            from siirl.dag_worker import core_algos
-            self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
+        logger.info(f"Rank {self._rank}: Reward managers initialized.")
 
     def _setup_role_worker_mapping(self):
         """Creates a mapping from NodeRole to the corresponding Worker implementation class."""
@@ -842,133 +909,139 @@ class DAGWorker(Worker):
         
         if len(self.agent_group_worker) > 1:
             self._multi_agent = True
-
-    def _get_node_process_group(self, node: Node) -> ProcessGroup:
-        """Retrieves the PyTorch ProcessGroup assigned to a specific graph node."""
-        assignment = self.process_group_manager.get_node_assignment(node.node_id)
-        if not (assignment and (name := assignment.get("process_group_name"))):
-            raise ValueError(f"Process group assignment or name not found for node {node.node_id}.")
-
-        pg = self.process_groups.get(name)
-        if pg is None:
-            raise ValueError(f"Process group '{name}' for node {node.node_id} was not created or found.")
-        return pg
-
-    def _get_node(self, role: NodeRole, agent_group: int) -> Node:
-        """
-        Finds and returns a specific node from the task graph based on its role
-        and agent group.
-        """
-        found_node = next(
-            (
-                node
-                for node in self.taskgraph.nodes.values()
-                if node.node_role == role and node.agent_group == agent_group
-            ),
-            None,
-        )
-
-        if found_node is None:
-            raise RuntimeError(f"Could not find a node with role {role.name} for agent_group {agent_group}")
-        return found_node
-
-    def _get_node_dp_info(self, node: Node) -> tuple[int, int, int, int, int, int]:
-        """
-        Calculates Data Parallel (DP), Tensor Parallel (TP), and Pipeline Parallel (PP) info for a node.
-        
-        Returns:
-            tuple: (dp_size, dp_rank, tp_rank, tp_size, pp_rank, pp_size)
-        """
-        reference_node = node
-        if node.node_type == NodeType.COMPUTE:
-            # If the node is a COMPUTE type, find its true data source ancestor.
-            ancestor = find_first_non_compute_ancestor(self.taskgraph, node.node_id)
-            if ancestor:
-                reference_node = ancestor
-            else:
-                # If no non-COMPUTE ancestor is found, it's a critical error.
-                raise RuntimeError(f"Could not find any non-COMPUTE ancestor for COMPUTE node '{node.node_id}'. Please check your DAG graph configuration.")
-
-        if reference_node.node_type == NodeType.COMPUTE:
-            group_world_size = self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes
-            group_rank = dist.get_rank()
-        else:
-            process_group = self._get_node_process_group(reference_node)
-            group_world_size = dist.get_world_size(process_group)
-            group_rank = dist.get_rank(process_group)
-
-        # Get parallelism configuration based on backend strategy
-        tp_size, pp_size = get_parallelism_config(reference_node)
-        
-        # Calculate total parallel size (TP * PP)
-        total_parallel_size = tp_size * pp_size
-        
-        if group_world_size % total_parallel_size != 0:
-            raise ValueError(f"Configuration error for node {node.node_id}: Group world size ({group_world_size}) is not divisible by total parallel size (TP={tp_size} * PP={pp_size} = {total_parallel_size}). Check your parallel configuration.")
-        
-        dp_size = group_world_size // total_parallel_size
-        
-        # Calculate ranks within the data parallel group
-        dp_rank = group_rank // total_parallel_size
-        
-        # Calculate position within the TP-PP grid
-        local_rank_in_tp_pp_group = group_rank % total_parallel_size
-        
-        # For 2D parallelism: ranks are arranged as [PP0_TP0, PP0_TP1, ..., PP0_TP(tp_size-1), PP1_TP0, ...]
-        pp_rank = local_rank_in_tp_pp_group // tp_size
-        tp_rank = local_rank_in_tp_pp_group % tp_size
-        
-        return dp_size, dp_rank, tp_rank, tp_size, pp_rank, pp_size
     
-    def init_model(self):
-        """Initializes models for all workers and sets up sharding managers where applicable."""
-        logger.info("Initializing models for all worker nodes...")
-        have_init_workers = set()
-        for node in self.taskgraph.nodes.values():
-            if should_create_worker(self.role_worker_mapping, node):
-                node_worker = self.workers[generate_node_worker_key(node)]
-                if not isinstance(node_worker, Worker):
-                    raise TypeError(f"Invalid worker type for node {node.node_id}: {type(node_worker).__name__}")
-                if generate_node_worker_key(node) in have_init_workers:
-                    logger.warning(
-                        f"Rank {self._rank}: Worker {generate_node_worker_key(node)} for node {node.node_id} "
-                        f"already initialized. Skipping."
-                    )
-                    continue
-                node_worker.init_model()
-                have_init_workers.add(generate_node_worker_key(node))
-        logger.success("All worker models initialized.")
+    def init_graph(self):
+        """
+        Initializes the computation graph by loading models and restoring checkpoint state.
 
-        logger.info(f"Setting up sharding managers {self.config.actor_rollout_ref.rollout.name} ...")
+        Executed after _initialize_worker() across all workers via Ray remote call.
+        This method include:
+        (1) model weight loading,
+        (2) weight sharding_manager setup,
+        (3) async/multi-agent init,
+        (4) validator init,
+        (5) checkpoint restoration
+
+        Called by: RayActorManager._initialize_workers() via map_async("init_graph").
+        """
+
+        self._load_model_weights()
+
+        self._setup_sharding_manager()
+
+        self._setup_async_rollout()
+
+        self._setup_multi_agent_loop()
+
+        self._init_validator()
+
+        self._init_checkpoint_manager()
+        self.global_steps = self.checkpoint_manager.load_checkpoint()
+
+        dist.barrier(self._gather_group)
+
+    def _load_model_weights(self):
+        """Loads model weights to GPU for all node workers."""
+        logger.info("Loading model weights for all worker nodes...")
+        initialized_workers = set()
+
+        for node in self.taskgraph.nodes.values():
+            if not should_create_worker(self.role_worker_mapping, node):
+                continue
+
+            worker_key = generate_node_worker_key(node)
+            if worker_key in initialized_workers:
+                continue
+
+            node_worker = self.workers[worker_key]
+            if not isinstance(node_worker, Worker):
+                raise TypeError(f"Invalid worker type for node {node.node_id}: {type(node_worker).__name__}")
+
+            node_worker.init_model()
+            initialized_workers.add(worker_key)
+
+        logger.success("All model weights loaded successfully.")
+
+    def _setup_sharding_manager(self):
+        """Sets up sharding managers for actor-rollout weight synchronization."""
+        logger.info(f"Setting up weight sharing infrastructure ({self.config.actor_rollout_ref.rollout.name})...")
+
         for agent_group, worker_dict in self.agent_group_worker.items():
             if NodeRole.ACTOR in worker_dict and NodeRole.ROLLOUT in worker_dict:
                 try:
-                    setup_sharding_manager(self.config, self.agent_group_process_group, agent_group, worker_dict)
+                    setup_sharding_manager(
+                        self.config,
+                        self.agent_group_process_group,
+                        agent_group,
+                        worker_dict
+                    )
                 except Exception as e:
                     logger.error(f"Failed to set up sharding manager for agent group {agent_group}: {e}", exc_info=True)
                     raise
-                
-        
-        if self.config.actor_rollout_ref.rollout.mode == "async":
-            logger.info(f"Initial Async Rollout Server ...")
-            for node in self.taskgraph.nodes.values():
-                if node.node_role == NodeRole.ROLLOUT:
-                    # need init after set sharding manager
-                    self.rollout_mode = "async"
-                    node_worker = self.workers[generate_node_worker_key(node)]
-                    self.zmq_address = node_worker.get_zeromq_address()
-                    self.init_async_server(node=node, node_worker=node_worker)
-        logger.info("All models and sharding managers initialized successfully.")
-        if self._multi_agent:
-            from siirl.execution.rollout_flow.multi_agent.multiagent_generate import MultiAgentLoop
-            self.multi_agent_loop =  MultiAgentLoop(self, config = self.config.actor_rollout_ref, node_workers = self.workers, local_dag = self.taskgraph, databuffer = self.data_buffers, placement_mode = 'colocate')
 
-    def init_graph(self):
-        # this is needed by async rollout manager
-        self._set_node_executables()
-        self.init_model()
+        logger.success("Weight sharing infrastructure initialized.")
 
-        # Initialize CheckpointManager after workers are created
+    def _setup_async_rollout(self):
+        """Initializes async rollout server if configured."""
+        if self.config.actor_rollout_ref.rollout.mode != "async":
+            return
+
+        logger.info("Initializing async rollout server...")
+        for node in self.taskgraph.nodes.values():
+            if node.node_role == NodeRole.ROLLOUT:
+                self.rollout_mode = "async"
+                node_worker = self.workers[generate_node_worker_key(node)]
+                self.zmq_address = node_worker.get_zeromq_address()
+                self.init_async_server(node=node, node_worker=node_worker)
+
+        logger.success("Async rollout server initialized.")
+
+    def _setup_multi_agent_loop(self):
+        """Initializes multi-agent loop if in multi-agent mode."""
+        if not self._multi_agent:
+            return
+
+        logger.info("Initializing multi-agent loop...")
+        from siirl.execution.rollout_flow.multi_agent.multiagent_generate import MultiAgentLoop
+
+        self.multi_agent_loop = MultiAgentLoop(
+            self,
+            config=self.config.actor_rollout_ref,
+            node_workers=self.workers,
+            local_dag=self.taskgraph,
+            databuffer=self.data_buffers,
+            placement_mode='colocate'
+        )
+
+        logger.success("Multi-agent loop initialized.")
+
+    def _init_validator(self):
+        """Initializes validator for validation workflow."""
+        logger.info("Initializing validator...")
+        from siirl.dag_worker.validator import Validator
+
+        self.validator = Validator(
+            config=self.config,
+            dataloader=self.dataloader,
+            val_reward_fn=self.val_reward_fn,
+            validate_tokenizer=self.validate_tokenizer,
+            agent_group_worker=self.agent_group_worker,
+            rollout_mode=self.rollout_mode,
+            async_rollout_manager=self._async_rollout_manager,
+            multi_agent_loop=getattr(self, 'multi_agent_loop', None),
+            multi_agent=self._multi_agent,
+            rank=self._rank,
+            world_size=self.world_size,
+            gather_group=self._gather_group,
+            first_rollout_node=self.first_rollout_node,
+            get_node_dp_info_fn=self._get_node_dp_info,
+            enable_perf=self.enable_perf,
+        )
+        logger.success("Validator initialized.")
+
+    def _init_checkpoint_manager(self):
+        """Initializes checkpoint manager for saving/loading training state."""
+        logger.info("Initializing checkpoint manager...")
         self.checkpoint_manager = CheckpointManager(
             config=self.config,
             rank=self._rank,
@@ -979,12 +1052,6 @@ class DAGWorker(Worker):
             first_rollout_node=self.first_rollout_node,
             get_node_dp_info_fn=self._get_node_dp_info
         )
-
-        # Use CheckpointManager to load checkpoint
-        self.global_steps = self.checkpoint_manager.load_checkpoint()
-
-        # Ensure all models are initialized and checkpoints are loaded before starting.
-        dist.barrier(self._gather_group)
 
     def init_async_server(self, node:Node, node_worker):
         #gather zmq_address to rank_0
@@ -1002,225 +1069,14 @@ class DAGWorker(Worker):
             for i in range(tp_size):
                 addr_str = ''.join([chr(c.item()) for c in group_addrs[i]])
                 zmq_addresses.append(addr_str)
-        else:  # 组内其他进程（tp1, tp3...）
-            # 发送自己的地址到组内目标进程
+        else:  
             dist.send(encoded_addr, dst=dp_rank * tp_size)
         if tp_rank == 0:
             self._async_rollout_manager = AgentLoopManager(node.config["intern_config"], dp_rank, os.environ['WG_PREFIX'], node_worker.rollout, zmq_addresses)
-    def get_zeromq_address(self):
-        return self.zmq_address
     
 # ==========================================================================================
-# Module 4: Validation
+# Module 4: Utilities
 # ==========================================================================================
-
-    def _validate(self) -> Dict[str, float]:
-        """Performs validation by generating, scoring, and aggregating metrics across all ranks."""
-        self.val_timedict = defaultdict(float)
-        if self._rank == 0:
-            logger.info("=" * 60)
-            logger.info(f"Starting Validation @ Global Step {self.global_steps}...")
-            logger.info("=" * 60)
-            self.val_timedict["overall_start_time"] = time.perf_counter()
-
-        all_scored_results: List[ValidationResult] = []
-
-        # Check if num_val_batches > 0 to avoid unnecessary loops.
-        if self.dataloader.num_val_batches <= 0:
-            if self._rank == 0:
-                logger.warning("num_val_batches is 0. Skipping validation.")
-            return {}
-
-        for i in range(self.dataloader.num_val_batches):
-            if self._rank == 0:
-                logger.debug(f"Processing validation batch {i + 1}/{self.dataloader.num_val_batches}")
-
-            with timer(self.enable_perf, "prep_and_generate", self.val_timedict):
-                batch = self._prepare_validation_batch()
-                generated_proto = self._generate_for_validation(batch)
-                dist.barrier(self._gather_group)  
-
-            with timer(self.enable_perf, "score_and_package", self.val_timedict):
-                scored_results = self._score_and_package_results(generated_proto)
-                all_scored_results.extend(scored_results)
-
-        dump_validation_generations(self.config, self.global_steps, self._rank, all_scored_results)
-        dist.barrier(self._gather_group)
-        
-        _, _, tp_rank, _, pp_rank, _ = self._get_node_dp_info(self.first_rollout_node)
-        # Gather all payloads to rank 0
-        with timer(self.enable_perf, "gather_payloads", self.val_timedict):
-            payloads_for_metrics = []
-            if tp_rank == 0 and pp_rank == 0:
-                # Only the master rank of the TP group (tp_rank=0) and first PP stage (pp_rank=0) prepares the payload.
-                payloads_for_metrics = [
-                    ValidationPayload(r.input_text, r.score, r.data_source, r.extra_rewards) for r in all_scored_results
-                ]
-            gathered_payloads_on_rank0 = [None] * self.world_size if self._rank == 0 else None
-            dist.gather_object(payloads_for_metrics, gathered_payloads_on_rank0, dst=0, group=self._gather_group)
-
-        # Rank 0 performs the final aggregation and logging
-        if self._rank == 0:
-            flat_payload_list = [p for sublist in gathered_payloads_on_rank0 if sublist for p in sublist]
-            final_metrics = self._aggregate_and_log_validation_metrics(flat_payload_list)
-        dist.barrier(self._gather_group)
-        
-        return final_metrics if self._rank == 0 else {}
-
-    def _prepare_validation_batch(self) -> TensorDict:
-        """Fetches and prepares a single batch for validation."""
-        test_batch = self.dataloader.run(is_validation_step=True)
-        test_batch = preprocess_dataloader(test_batch, 1)
-        n_samples = self.config.actor_rollout_ref.rollout.val_kwargs.n
-        return test_batch.repeat_interleave(n_samples)
-
-    def _generate_for_validation(self, batch: TensorDict) -> TensorDict:
-        """Generates sequences using the rollout worker for a validation batch."""
-        rollout_worker = self.agent_group_worker[0][NodeRole.ROLLOUT]
-        val_kwargs = self.config.actor_rollout_ref.rollout.val_kwargs
-
-        prompt_texts = self.validate_tokenizer.batch_decode(
-            batch["input_ids"], skip_special_tokens=True
-        )
-        batch["prompt_texts"] = prompt_texts
-        
-        batch["meta_info"] = NonTensorData({
-            "eos_token_id": self.validate_tokenizer.eos_token_id,
-            "pad_token_id": self.validate_tokenizer.pad_token_id,
-            "recompute_log_prob": False,
-            "do_sample": val_kwargs.do_sample,
-            "validate": True,
-        })
-        logger.info(f"_generate_for_validation gen batch meta_info: {batch['meta_info']}")
-        
-        output = None
-        if self._multi_agent is False:
-            if self.rollout_mode == 'sync':
-                output = rollout_worker.generate_sequences(batch)
-            elif self._async_rollout_manager:
-                loop = asyncio.get_event_loop()
-                output = loop.run_until_complete(self._async_rollout_manager.generate_sequences(batch))
-        else:
-            output = self.multi_agent_loop.generate_sequence(batch)
-        if output is not None:
-            return output
-        return batch
-
-    def _score_and_package_results(self, generated_proto: TensorDict) -> List[ValidationResult]:
-        """Scores generated sequences and packages them into ValidationResult objects."""
-        if self.rollout_mode == 'async' and self._async_rollout_manager is None:
-            return []
-        if self._multi_agent and 'responses' not in generated_proto:
-            return []
-        if "token_level_rewards" in generated_proto:
-            reward_result = {"reward_tensor": generated_proto["token_level_rewards"],
-                             "reward_extra_info": {}}
-        else:    
-            reward_result = self.val_reward_fn(generated_proto, return_dict=True)
-        scores = reward_result["reward_tensor"].sum(-1).cpu()
-
-        input_texts = generated_proto["prompt_texts"] if "prompt_texts" in generated_proto else None
-        if input_texts is None:
-            logger.error(
-                "FATAL: `prompt_texts` not found in `non_tensor_batch`. "
-                "The prompt data was lost during the process. Falling back to decoding the full sequence, "
-                "but please be aware the resulting `input_text` will be INCORRECT (it will contain prompt + response)."
-            )
-            # Fallback to prevent a crash, but the output is known to be wrong.
-            input_texts = self.validate_tokenizer.batch_decode(
-                generated_proto["input_ids"], skip_special_tokens=True
-            )
-
-        output_texts = self.validate_tokenizer.batch_decode(generated_proto["responses"], skip_special_tokens=True)
-        data_sources = generated_proto["data_source"] if "data_source" in generated_proto else ["unknown"] * len(scores)
-        extra_info = generated_proto["extra_info"] if "data_source" in generated_proto else [None] * len(scores)
-
-        packaged_results = []
-        for i in range(len(scores)):
-            if self.dataloader.is_val_trailing_rank and isinstance(extra_info[i], dict) and extra_info[i].get("padded_duplicate", None):
-                logger.debug(f"Rank {self._rank} skip append padded duplicate item {i}: score={scores[i].item()}")
-                continue
-            extra_rewards = {k: v[i] for k, v in reward_result.get("reward_extra_info", {}).items()}
-            packaged_results.append(ValidationResult(input_texts[i], output_texts[i], scores[i].item(), data_sources[i], reward_result["reward_tensor"][i], extra_rewards))
-        return packaged_results
-
-    def _aggregate_and_log_validation_metrics(self, all_payloads: List[ValidationPayload]) -> Dict[str, float]:
-        """On Rank 0, aggregates all validation results and logs performance."""
-        if not all_payloads:
-            logger.warning("Validation finished with no results gathered on Rank 0 to aggregate.")
-            return {}
-
-        logger.info(f"Rank 0: Aggregating {len(all_payloads)} validation results...")
-        with timer(self.enable_perf, "final_aggregation", self.val_timedict):
-            final_metrics = self._aggregate_validation_results(all_payloads)
-
-        # Log performance breakdown
-        total_time = time.perf_counter() - self.val_timedict.pop("overall_start_time", time.perf_counter())
-        logger.info("--- Validation Performance Breakdown (Rank 0) ---")
-        for name, duration in self.val_timedict.items():
-            logger.info(f"  Total {name.replace('_', ' ').title():<25}: {duration:.4f}s")
-        known_time = sum(self.val_timedict.values())
-        logger.info(f"  {'Other/Overhead':<25}: {max(0, total_time - known_time):.4f}s")
-        logger.info(f"  {'TOTAL VALIDATION TIME':<25}: {total_time:.4f}s")
-        logger.info("=" * 51)
-
-        return final_metrics
-
-    def _aggregate_validation_results(self, all_payloads: List[ValidationPayload]) -> Dict[str, float]:
-        """Computes the final metric dictionary from all gathered validation payloads."""
-        data_sources = [p.data_source for p in all_payloads]
-        sample_inputs = [p.input_text for p in all_payloads]
-
-        infos_dict = defaultdict(list)
-        for p in all_payloads:
-            infos_dict["reward"].append(p.score)
-            for key, value in p.extra_rewards.items():
-                infos_dict[key].append(value)
-
-        data_src2var2metric2val = aggregate_validation_metrics(data_sources=data_sources, sample_inputs=sample_inputs, infos_dict=infos_dict)
-
-        metric_dict = {}
-        for data_source, var2metric2val in data_src2var2metric2val.items():
-            core_var = "acc" if "acc" in var2metric2val else "reward"
-            for var_name, metric2val in var2metric2val.items():
-                if not metric2val:
-                    continue
-
-                # Robustly parse '@N' to prevent crashes from malformed metric names.
-                n_max_values = []
-                for name in metric2val.keys():
-                    if "@" in name and "/mean" in name:
-                        try:
-                            n_val = int(name.split("@")[-1].split("/")[0])
-                            n_max_values.append(n_val)
-                        except (ValueError, IndexError):
-                            continue  # Ignore malformed metric names
-
-                n_max = max(n_max_values) if n_max_values else 1
-
-                for metric_name, metric_val in metric2val.items():
-                    is_core_metric = (var_name == core_var) and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"]) and (f"@{n_max}" in metric_name)
-
-                    metric_sec = "val-core" if is_core_metric else "val-aux"
-                    pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
-                    metric_dict[pfx] = metric_val
-
-        # Re-calculate test_score per data source
-
-        data_source_rewards = defaultdict(list)
-        for p in all_payloads:
-            data_source_rewards[p.data_source].append(p.score)
-
-        for source, rewards in data_source_rewards.items():
-            if rewards:
-                metric_dict[f"val/test_score/{source}"] = np.mean(rewards)
-
-        return metric_dict
-
-# ==========================================================================================
-# Module 5: Utilities
-# ==========================================================================================
-
     def put_data_to_buffers(
         self, key: str, 
         data: TensorDict,
@@ -1313,68 +1169,107 @@ class DAGWorker(Worker):
         """
         logger.debug("`reset_data_buffer` is a no-op with the new DataCoordinator model as gets are consuming.")
         pass
+    
+    def _get_node_process_group(self, node: Node) -> ProcessGroup:
+        """Retrieves the PyTorch ProcessGroup assigned to a specific graph node."""
+        assignment = self.process_group_manager.get_node_assignment(node.node_id)
+        if not (assignment and (name := assignment.get("process_group_name"))):
+            raise ValueError(f"Process group assignment or name not found for node {node.node_id}.")
 
+        pg = self.process_groups.get(name)
+        if pg is None:
+            raise ValueError(f"Process group '{name}' for node {node.node_id} was not created or found.")
+        return pg
+
+    def _get_node_dp_info(self, node: Node) -> tuple[int, int, int, int, int, int]:
+        """
+        Calculates Data Parallel (DP), Tensor Parallel (TP), and Pipeline Parallel (PP) info for a node.
+        
+        Returns:
+            tuple: (dp_size, dp_rank, tp_rank, tp_size, pp_rank, pp_size)
+        """
+        reference_node = node
+        if node.node_type == NodeType.COMPUTE:
+            # If the node is a COMPUTE type, find its true data source ancestor.
+            ancestor = find_first_non_compute_ancestor(self.taskgraph, node.node_id)
+            if ancestor:
+                reference_node = ancestor
+            else:
+                # If no non-COMPUTE ancestor is found, it's a critical error.
+                raise RuntimeError(f"Could not find any non-COMPUTE ancestor for COMPUTE node '{node.node_id}'. Please check your DAG graph configuration.")
+
+        if reference_node.node_type == NodeType.COMPUTE:
+            group_world_size = self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes
+            group_rank = dist.get_rank()
+        else:
+            process_group = self._get_node_process_group(reference_node)
+            group_world_size = dist.get_world_size(process_group)
+            group_rank = dist.get_rank(process_group)
+
+        # Get parallelism configuration based on backend strategy
+        tp_size, pp_size = get_parallelism_config(reference_node)
+        
+        # Calculate total parallel size (TP * PP)
+        total_parallel_size = tp_size * pp_size
+        
+        if group_world_size % total_parallel_size != 0:
+            raise ValueError(f"Configuration error for node {node.node_id}: Group world size ({group_world_size}) is not divisible by total parallel size (TP={tp_size} * PP={pp_size} = {total_parallel_size}). Check your parallel configuration.")
+        
+        dp_size = group_world_size // total_parallel_size
+        
+        # Calculate ranks within the data parallel group
+        dp_rank = group_rank // total_parallel_size
+        
+        # Calculate position within the TP-PP grid
+        local_rank_in_tp_pp_group = group_rank % total_parallel_size
+        
+        # For 2D parallelism: ranks are arranged as [PP0_TP0, PP0_TP1, ..., PP0_TP(tp_size-1), PP1_TP0, ...]
+        pp_rank = local_rank_in_tp_pp_group // tp_size
+        tp_rank = local_rank_in_tp_pp_group % tp_size
+        
+        return dp_size, dp_rank, tp_rank, tp_size, pp_rank, pp_size
+
+    def get_zeromq_address(self):
+        return self.zmq_address
+        
     def multi_agent_put_log(self, key: str, data: DataProto, agent_group: int, next_dp_size: int, timing_raw):
-        # This logic needs to be adapted to the new model. For now, it's a warning.
-        logger.warning("`multi_agent_put_log` is not yet refactored for DataCoordinator and is a no-op.")
-        pass
+        def uuid_hex_to_bucket(uuid_hex: str, num_buckets: int = 8) -> int:
+            return consistent_hash(uuid_hex) % num_buckets
+        data_size = len(data)
+        put_futures = []
+        meta_info = data.meta_info
+        with timer(self.enable_perf, f"put_ray_proto_data_{key}", timing_raw):
+            for i in range(data_size):
+                cur_data = data[i]
+                request_id = cur_data.non_tensor_batch[f"agent_group_{agent_group}_request_id"]
+                next_dp_rank = uuid_hex_to_bucket(request_id, next_dp_size)
+                cur_key = key + f"_{next_dp_rank}"
+                buf = random.choice(self.data_buffers)
+                # slice of DataProto is DataProtoItem, will loss meta_info, need to recompute when use
+                cur_data = collate_fn([cur_data])
+                cur_data.meta_info = meta_info
+                put_futures.append(buf.put.remote(cur_key, cur_data))
+        with timer(self.enable_perf, f"put_proto_data_{key}", timing_raw):
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(asyncio.gather(*put_futures))
 
     def multi_agent_get_log(self, key: str, cur_dp_rank: int, agent_group: int, timing_raw):
-        # This logic needs to be adapted.
-        logger.warning("`multi_agent_get_log` is not yet refactored for DataCoordinator and is a no-op.")
-        return None
+        loop = asyncio.get_event_loop()
+        key = key + f"_{cur_dp_rank}"
+        prefix_key = f"agent_group_{agent_group}_"
+        with timer(self.enable_perf, f"get_ref_data_{key}", timing_raw):
+            tasks = [buf.get.remote(key) for buf in self.data_buffers]
+            temp_data =loop.run_until_complete(asyncio.gather(*tasks))
+            # temp_data = self.data_buffers.get(key) 
+            datas = [item for t in temp_data if t is not None for item in t]
+            sorted_datas = sorted(datas, key = lambda x : (x.non_tensor_batch[prefix_key + 'request_id'], -x.non_tensor_batch[prefix_key + 'traj_step']))
+            meta_info = sorted_datas[0].meta_info
+            dataproto = collate_fn(sorted_datas)
+            dataproto.meta_info = meta_info
+        return dataproto
 
     def check_spmd_mode(self):
         return self.rollout_mode == 'sync' and self._multi_agent == False
-
-    def _reduce_and_broadcast_metrics(
-        self, local_metrics: Dict[str, Union[float, List[float], torch.Tensor]], group: dist.ProcessGroup
-    ) -> Dict[str, float]:
-        """
-        Aggregates metrics in a distributed environment using a dedicated helper class.
-        For Pipeline Parallel setups, ensures all ranks have the same metric keys to avoid
-        tensor shape mismatch during all_reduce operations.
-
-        Args:
-            local_metrics: A dictionary of metrics on each rank.
-            group: The process group for the aggregation.
-
-        Returns:
-            A dictionary with the globally aggregated metrics, available on all ranks.
-        """
-        if not isinstance(local_metrics, dict) or not local_metrics:
-            return {}
-
-        world_size = dist.get_world_size(group)
-        if world_size <= 1:
-            # If not in a distributed setting, perform local aggregation only.
-            aggregator = DistributedMetricAggregator(local_metrics, group=None)
-            # The bucketed values are already the final values in a non-distributed case.
-            final_metrics = {}
-            for op_type, data in aggregator.op_buckets.items():
-                for key, value in data:
-                    if op_type == _ReduceOp.SUM: # value is a (sum, count) tuple
-                        final_metrics[key] = value[0] / value[1] if value[1] > 0 else 0.0
-                    else: # value is a float
-                        final_metrics[key] = float(value)
-            return final_metrics
-
-        # In Megatron with Pipeline Parallel:
-        # 1. First gather all metric keys from all ranks to ensure consistency
-        local_keys = set(local_metrics.keys())
-        all_keys_list = [None] * world_size
-        dist.all_gather_object(all_keys_list, local_keys, group=group)
-        
-        # 2. Union all keys to get the complete set of expected metrics
-        all_expected_keys = set()
-        for keys_set in all_keys_list:
-            all_expected_keys.update(keys_set)
-        
-        # 3. Use the aggregator with unified keys to perform communication
-        aggregator = DistributedMetricAggregator(local_metrics, group)
-        # NOTE(Ping Zhang): Ensure all ranks have the same metrics by adding missing ones with default values
-        aggregator.op_buckets = aggregator._bucket_local_metrics(local_metrics, all_expected_keys)
-        return aggregator.aggregate_and_get_results()
 
     def _collect_final_metrics(self, batch: DataProto, timing_raw: dict) -> Dict[str, float]:
         """
@@ -1427,7 +1322,7 @@ class DAGWorker(Worker):
 
         # --- 3. Perform the aggregated, distributed reduction ---
         with timer(self.enable_perf, "metrics_aggregation", timing_raw):
-            aggregated_metrics = self._reduce_and_broadcast_metrics(metrics_to_aggregate, self._gather_group)
+            aggregated_metrics = reduce_and_broadcast_metrics(metrics_to_aggregate, self._gather_group)
 
         # Post-process keys and values for the final output
         for key, value in aggregated_metrics.items():
@@ -1493,6 +1388,21 @@ class DAGWorker(Worker):
             for key, value in timing_metrics.items():
                 if key.startswith("timing_s/"):
                     final_metrics[key.replace("timing_s/", "perf/delta_time/")] = value
+
+            # Calculate rollout and actor log probs difference statistics
+            if "rollout_log_probs" in batch.batch and "old_log_probs" in batch.batch:
+                rollout_probs = torch.exp(batch.batch["rollout_log_probs"])
+                actor_probs = torch.exp(batch.batch["old_log_probs"])
+                rollout_probs_diff = torch.masked_select(
+                    torch.abs(rollout_probs.cpu() - actor_probs),
+                    batch.batch["response_mask"].bool().cpu()
+                )
+                if rollout_probs_diff.numel() > 0:
+                    final_metrics.update({
+                        "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).item(),
+                        "training/rollout_probs_diff_mean": torch.mean(rollout_probs_diff).item(),
+                        "training/rollout_probs_diff_std": torch.std(rollout_probs_diff).item()
+                    })
 
         # All ranks return the final metrics. Ranks other than 0 can use them if needed,
         # or just ignore them. This is cleaner than returning an empty dict.
