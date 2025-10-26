@@ -46,7 +46,6 @@ class DataRebalanceMixin:
     _find_first_non_compute_ancestor: Any
     _get_node_process_group: Any
     _get_node_dp_info: Any
-    _get_node_dp_info_dp_info: Any
 
     def _get_rebalancing_context(self, node_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -82,15 +81,19 @@ class DataRebalanceMixin:
 
         try:
             pg = self._get_node_process_group(reference_node)
-            dp_size, dp_rank, tp_rank, tp_size = self._get_node_dp_info(reference_node)
+            # Correctly unpack 6 values as specified by the user
+            dp_size, dp_rank, tp_rank, tp_size, _, _ = self._get_node_dp_info(reference_node)
             device = (
                 torch.device(f"{get_device_name()}:{get_device_id()}")
                 if torch.cuda.is_available()
                 else torch.device("cpu")
             )
-        except (ValueError, AttributeError):
-            # This is expected if the node is not part of a distributed setup.
-            logger.debug(f"Rank {self._rank}: Node '{reference_node.node_id}' is not distributed.")
+        except (ValueError, AttributeError, TypeError) as e:
+            # Catch TypeError in case _get_node_dp_info returns None
+            logger.error(
+                f"Rank {self._rank}: Failed to get distributed context for node '{reference_node.node_id}'. "
+                f"This is expected if the node is not distributed, but could also be an error. Error: {e}"
+            )
             return None
 
         return {
@@ -105,13 +108,21 @@ class DataRebalanceMixin:
     def _master_rebalance_logic(self, batch: DataProto, context: Dict[str, Any]) -> Dict[str, Any]:
         """
         Core decision-making logic, executed only by master ranks (tp_rank=0).
+        This function is responsible *only* for deciding whether to cache or
+        to rebalance, and then dispatching to the execution function.
         """
         if self.data_rebalance_masters_group is None:
             raise RuntimeError(
                 "The 'data_rebalance_masters_group' has not been initialized. This "
-                "dedicated group is required for safe rebalancing. Please "
-                "initialize it and set it as an attribute on this instance."
+                "dedicated group is required for safe rebalancing."
             )
+
+        try:
+            # Trust the master group as the single source of truth for DP size.
+            num_masters = dist.get_world_size(self.data_rebalance_masters_group)
+        except (RuntimeError, ValueError) as e:
+            logger.error(f"Rank {self._rank}: Failed to get world size of 'data_rebalance_masters_group'. Error: {e}")
+            return {"action": "error", "status": "ERROR_MASTER_GROUP"}
 
         local_new_count = len(set(batch.non_tensor_batch.get("uid", [])))
 
@@ -121,7 +132,6 @@ class DataRebalanceMixin:
 
         # 1. Gather the state (local data counts) from all master ranks.
         my_state = {"dp_rank": context["my_dp_rank"], "count": local_new_count + cache_size}
-        num_masters = context["dp_size"]
         global_state_list = [None] * num_masters
         dist.all_gather_object(global_state_list, my_state, group=self.data_rebalance_masters_group)
         global_state = sorted(global_state_list, key=lambda x: x["dp_rank"])
@@ -136,46 +146,158 @@ class DataRebalanceMixin:
             f"Target: {target_batch_size}."
         )
 
+        cache_was_used = cache_size > 0
         if total_prompts < target_batch_size:
             # Decision: Not enough data, cache everything for the next iteration.
-            return {"action": "cache", "status": "INSUFFICIENT_DATA", "cache_was_used": cache_size > 0}
+            decision = {"action": "cache", "status": "INSUFFICIENT_DATA", "cache_was_used": cache_was_used}
+            logger.info(f"Rank {self._rank} (Master): Data insufficient. Decision: Cache.")
+            return decision
         else:
-            # Decision: Data is sufficient, create a plan to rebalance.
-            plan, targets = self._create_migration_plan(global_counts, target_batch_size, context["dp_size"])
-            logger.debug(f"Rank {self._rank} (Master): Migration plan: {plan}. Targets: {targets}.")
-            return {
-                "action": "rebalance",
-                "status": "OK",
-                "plan": plan,
-                "targets": targets,
-                "cache_was_used": cache_size > 0,
-            }
+            # Decision: Data is sufficient. Create plan and delegate to executor.
+            plan, targets = self._create_migration_plan(global_counts, target_batch_size, num_masters)
+            return self._execute_master_rebalance(batch, cache_was_used, plan, targets, context)
+
+    def _execute_master_rebalance(
+        self,
+        batch: DataProto,
+        cache_was_used: bool,
+        plan: List[Dict[str, Any]],
+        targets: List[int],
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Executes the rebalancing plan (P2P migration) for a master rank."""
+        logger.debug(f"Rank {self._rank} (Master): Data sufficient. Proceeding to rebalance.")
+        logger.debug(f"Rank {self._rank} (Master): Migration plan: {plan}. Targets: {targets}.")
+
+        # Create the full working batch (local + cache)
+        working_batch = batch
+        if cache_was_used and self.sampling_leftover_cache:
+            working_batch = DataProto.concat([self.sampling_leftover_cache, batch])
+
+        # Build UID artifacts *once* for performance
+        uids, uid_to_indices_map = self._build_uid_artifacts(working_batch)
+
+        # Master rank executes the P2P migration with other masters.
+        received_shards = self._execute_p2p_migration(plan, working_batch, uids, uid_to_indices_map, context)
+
+        my_target_count = targets[context["my_dp_rank"]]
+
+        # The decision package now contains the *result* of the migration.
+        decision = {
+            "action": "rebalance",
+            "status": "OK",
+            "incremental_data": received_shards,
+            "local_filter_info": {
+                "target_count": my_target_count,
+                "cache_was_used": cache_was_used,
+            },
+        }
+
+        decision_summary = {
+            "action": decision.get("action"),
+            "status": decision.get("status"),
+            "target_count": decision.get("local_filter_info", {}).get("target_count"),
+            "cache_was_used": decision.get("local_filter_info", {}).get("cache_was_used"),
+            "received_shards": len(decision.get("incremental_data", [])),
+        }
+        logger.debug(f"Rank {self._rank} (Master): Rebalance logic complete. Decision summary: {decision_summary}")
+        return decision
 
     def _synchronize_decision_to_peers(
         self, decision_package: Optional[Dict[str, Any]], context: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Synchronizes the decision from the master rank to its TP peers.
+        Synchronizes the decision from the master rank (tp_rank=0) to its TP peers
+        using a robust two-phase P2P (send/recv) protocol.
         """
-        if context["tp_size"] <= 1:
+        tp_size = context.get("tp_size", 1)
+        if tp_size <= 1:
             return decision_package
 
-        # The object must be in a list for the broadcast API.
-        obj_list = [decision_package]
+        device = context["device"]
+        my_pg = context["my_pg"]
+        tp_rank = context["my_tp_rank"]
+        dp_rank = context["my_dp_rank"]
 
-        # The source of the broadcast is the master rank (tp_rank=0) of this DP group.
-        # We find its global rank to use as the `src`.
-        master_global_rank = context["my_dp_rank"] * context["tp_size"]
+        try:
+            pg_ranks = dist.get_process_group_ranks(my_pg)
+        except (ValueError, AttributeError) as e:
+            logger.error(
+                f"Rank {self._rank}: Failed to get ranks from process group {my_pg}. P2P sync will fail. Error: {e}"
+            )
+            return {"action": "error", "status": "ERROR_RANK_RESOLUTION"}
 
-        # Broadcast on the default WORLD group. The `src` argument ensures that
-        # only the correct master sends the data.
-        dist.broadcast_object_list(obj_list, src=master_global_rank, group=None)
+        if tp_rank == 0:
+            # --- MASTER (tp_rank=0) SENDS ---
+            if decision_package is None:
+                logger.warning(f"Rank {self._rank} (Master): Decision package is None, creating default error package.")
+                decision_package = {"action": "error", "status": "ERROR_NO_DECISION"}
 
-        return obj_list[0]
+            try:
+                serialized_decision = pickle.dumps(decision_package)
+            except Exception as e:
+                logger.error(f"Rank {self._rank} (Master): Failed to pickle decision package. Error: {e}")
+                # Send 0 size as an error signal
+                serialized_decision = bytearray()
 
-    def _reconstruct_batch_from_decision(
-        self, batch: DataProto, decision: Dict[str, Any], context: Dict[str, Any]
-    ) -> DataProto:
+            data_tensor = torch.from_numpy(np.frombuffer(serialized_decision, dtype=np.uint8)).to(device)
+            size_tensor = torch.tensor([data_tensor.numel()], dtype=torch.long, device=device)
+
+            requests = []
+            for peer_tp_rank in range(1, tp_size):
+                try:
+                    peer_global_rank = pg_ranks[dp_rank * tp_size + peer_tp_rank]
+                except IndexError:
+                    logger.error(
+                        f"Rank {self._rank}: Failed to find rank for DP={dp_rank}, TP={peer_tp_rank} in pg_ranks."
+                    )
+                    continue
+
+                # Phase 1: Blocking send for size.
+                dist.send(tensor=size_tensor, dst=peer_global_rank)
+
+                # Phase 2: Non-blocking send for data (if size > 0).
+                if size_tensor.item() > 0:
+                    req = dist.isend(tensor=data_tensor, dst=peer_global_rank)
+                    requests.append(req)
+
+            # Wait for all async sends to complete
+            for req in requests:
+                req.wait()
+
+            return decision_package
+
+        else:
+            # --- PEER (tp_rank > 0) RECEIVES ---
+            try:
+                master_global_rank = pg_ranks[dp_rank * tp_size]
+            except IndexError:
+                logger.error(f"Rank {self._rank}: Failed to find master rank for DP={dp_rank}, TP=0 in pg_ranks.")
+                return {"action": "error", "status": "ERROR_RANK_RESOLUTION"}
+
+            # Phase 1: Blocking receive for size.
+            size_tensor = torch.tensor([0], dtype=torch.long, device=device)
+            dist.recv(tensor=size_tensor, src=master_global_rank)
+
+            buffer_size = size_tensor.item()
+            if buffer_size == 0:
+                logger.warning(f"Rank {self._rank}: Received 0-size decision package (or error signal from master).")
+                return {"action": "error", "status": "ERROR_ZERO_SIZE_PACKAGE"}
+
+            # Phase 2: Non-blocking receive for data.
+            buffer = torch.empty(buffer_size, dtype=torch.uint8, device=device)
+            request = dist.irecv(tensor=buffer, src=master_global_rank)
+            request.wait()
+
+            # Phase 3: Deserialize object.
+            try:
+                received_decision = pickle.loads(buffer.cpu().numpy().tobytes())
+                return received_decision
+            except Exception as e:
+                logger.error(f"Rank {self._rank}: Failed to deserialize decision package. Error: {e}")
+                return {"action": "error", "status": f"ERROR_DESERIALIZATION: {e}"}
+
+    def _reconstruct_batch_from_decision(self, batch: DataProto, decision: Dict[str, Any]) -> DataProto:
         """
         Executes the synchronized decision on all ranks.
 
@@ -190,36 +312,55 @@ class DataRebalanceMixin:
                 working_batch = DataProto.concat([self.sampling_leftover_cache, batch])
 
             self.sampling_leftover_cache = working_batch
-            uid_count = len(set(working_batch.non_tensor_batch.get("uid", [])))
-            logger.debug(f"Rank {self._rank}: Caching {uid_count} unique items. Returning empty batch.")
+            uid_count = 0
+            if "uid" in working_batch.non_tensor_batch:
+                uid_count = len(set(working_batch.non_tensor_batch.get("uid", [])))
+            logger.info(f"Rank {self._rank}: Caching {uid_count} unique items. Returning empty batch.")
             return DataProto()
 
         elif action == "rebalance":
+            local_filter_info = decision.get("local_filter_info", {})
+            cache_was_used = local_filter_info.get("cache_was_used", False)
+
             working_batch = batch
-            if decision.get("cache_was_used") and self.sampling_leftover_cache:
+            if cache_was_used and self.sampling_leftover_cache:
                 working_batch = DataProto.concat([self.sampling_leftover_cache, batch])
 
             # The cache is consumed in a rebalance operation; clear it.
             self.sampling_leftover_cache = None
-            received_shards = self._execute_p2p_migration(decision["plan"], working_batch, context)
-            local_batch_to_keep = self._truncate_local_batch(working_batch, decision["plan"], context)
+
+            # Get sorted UIDs and the index map *once* for performance.
+            local_uids, uid_to_indices_map = self._build_uid_artifacts(working_batch)
+
+            # Truncate the local (or local + cached) batch to its target size
+            my_target_count = local_filter_info.get("target_count", 0)
+            local_batch_to_keep = self._truncate_local_batch(
+                working_batch, my_target_count, local_uids, uid_to_indices_map
+            )
+
+            # Get the shards that were received by the master and synced to this peer
+            received_shards = decision.get("incremental_data", [])
+
             final_batch = (
                 DataProto.concat([local_batch_to_keep] + received_shards) if received_shards else local_batch_to_keep
             )
 
-            my_target_count = decision["targets"][context["my_dp_rank"]]
-            final_uid_count = len(set(final_batch.non_tensor_batch.get("uid", [])))
+            final_uid_count = 0
+            if "uid" in final_batch.non_tensor_batch:
+                final_uid_count = len(set(final_batch.non_tensor_batch.get("uid", [])))
+
             summary_log_message = (
                 f"Rank {self._rank}: Rebalance executed. Summary:\n"
-                f"\t- Status        : {decision.get('status', 'UNKNOWN')} (Cache Used: "
-                f"{decision.get('cache_was_used', False)})\n"
-                f"\t- Data Movement : Received {len(received_shards)} shards\n"
+                f"\t- Status        : {decision.get('status', 'UNKNOWN')} (Cache Used: {cache_was_used})\n"
+                f"\t- Data Movement : Received {len(received_shards)} shards (from master's sync)\n"
                 f"\t- Final Batch   : {final_uid_count} UIDs (Target: {my_target_count})"
             )
-            logger.debug(summary_log_message)
+            logger.info(summary_log_message)
             return final_batch
 
-        logger.error(f"Rank {self._rank}: Received unknown action '{action}'. Passing batch through without changes.")
+        logger.error(
+            f"Rank {self._rank}: Received unknown or error action '{action}'. Passing batch through without changes."
+        )
         self.sampling_leftover_cache = None
         return batch
 
@@ -259,44 +400,94 @@ class DataRebalanceMixin:
         return plan, target_counts
 
     def _execute_p2p_migration(
-        self, plan: List[Dict[str, Any]], batch: DataProto, context: Dict[str, Any]
+        self,
+        plan: List[Dict[str, Any]],
+        batch: DataProto,
+        local_uids: List[str],
+        uid_to_indices_map: Dict[str, List[int]],
+        context: Dict[str, Any],
     ) -> List[DataProto]:
-        """Executes data migration between ranks using point-to-point communication."""
+        """Executes data migration between master ranks using point-to-point communication."""
         my_dp_rank = context["my_dp_rank"]
         tp_size = context["tp_size"]
         device = context["device"]
+        my_pg = context["my_pg"]
+
+        try:
+            # Resolve global ranks from the node's process group
+            pg_ranks = dist.get_process_group_ranks(my_pg)
+        except (ValueError, AttributeError) as e:
+            logger.error(
+                f"Rank {self._rank}: Failed to get ranks from process group {my_pg}. P2P will fail. Error: {e}"
+            )
+            return []
 
         my_sends = [task for task in plan if task["from"] == my_dp_rank]
         my_receives = [task for task in plan if task["to"] == my_dp_rank]
 
-        uids = sorted(list(set(batch.non_tensor_batch.get("uid", []))))
-        uid_to_indices = {uid: [] for uid in uids}
-        for i, uid in enumerate(batch.non_tensor_batch.get("uid", [])):
-            uid_to_indices[uid].append(i)
-
         requests, received_buffers = [], {}
+        zero_size_tensor = torch.tensor([0], dtype=torch.long, device=device)
 
         # 1. Post all non-blocking receives.
         for task in my_receives:
-            sender_global_rank = task["from"] * tp_size
+            try:
+                # We only communicate with other masters (tp_rank=0)
+                sender_global_rank = pg_ranks[task["from"] * tp_size + 0]
+            except IndexError:
+                logger.error(f"Rank {self._rank}: Recv plan error. Cannot find rank for DP={task['from']} in pg_ranks.")
+                continue
+
             size_tensor = torch.tensor([0], dtype=torch.long, device=device)
             dist.recv(tensor=size_tensor, src=sender_global_rank)  # Blocking recv for size
-            if size_tensor.item() > 0:
-                buffer = torch.empty(size_tensor.item(), dtype=torch.uint8, device=device)
+
+            buffer_size = size_tensor.item()
+            if buffer_size > 0:
+                buffer = torch.empty(buffer_size, dtype=torch.uint8, device=device)
                 req = dist.irecv(tensor=buffer, src=sender_global_rank)
                 requests.append(req)
                 received_buffers[sender_global_rank] = buffer
+            else:
+                logger.debug(f"Rank {self._rank}: Receiving 0 bytes from rank {sender_global_rank}.")
 
         # 2. Execute all sends.
         if my_sends:
-            uids_to_send = uids[-sum(task["amount"] for task in my_sends) :]
+            # Get UIDs to send from the *end* of the sorted list
+            uids_to_send = local_uids[-sum(task["amount"] for task in my_sends) :]
             for task in my_sends:
-                dest_global_rank = task["to"] * tp_size
-                uids_for_this_send, uids_to_send = uids_to_send[: task["amount"]], uids_to_send[task["amount"] :]
+                try:
+                    # We only communicate with other masters (tp_rank=0)
+                    dest_global_rank = pg_ranks[task["to"] * tp_size + 0]
+                except IndexError:
+                    logger.error(
+                        f"Rank {self._rank}: Send plan error. Cannot find rank for DP={task['to']} in pg_ranks."
+                    )
+                    continue
 
-                indices = [idx for uid in uids_for_this_send for idx in uid_to_indices[uid]]
+                amount_to_send = task["amount"]
+                if amount_to_send == 0:
+                    dist.send(tensor=zero_size_tensor, dst=dest_global_rank)
+                    continue
 
-                serialized = pickle.dumps(batch[indices])
+                uids_for_this_send, uids_to_send = uids_to_send[:amount_to_send], uids_to_send[amount_to_send:]
+
+                # Use helper for efficient slicing
+                indices = self._get_indices_from_uid_map(uid_to_indices_map, set(uids_for_this_send))
+
+                if not indices:
+                    logger.warning(f"Rank {self._rank}: Found no indices for UIDs to send to {dest_global_rank}.")
+                    dist.send(tensor=zero_size_tensor, dst=dest_global_rank)
+                    continue
+
+                try:
+                    serialized = pickle.dumps(batch[indices])
+                except Exception as e:
+                    logger.error(
+                        f"Rank {self._rank}: Failed to pickle data for rank {dest_global_rank}. "
+                        f"Sending 0 size. Error: {e}"
+                    )
+                    dist.send(tensor=zero_size_tensor, dst=dest_global_rank)
+                    continue
+
                 size_tensor = torch.tensor([len(serialized)], dtype=torch.long, device=device)
                 dist.send(tensor=size_tensor, dst=dest_global_rank)  # Blocking send for size
 
@@ -308,21 +499,79 @@ class DataRebalanceMixin:
         for req in requests:
             req.wait()
 
-        return [pickle.loads(buf.cpu().numpy().tobytes()) for buf in received_buffers.values()]
+        # 4. Deserialize received data
+        received_shards = []
+        for rank, buf in received_buffers.items():
+            try:
+                received_shards.append(pickle.loads(buf.cpu().numpy().tobytes()))
+            except Exception as e:
+                logger.error(
+                    f"Rank {self._rank}: Failed to deserialize P2P data from rank {rank}. Skipping shard. Error: {e}"
+                )
 
-    def _truncate_local_batch(self, batch: DataProto, plan: List[Dict[str, Any]], context: Dict[str, Any]) -> DataProto:
-        """Deterministically truncates the local batch to the size it should be before receiving data."""
-        num_to_send = sum(task["amount"] for task in plan if task["from"] == context["my_dp_rank"])
+        return received_shards
 
-        uids = sorted(list(set(batch.non_tensor_batch.get("uid", []))))
-        num_to_keep = len(uids) - num_to_send
+    def _truncate_local_batch(
+        self,
+        batch: DataProto,
+        target_count: int,
+        local_uids: List[str],
+        uid_to_indices_map: Dict[str, List[int]],
+    ) -> DataProto:
+        """Deterministically truncates the local batch to the target count."""
+
+        num_to_keep = target_count
 
         if num_to_keep <= 0:
+            logger.debug(f"Rank {self._rank}: Truncating local batch to 0.")
             return DataProto()
 
-        uids_to_keep = set(uids[:num_to_keep])
-        indices = [i for i, uid in enumerate(batch.non_tensor_batch["uid"]) if uid in uids_to_keep]
+        if len(local_uids) <= num_to_keep:
+            # We are keeping all (or more than) what we have, so just return the batch.
+            return batch
+
+        # Keep the *first* 'num_to_keep' UIDs from the sorted list
+        uids_to_keep = set(local_uids[:num_to_keep])
+
+        # Use helper for efficient slicing
+        indices = self._get_indices_from_uid_map(uid_to_indices_map, uids_to_keep)
+
+        logger.debug(f"Rank {self._rank}: Truncating local batch from {len(local_uids)} UIDs to {num_to_keep} UIDs.")
         return batch[indices]
+
+    def _build_uid_artifacts(self, batch: DataProto) -> Tuple[List[str], Dict[str, List[int]]]:
+        """
+        Builds the sorted UID list and the UID-to-indices map in one pass.
+        This is a CPU-intensive operation, so we centralize it.
+        """
+        uids_in_batch_list = batch.non_tensor_batch.get("uid", [])
+
+        # Ensure it's a list, as it might be a numpy array
+        if not isinstance(uids_in_batch_list, list):
+            uids_in_batch_list = uids_in_batch_list.tolist()
+
+        if not uids_in_batch_list:
+            return [], {}
+
+        uid_to_indices_map = {}
+        unique_uids = set()
+
+        for i, uid in enumerate(uids_in_batch_list):
+            if uid not in uid_to_indices_map:
+                uid_to_indices_map[uid] = []
+                unique_uids.add(uid)
+            uid_to_indices_map[uid].append(i)
+
+        sorted_uids = sorted(list(unique_uids))
+        return sorted_uids, uid_to_indices_map
+
+    def _get_indices_from_uid_map(self, uid_to_indices_map: Dict[str, List[int]], uids_to_find: set) -> List[int]:
+        """Efficiently retrieves all row indices corresponding to a set of UIDs."""
+        all_indices = []
+        for uid in uids_to_find:
+            if uid in uid_to_indices_map:
+                all_indices.extend(uid_to_indices_map[uid])
+        return all_indices
 
     def rebalance_sampled_data(self, batch: DataProto, node_id: str) -> DataProto:
         """
@@ -344,6 +593,12 @@ class DataRebalanceMixin:
         context = self._get_rebalancing_context(node_id)
         if not context:
             logger.debug(f"Rank {self._rank}: Node is not distributed. Skipping rebalance.")
+            # Handle cache even for non-distributed nodes.
+            if self.sampling_leftover_cache:
+                logger.debug(f"Rank {self._rank}: Non-distributed node has cache. Concatenating.")
+                final_batch = DataProto.concat([self.sampling_leftover_cache, batch])
+                self.sampling_leftover_cache = None  # Consume cache
+                return final_batch
             return batch
 
         # The master rank (tp_rank=0) of each DP group makes the decision.
@@ -355,12 +610,44 @@ class DataRebalanceMixin:
         final_decision = self._synchronize_decision_to_peers(decision_package, context)
 
         # All ranks execute the same decision to reconstruct the final batch.
-        final_batch = self._reconstruct_batch_from_decision(batch, final_decision, context)
+        final_batch = self._reconstruct_batch_from_decision(batch, final_decision)
 
         status = final_decision.get("status", "UNKNOWN")
-        final_uid_count = len(set(final_batch.non_tensor_batch.get("uid", [])))
+        final_uid_count = 0
+        if "uid" in final_batch.non_tensor_batch:
+            final_uid_count = len(set(final_batch.non_tensor_batch.get("uid", [])))
+
         logger.debug(
             f"Rank {self._rank}: Finished rebalancing for node '{node_id}'. "
             f"Final unique UIDs: {final_uid_count}, Status: {status}."
         )
+
+        # Add global consistency check, controlled by a config flag.
+        if (
+            context["my_tp_rank"] == 0
+            and status == "OK"
+            and getattr(self.config.data, "rebalance_consistency_check", False)
+        ):
+            try:
+                target_batch_size = self.config.data.train_batch_size
+                num_masters = dist.get_world_size(self.data_rebalance_masters_group)
+                global_counts_list = [None] * num_masters
+                dist.all_gather_object(global_counts_list, final_uid_count, group=self.data_rebalance_masters_group)
+
+                total_final_count = sum(global_counts_list)
+                if total_final_count != target_batch_size:
+                    logger.warning(
+                        f"Rank {self._rank} (Master): Rebalance consistency check FAILED. "
+                        f"Final global count ({total_final_count}) does not match "
+                        f"target batch size ({target_batch_size}). "
+                        f"Master counts: {global_counts_list}"
+                    )
+                else:
+                    logger.debug(
+                        f"Rank {self._rank} (Master): Rebalance consistency check PASSED. "
+                        f"Final global count: {total_final_count}"
+                    )
+            except Exception as e:
+                logger.warning(f"Rank {self._rank} (Master): Failed to run consistency check. Error: {e}")
+
         return final_batch

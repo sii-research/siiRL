@@ -29,6 +29,7 @@ from siirl.workers.dag.node import NodeRole
 from siirl.workers.databuffer import DataProto
 
 from .constants import DAGInitializationError
+from .mixins.data_rebalance_mixin import DataRebalanceMixin
 from .mixins.execution_mixin import ExecutionMixin
 from .mixins.initialization_mixin import InitializationMixin
 from .mixins.node_executors_mixin import NodeExecutorsMixin
@@ -36,7 +37,9 @@ from .mixins.utilities_mixin import UtilitiesMixin
 from .mixins.validation_mixin import ValidationMixin
 
 
-class DAGWorker(InitializationMixin, ExecutionMixin, NodeExecutorsMixin, ValidationMixin, UtilitiesMixin, Worker):
+class DAGWorker(
+    InitializationMixin, ExecutionMixin, NodeExecutorsMixin, ValidationMixin, UtilitiesMixin, DataRebalanceMixin, Worker
+):
     """
     Orchestrates a Directed Acyclic Graph (DAG) of tasks for distributed training,
     managing the setup, initialization, and workflow for a specific rank.
@@ -47,7 +50,7 @@ class DAGWorker(InitializationMixin, ExecutionMixin, NodeExecutorsMixin, Validat
         config: SiiRLArguments,
         process_group_manager: ProcessGroupManager,
         taskgraph_mapping: Dict[int, TaskGraph],
-        data_buffers: List["ray.actor.ActorHandle"]
+        data_buffers: List["ray.actor.ActorHandle"],
     ):
         super().__init__()
         self.config = config
