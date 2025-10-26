@@ -1284,7 +1284,7 @@ class DAGWorker(Worker):
             
             with timer(self.enable_perf, f"get_samples_from_coordinator_{key}", timing_raw):
                 # Use the new get_all_by_filter method
-                sample_refs = loop.run_until_complete(self.data_coordinator.get_all_by_filter.remote(key_filter))
+                sample_refs = loop.run_until_complete(self.data_coordinator.get_batch.remote(self.dataloader.train_batch_size))
 
             if not sample_refs:
                 logger.warning(f"Rank {self._rank}: Found no samples in DataCoordinator for key '{key}'.")

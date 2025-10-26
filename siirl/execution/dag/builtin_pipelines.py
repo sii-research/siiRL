@@ -150,7 +150,7 @@ def ppo_pipeline() -> TaskGraph:
     ).add_node(
         "critic_train",
         func="siirl.dag_worker.dagworker:DAGWorker.train_critic",
-        deps=["reference_log_prob"],
+        deps=["actor_train"],
         node_type=NodeType.MODEL_TRAIN,
         node_role=NodeRole.CRITIC
     )

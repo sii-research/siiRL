@@ -151,7 +151,7 @@ class DataLoaderNode(Node):
 
         # Calculate batch size per rank
         train_batch_size = self.global_config.data.train_batch_size // self.rollout_ddp_world_size
-
+        self.train_batch_size = train_batch_size
         # Auto-repeat logic: if dataset is too small, repeat it until at least one batch can be formed
         auto_repeat = self.config.get("auto_repeat", False)
         train_len = len(self.train_dataset)

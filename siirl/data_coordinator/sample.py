@@ -53,6 +53,8 @@ class Sample:
     values: torch.tensor = field(default=None)
     advantages: torch.tensor = field(default=None)
     returns: torch.tensor = field(default=None)
+    old_log_probs: torch.tensor = field(default=None)
+    ref_log_prob: torch.tensor = field(default=None)
     # from non_tensor_batch of Dataproto
 
     raw_prompt: str = field(default="")
@@ -71,6 +73,8 @@ class Sample:
     multi_modal_inputs: dict = field(default=None)
     uid: str = field(default=None)
 
+    # meta_info
+    temperature: float = field(default=1.0, metadata={"help":"temperature"})
 @dataclass   
 class SampleManager:
     # 使用default而不是default_factory来设置None默认值
@@ -103,6 +107,7 @@ def Dict2Samples(data:TensorDict)-> List[SampleManager]:
         local_sample.prompts = data['prompts'][index]
         local_sample.responses = data['responses'][index]
         local_sample.response_mask = data['response_mask'][index]
+        local_sample.values = data['values'][index] if 'values' in data else None
         local_sample.raw_prompt_ids = data['raw_prompt_ids'][index] if 'raw_prompt_ids' in data else None
         local_sample.advantages = data['advantages'][index] if 'advantages' in data else None
         local_sample.raw_prompt = data['raw_prompt'][index] if 'raw_prompt' in data else None
@@ -110,6 +115,9 @@ def Dict2Samples(data:TensorDict)-> List[SampleManager]:
         local_sample.returns = data['returns'][index] if 'returns' in data else None
         local_sample.token_level_rewards = data['token_level_rewards'][index] if 'token_level_rewards' in data else None
         local_sample.token_level_scores = data['token_level_scores'][index] if 'token_level_scores' in data else None
+        local_sample.old_log_probs = data['old_log_probs'][index] if 'old_log_probs' in data else None
+        local_sample.ref_log_prob = data['ref_log_prob'][index] if 'ref_log_prob' in data else None
+        
         
         if 'multi_modal_inputs' in data:
             local_sample.multi_modal_inputs = data["multi_modal_inputs"][index]
