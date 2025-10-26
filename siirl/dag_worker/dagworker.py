@@ -15,7 +15,6 @@
 import os
 import uuid
 import ray
-import time
 import torch
 import asyncio
 import psutil
@@ -26,7 +25,7 @@ from collections import defaultdict
 from pprint import pformat
 from tqdm import tqdm
 from loguru import logger
-from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Type
 from torch.distributed import ProcessGroup
 
 from siirl.models.loader import TokenizerModule, load_tokenizer
@@ -40,7 +39,7 @@ from siirl.execution.scheduler.enums import AdvantageEstimator
 from siirl.data_coordinator import DataProto
 from siirl.data_coordinator.dataloader import DataLoaderNode
 from siirl.data_coordinator.protocol import collate_fn
-from siirl.dag_worker.data_structures import NodeOutput, ValidationPayload, ValidationResult
+from siirl.dag_worker.data_structures import NodeOutput
 from siirl.dag_worker.constants import DAGConstants, DAGInitializationError
 from siirl.dag_worker import core_algos
 from siirl.dag_worker.core_algos import (
@@ -63,14 +62,12 @@ from siirl.dag_worker.dag_utils import  (
     log_role_worker_mapping,
     should_create_worker,
     generate_node_worker_key,
-    generate_agent_group_key,
     find_first_non_compute_ancestor,
     setup_sharding_manager,
     get_worker_classes,
     get_parallelism_config,
     prepare_generation_batch,
     prepare_generation_batch, 
-    dump_validation_generations,
     whether_put_data,
     format_metrics_by_group,
     log_metrics_to_console,
@@ -84,11 +81,9 @@ from siirl.dag_worker.dag_utils import  (
 from siirl.utils.debug import DistProfiler
 from siirl.utils.extras.device import get_device_name, get_nccl_backend, get_device_id
 from siirl.utils.metrics.metric_utils import (
-    aggregate_validation_metrics, 
     compute_throughout_metrics, 
     compute_timing_metrics
     )
-from siirl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from siirl.execution.rollout_flow.multiturn.agent_loop import AgentLoopManager
 from siirl.dag_worker.checkpoint_manager import CheckpointManager
 
@@ -161,8 +156,8 @@ class DAGWorker(Worker):
         logger.success(f"Rank {self._rank}: All components initialized. Starting training loop from step {self.global_steps + 1}.")
 
         if self.val_reward_fn and self.config.trainer.val_before_train:
-            # _validate handles multi-rank logic internally
-            val_metrics = self._validate()
+            # Validator handles multi-rank logic internally
+            val_metrics = self.validator.validate(global_step=self.global_steps)
             if self._rank == 0 and val_metrics and self.logger:
                 logger.info(f"Initial validation metrics:\n{pformat(val_metrics)}")
                 self.logger.log(data=val_metrics, step=self.global_steps)
@@ -233,7 +228,7 @@ class DAGWorker(Worker):
                     # (Logging and validation logic remains unchanged)
                     metrics_dict = dict(ordered_metrics)
                     if self.val_reward_fn and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
-                        val_metrics = self._validate()
+                        val_metrics = self.validator.validate(global_step=self.global_steps)
                         if self._rank == 0 and val_metrics:
                             metrics_dict.update(val_metrics)
                         if is_last_step:
@@ -702,13 +697,17 @@ class DAGWorker(Worker):
         
         self._setup_distributed_environment()
         self._setup_tokenizers()
-        self._setup_dataloader_and_reward()
+        self._setup_dataloader()
+        self._setup_reward_managers()
         self._setup_role_worker_mapping()
         self._initialize_node_workers()
         self._profiler = DistProfiler(rank=self._rank, config=self.config.profiler)
 
         # Initialize CheckpointManager - Note: will be fully initialized after workers are created
         self.checkpoint_manager = None
+
+        # Initialize Validator - Note: will be initialized in init_graph() after all workers are ready
+        self.validator = None
 
         if self._rank == 0:
             logger.info("Rank 0: Initializing tracking logger...")
@@ -725,9 +724,6 @@ class DAGWorker(Worker):
 
     def _setup_distributed_environment(self):
         """Initializes the default process group and all required subgroups."""
-        # gloo_socket_ifname = 'bond0'
-        # os.environ["GLOO_SOCKET_IFNAME"] = gloo_socket_ifname
-        # os.environ["GLOO_LOG_LEVEL"] = "DEBUG"
         
         if not dist.is_initialized():
             backend = (
@@ -788,7 +784,7 @@ class DAGWorker(Worker):
             return
 
         for node in model_nodes:
-            agent_key = generate_agent_group_key(node)
+            agent_key = f"group_key_{node.agent_group}"
             if agent_key not in self.tokenizer_mapping:
                 # Add robust check for missing configuration.
                 intern_config = node.config.get(DAGConstants.INTERN_CONFIG)
@@ -802,11 +798,11 @@ class DAGWorker(Worker):
                 self.tokenizer_mapping[agent_key] = tokenizer_module
         logger.info(f"Rank {self._rank}: Initialized {len(self.tokenizer_mapping)} tokenizer(s).")
 
-    def _setup_dataloader_and_reward(self):
-        """Initializes the data loader and reward functions."""
+    def _setup_dataloader(self):
+        """Initializes the data loader for training and validation."""
         rollout_nodes = [n for n in self.taskgraph.nodes.values() if n.node_type == NodeType.MODEL_INFERENCE]
         if not rollout_nodes:
-            raise ValueError("At least one MODEL_INFERENCE node is required for dataloader and reward setup.")
+            raise ValueError("At least one MODEL_INFERENCE node is required for dataloader setup.")
         self.first_rollout_node = rollout_nodes[0]
 
         pg_assignment = self.process_group_manager.get_node_assignment(self.first_rollout_node.node_id)
@@ -834,7 +830,10 @@ class DAGWorker(Worker):
                 "auto_repeat": self.config.data.auto_repeat,
             },
         )
+        logger.info(f"Rank {self._rank}: DataLoader initialized with {self.dataloader.total_training_steps} total training steps.")
 
+    def _setup_reward_managers(self):
+        """Initializes reward managers for training and validation."""
         self.validate_tokenizer = next(iter(self.tokenizer_mapping.values()), {}).get("tokenizer")
         if not self.validate_tokenizer:
             logger.warning("No tokenizer loaded; reward functions might fail or use a default one.")
@@ -854,7 +853,7 @@ class DAGWorker(Worker):
             overlong_buffer_cfg=self.config.reward_model.overlong_buffer,
             **self.config.reward_model.reward_kwargs,
         )
-
+        logger.info(f"Rank {self._rank}: Reward managers initialized.")
 
     def _setup_role_worker_mapping(self):
         """Creates a mapping from NodeRole to the corresponding Worker implementation class."""
@@ -927,118 +926,139 @@ class DAGWorker(Worker):
         
         if len(self.agent_group_worker) > 1:
             self._multi_agent = True
-
-    def _get_node_process_group(self, node: Node) -> ProcessGroup:
-        """Retrieves the PyTorch ProcessGroup assigned to a specific graph node."""
-        assignment = self.process_group_manager.get_node_assignment(node.node_id)
-        if not (assignment and (name := assignment.get("process_group_name"))):
-            raise ValueError(f"Process group assignment or name not found for node {node.node_id}.")
-
-        pg = self.process_groups.get(name)
-        if pg is None:
-            raise ValueError(f"Process group '{name}' for node {node.node_id} was not created or found.")
-        return pg
-
-    def _get_node_dp_info(self, node: Node) -> tuple[int, int, int, int, int, int]:
-        """
-        Calculates Data Parallel (DP), Tensor Parallel (TP), and Pipeline Parallel (PP) info for a node.
-        
-        Returns:
-            tuple: (dp_size, dp_rank, tp_rank, tp_size, pp_rank, pp_size)
-        """
-        reference_node = node
-        if node.node_type == NodeType.COMPUTE:
-            # If the node is a COMPUTE type, find its true data source ancestor.
-            ancestor = find_first_non_compute_ancestor(self.taskgraph, node.node_id)
-            if ancestor:
-                reference_node = ancestor
-            else:
-                # If no non-COMPUTE ancestor is found, it's a critical error.
-                raise RuntimeError(f"Could not find any non-COMPUTE ancestor for COMPUTE node '{node.node_id}'. Please check your DAG graph configuration.")
-
-        if reference_node.node_type == NodeType.COMPUTE:
-            group_world_size = self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes
-            group_rank = dist.get_rank()
-        else:
-            process_group = self._get_node_process_group(reference_node)
-            group_world_size = dist.get_world_size(process_group)
-            group_rank = dist.get_rank(process_group)
-
-        # Get parallelism configuration based on backend strategy
-        tp_size, pp_size = get_parallelism_config(reference_node)
-        
-        # Calculate total parallel size (TP * PP)
-        total_parallel_size = tp_size * pp_size
-        
-        if group_world_size % total_parallel_size != 0:
-            raise ValueError(f"Configuration error for node {node.node_id}: Group world size ({group_world_size}) is not divisible by total parallel size (TP={tp_size} * PP={pp_size} = {total_parallel_size}). Check your parallel configuration.")
-        
-        dp_size = group_world_size // total_parallel_size
-        
-        # Calculate ranks within the data parallel group
-        dp_rank = group_rank // total_parallel_size
-        
-        # Calculate position within the TP-PP grid
-        local_rank_in_tp_pp_group = group_rank % total_parallel_size
-        
-        # For 2D parallelism: ranks are arranged as [PP0_TP0, PP0_TP1, ..., PP0_TP(tp_size-1), PP1_TP0, ...]
-        pp_rank = local_rank_in_tp_pp_group // tp_size
-        tp_rank = local_rank_in_tp_pp_group % tp_size
-        
-        return dp_size, dp_rank, tp_rank, tp_size, pp_rank, pp_size
     
-    def init_model(self):
-        """Initializes models for all workers and sets up sharding managers where applicable."""
-        logger.info("Initializing models for all worker nodes...")
-        have_init_workers = set()
-        for node in self.taskgraph.nodes.values():
-            if should_create_worker(self.role_worker_mapping, node):
-                node_worker = self.workers[generate_node_worker_key(node)]
-                if not isinstance(node_worker, Worker):
-                    raise TypeError(f"Invalid worker type for node {node.node_id}: {type(node_worker).__name__}")
-                if generate_node_worker_key(node) in have_init_workers:
-                    logger.warning(
-                        f"Rank {self._rank}: Worker {generate_node_worker_key(node)} for node {node.node_id} "
-                        f"already initialized. Skipping."
-                    )
-                    continue
-                node_worker.init_model()
-                have_init_workers.add(generate_node_worker_key(node))
-        logger.success("All worker models initialized.")
+    def init_graph(self):
+        """
+        Initializes the computation graph by loading models and restoring checkpoint state.
 
-        logger.info(f"Setting up sharding managers {self.config.actor_rollout_ref.rollout.name} ...")
+        Executed after _initialize_worker() across all workers via Ray remote call.
+        This method include:
+        (1) model weight loading,
+        (2) weight sharding_manager setup,
+        (3) async/multi-agent init,
+        (4) validator init,
+        (5) checkpoint restoration
+
+        Called by: RayActorManager._initialize_workers() via map_async("init_graph").
+        """
+
+        self._load_model_weights()
+
+        self._setup_sharding_manager()
+
+        self._setup_async_rollout()
+
+        self._setup_multi_agent_loop()
+
+        self._init_validator()
+
+        self._init_checkpoint_manager()
+        self.global_steps = self.checkpoint_manager.load_checkpoint()
+
+        dist.barrier(self._gather_group)
+
+    def _load_model_weights(self):
+        """Loads model weights to GPU for all node workers."""
+        logger.info("Loading model weights for all worker nodes...")
+        initialized_workers = set()
+
+        for node in self.taskgraph.nodes.values():
+            if not should_create_worker(self.role_worker_mapping, node):
+                continue
+
+            worker_key = generate_node_worker_key(node)
+            if worker_key in initialized_workers:
+                continue
+
+            node_worker = self.workers[worker_key]
+            if not isinstance(node_worker, Worker):
+                raise TypeError(f"Invalid worker type for node {node.node_id}: {type(node_worker).__name__}")
+
+            node_worker.init_model()
+            initialized_workers.add(worker_key)
+
+        logger.success("All model weights loaded successfully.")
+
+    def _setup_sharding_manager(self):
+        """Sets up sharding managers for actor-rollout weight synchronization."""
+        logger.info(f"Setting up weight sharing infrastructure ({self.config.actor_rollout_ref.rollout.name})...")
+
         for agent_group, worker_dict in self.agent_group_worker.items():
             if NodeRole.ACTOR in worker_dict and NodeRole.ROLLOUT in worker_dict:
                 try:
-                    setup_sharding_manager(self.config, self.agent_group_process_group, agent_group, worker_dict)
+                    setup_sharding_manager(
+                        self.config,
+                        self.agent_group_process_group,
+                        agent_group,
+                        worker_dict
+                    )
                 except Exception as e:
                     logger.error(f"Failed to set up sharding manager for agent group {agent_group}: {e}", exc_info=True)
                     raise
-                
-        
-        if self.config.actor_rollout_ref.rollout.mode == "async":
-            logger.info(f"Initial Async Rollout Server ...")
-            for node in self.taskgraph.nodes.values():
-                if node.node_role == NodeRole.ROLLOUT:
-                    # need init after set sharding manager
-                    self.rollout_mode = "async"
-                    node_worker = self.workers[generate_node_worker_key(node)]
-                    self.zmq_address = node_worker.get_zeromq_address()
-                    self.init_async_server(node=node, node_worker=node_worker)
-        logger.info("All models and sharding managers initialized successfully.")
-        if self._multi_agent:
-            from siirl.execution.rollout_flow.multi_agent.multiagent_generate import MultiAgentLoop
-            self.multi_agent_loop =  MultiAgentLoop(self, 
-                                                    config = self.config.actor_rollout_ref, 
-                                                    node_workers = self.workers, 
-                                                    local_dag = self.taskgraph, 
-                                                    databuffer = self.data_buffers, 
-                                                    placement_mode = 'colocate')
 
-    def init_graph(self):
-        self.init_model()
+        logger.success("Weight sharing infrastructure initialized.")
 
-        # Initialize CheckpointManager after workers are created
+    def _setup_async_rollout(self):
+        """Initializes async rollout server if configured."""
+        if self.config.actor_rollout_ref.rollout.mode != "async":
+            return
+
+        logger.info("Initializing async rollout server...")
+        for node in self.taskgraph.nodes.values():
+            if node.node_role == NodeRole.ROLLOUT:
+                self.rollout_mode = "async"
+                node_worker = self.workers[generate_node_worker_key(node)]
+                self.zmq_address = node_worker.get_zeromq_address()
+                self.init_async_server(node=node, node_worker=node_worker)
+
+        logger.success("Async rollout server initialized.")
+
+    def _setup_multi_agent_loop(self):
+        """Initializes multi-agent loop if in multi-agent mode."""
+        if not self._multi_agent:
+            return
+
+        logger.info("Initializing multi-agent loop...")
+        from siirl.execution.rollout_flow.multi_agent.multiagent_generate import MultiAgentLoop
+
+        self.multi_agent_loop = MultiAgentLoop(
+            self,
+            config=self.config.actor_rollout_ref,
+            node_workers=self.workers,
+            local_dag=self.taskgraph,
+            databuffer=self.data_buffers,
+            placement_mode='colocate'
+        )
+
+        logger.success("Multi-agent loop initialized.")
+
+    def _init_validator(self):
+        """Initializes validator for validation workflow."""
+        logger.info("Initializing validator...")
+        from siirl.dag_worker.validator import Validator
+
+        self.validator = Validator(
+            config=self.config,
+            dataloader=self.dataloader,
+            val_reward_fn=self.val_reward_fn,
+            validate_tokenizer=self.validate_tokenizer,
+            agent_group_worker=self.agent_group_worker,
+            rollout_mode=self.rollout_mode,
+            async_rollout_manager=self._async_rollout_manager,
+            multi_agent_loop=getattr(self, 'multi_agent_loop', None),
+            multi_agent=self._multi_agent,
+            rank=self._rank,
+            world_size=self.world_size,
+            gather_group=self._gather_group,
+            first_rollout_node=self.first_rollout_node,
+            get_node_dp_info_fn=self._get_node_dp_info,
+            enable_perf=self.enable_perf,
+        )
+        logger.success("Validator initialized.")
+
+    def _init_checkpoint_manager(self):
+        """Initializes checkpoint manager for saving/loading training state."""
+        logger.info("Initializing checkpoint manager...")
         self.checkpoint_manager = CheckpointManager(
             config=self.config,
             rank=self._rank,
@@ -1049,12 +1069,6 @@ class DAGWorker(Worker):
             first_rollout_node=self.first_rollout_node,
             get_node_dp_info_fn=self._get_node_dp_info
         )
-
-        # Use CheckpointManager to load checkpoint
-        self.global_steps = self.checkpoint_manager.load_checkpoint()
-
-        # Ensure all models are initialized and checkpoints are loaded before starting.
-        dist.barrier(self._gather_group)
 
     def init_async_server(self, node:Node, node_worker):
         #gather zmq_address to rank_0
@@ -1076,226 +1090,9 @@ class DAGWorker(Worker):
             dist.send(encoded_addr, dst=dp_rank * tp_size)
         if tp_rank == 0:
             self._async_rollout_manager = AgentLoopManager(node.config["intern_config"], dp_rank, os.environ['WG_PREFIX'], node_worker.rollout, zmq_addresses)
-            
-    def get_zeromq_address(self):
-        return self.zmq_address
     
 # ==========================================================================================
-# Module 4: Validation
-# ==========================================================================================
-
-    def _validate(self) -> Dict[str, float]:
-        """Performs validation by generating, scoring, and aggregating metrics across all ranks."""
-        self.val_timedict = defaultdict(float)
-        if self._rank == 0:
-            logger.info("=" * 60)
-            logger.info(f"Starting Validation @ Global Step {self.global_steps}...")
-            logger.info("=" * 60)
-            self.val_timedict["overall_start_time"] = time.perf_counter()
-
-        all_scored_results: List[ValidationResult] = []
-
-        # Check if num_val_batches > 0 to avoid unnecessary loops.
-        if self.dataloader.num_val_batches <= 0:
-            if self._rank == 0:
-                logger.warning("num_val_batches is 0. Skipping validation.")
-            return {}
-
-        for i in range(self.dataloader.num_val_batches):
-            if self._rank == 0:
-                logger.debug(f"Processing validation batch {i + 1}/{self.dataloader.num_val_batches}")
-
-            with timer(self.enable_perf, "prep_and_generate", self.val_timedict):
-                batch_proto = self._prepare_validation_batch()
-                generated_proto = self._generate_for_validation(batch_proto)
-                dist.barrier(self._gather_group)  
-
-            with timer(self.enable_perf, "score_and_package", self.val_timedict):
-                scored_results = self._score_and_package_results(generated_proto)
-                all_scored_results.extend(scored_results)
-
-        dump_validation_generations(self.config, self.global_steps, self._rank, all_scored_results)
-        dist.barrier(self._gather_group)
-        
-        _, _, tp_rank, _, pp_rank, _ = self._get_node_dp_info(self.first_rollout_node)
-        # Gather all payloads to rank 0
-        with timer(self.enable_perf, "gather_payloads", self.val_timedict):
-            payloads_for_metrics = []
-            if tp_rank == 0 and pp_rank == 0:
-                # Only the master rank of the TP group (tp_rank=0) and first PP stage (pp_rank=0) prepares the payload.
-                payloads_for_metrics = [
-                    ValidationPayload(r.input_text, r.score, r.data_source, r.extra_rewards) for r in all_scored_results
-                ]
-            gathered_payloads_on_rank0 = [None] * self.world_size if self._rank == 0 else None
-            dist.gather_object(payloads_for_metrics, gathered_payloads_on_rank0, dst=0, group=self._gather_group)
-
-        # Rank 0 performs the final aggregation and logging
-        if self._rank == 0:
-            flat_payload_list = [p for sublist in gathered_payloads_on_rank0 if sublist for p in sublist]
-            final_metrics = self._aggregate_and_log_validation_metrics(flat_payload_list)
-        dist.barrier(self._gather_group)
-        
-        return final_metrics if self._rank == 0 else {}
-
-    def _prepare_validation_batch(self) -> DataProto:
-        """Fetches and prepares a single batch for validation."""
-        test_batch = self.dataloader.run(is_validation_step=True)
-        test_batch_proto = DataProto.from_single_dict(test_batch)
-        n_samples = self.config.actor_rollout_ref.rollout.val_kwargs.n
-        return test_batch_proto.repeat(n_samples, interleave=True)
-
-    def _generate_for_validation(self, batch_proto: DataProto) -> DataProto:
-        """Generates sequences using the rollout worker for a validation batch."""
-        rollout_worker = self.agent_group_worker[0][NodeRole.ROLLOUT]
-        val_kwargs = self.config.actor_rollout_ref.rollout.val_kwargs
-
-        prompt_texts = self.validate_tokenizer.batch_decode(
-            batch_proto.batch["input_ids"], skip_special_tokens=True
-        )
-        batch_proto.non_tensor_batch["prompt_texts"] = prompt_texts
-
-        gen_batch = prepare_generation_batch(batch_proto)
-
-        if self.config.actor_rollout_ref.rollout.agent.rewards_with_env and "reward_model" in batch_proto.non_tensor_batch:
-            gen_batch.non_tensor_batch["reward_model"] = batch_proto.non_tensor_batch["reward_model"] 
-        gen_batch.meta_info = {
-            "eos_token_id": self.validate_tokenizer.eos_token_id,
-            "pad_token_id": self.validate_tokenizer.pad_token_id,
-            "recompute_log_prob": False,
-            "do_sample": val_kwargs.do_sample,
-            "validate": True,
-        }
-        logger.info(f"_generate_for_validation gen batch meta_info: {gen_batch.meta_info}")
-        
-        output = None
-        if self._multi_agent is False:
-            if self.rollout_mode == 'sync':
-                output = rollout_worker.generate_sequences(gen_batch)
-            elif self._async_rollout_manager:
-                loop = asyncio.get_event_loop()
-                output = loop.run_until_complete(self._async_rollout_manager.generate_sequences(gen_batch))
-        else:
-            output = self.multi_agent_loop.generate_sequence(gen_batch)
-            if output:
-                return output
-            return batch_proto
-        if output:
-            batch_proto.union(output)
-        return batch_proto
-
-    def _score_and_package_results(self, generated_proto: DataProto) -> List[ValidationResult]:
-        """Scores generated sequences and packages them into ValidationResult objects."""
-        if self.rollout_mode == 'async' and self._async_rollout_manager is None:
-            return []
-        if self._multi_agent and 'responses' not in generated_proto.batch:
-            return []
-        if "token_level_rewards" in generated_proto.batch:
-            reward_result = {"reward_tensor": generated_proto.batch["token_level_rewards"],
-                             "reward_extra_info": {}}
-        else:    
-            reward_result = self.val_reward_fn(generated_proto, return_dict=True)
-        scores = reward_result["reward_tensor"].sum(-1).cpu()
-
-        input_texts = generated_proto.non_tensor_batch.get("prompt_texts")
-        if input_texts is None:
-            logger.error(
-                "FATAL: `prompt_texts` not found in `non_tensor_batch`. "
-                "The prompt data was lost during the process. Falling back to decoding the full sequence, "
-                "but please be aware the resulting `input_text` will be INCORRECT (it will contain prompt + response)."
-            )
-            # Fallback to prevent a crash, but the output is known to be wrong.
-            input_texts = self.validate_tokenizer.batch_decode(
-                generated_proto.batch["input_ids"], skip_special_tokens=True
-            )
-
-        output_texts = self.validate_tokenizer.batch_decode(generated_proto.batch["responses"], skip_special_tokens=True)
-        data_sources = generated_proto.non_tensor_batch.get("data_source", ["unknown"] * len(scores))
-        extra_info = generated_proto.non_tensor_batch.get("extra_info", [None] * len(scores))
-
-        packaged_results = []
-        for i in range(len(scores)):
-            if self.dataloader.is_val_trailing_rank and isinstance(extra_info[i], dict) and extra_info[i].get("padded_duplicate", None):
-                logger.debug(f"Rank {self._rank} skip append padded duplicate item {i}: score={scores[i].item()}")
-                continue
-            extra_rewards = {k: v[i] for k, v in reward_result.get("reward_extra_info", {}).items()}
-            packaged_results.append(ValidationResult(input_texts[i], output_texts[i], scores[i].item(), data_sources[i], reward_result["reward_tensor"][i], extra_rewards))
-        return packaged_results
-
-    def _aggregate_and_log_validation_metrics(self, all_payloads: List[ValidationPayload]) -> Dict[str, float]:
-        """On Rank 0, aggregates all validation results and logs performance."""
-        if not all_payloads:
-            logger.warning("Validation finished with no results gathered on Rank 0 to aggregate.")
-            return {}
-
-        logger.info(f"Rank 0: Aggregating {len(all_payloads)} validation results...")
-        with timer(self.enable_perf, "final_aggregation", self.val_timedict):
-            final_metrics = self._aggregate_validation_results(all_payloads)
-
-        # Log performance breakdown
-        total_time = time.perf_counter() - self.val_timedict.pop("overall_start_time", time.perf_counter())
-        logger.info("--- Validation Performance Breakdown (Rank 0) ---")
-        for name, duration in self.val_timedict.items():
-            logger.info(f"  Total {name.replace('_', ' ').title():<25}: {duration:.4f}s")
-        known_time = sum(self.val_timedict.values())
-        logger.info(f"  {'Other/Overhead':<25}: {max(0, total_time - known_time):.4f}s")
-        logger.info(f"  {'TOTAL VALIDATION TIME':<25}: {total_time:.4f}s")
-        logger.info("=" * 51)
-
-        return final_metrics
-
-    def _aggregate_validation_results(self, all_payloads: List[ValidationPayload]) -> Dict[str, float]:
-        """Computes the final metric dictionary from all gathered validation payloads."""
-        data_sources = [p.data_source for p in all_payloads]
-        sample_inputs = [p.input_text for p in all_payloads]
-
-        infos_dict = defaultdict(list)
-        for p in all_payloads:
-            infos_dict["reward"].append(p.score)
-            for key, value in p.extra_rewards.items():
-                infos_dict[key].append(value)
-
-        data_src2var2metric2val = aggregate_validation_metrics(data_sources=data_sources, sample_inputs=sample_inputs, infos_dict=infos_dict)
-
-        metric_dict = {}
-        for data_source, var2metric2val in data_src2var2metric2val.items():
-            core_var = "acc" if "acc" in var2metric2val else "reward"
-            for var_name, metric2val in var2metric2val.items():
-                if not metric2val:
-                    continue
-
-                # Robustly parse '@N' to prevent crashes from malformed metric names.
-                n_max_values = []
-                for name in metric2val.keys():
-                    if "@" in name and "/mean" in name:
-                        try:
-                            n_val = int(name.split("@")[-1].split("/")[0])
-                            n_max_values.append(n_val)
-                        except (ValueError, IndexError):
-                            continue  # Ignore malformed metric names
-
-                n_max = max(n_max_values) if n_max_values else 1
-
-                for metric_name, metric_val in metric2val.items():
-                    is_core_metric = (var_name == core_var) and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"]) and (f"@{n_max}" in metric_name)
-
-                    metric_sec = "val-core" if is_core_metric else "val-aux"
-                    pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
-                    metric_dict[pfx] = metric_val
-
-        # Re-calculate test_score per data source
-
-        data_source_rewards = defaultdict(list)
-        for p in all_payloads:
-            data_source_rewards[p.data_source].append(p.score)
-
-        for source, rewards in data_source_rewards.items():
-            if rewards:
-                metric_dict[f"val/test_score/{source}"] = np.mean(rewards)
-
-        return metric_dict
-
-# ==========================================================================================
-# Module 5: Utilities
+# Module 4: Utilities
 # ==========================================================================================
 
     def put_data_to_buffers(
@@ -1414,6 +1211,68 @@ class DAGWorker(Worker):
             loop = asyncio.get_event_loop()
             for data_buffer in self.data_buffers:
                 loop.run_until_complete(data_buffer.reset.remote())
+
+    def _get_node_process_group(self, node: Node) -> ProcessGroup:
+        """Retrieves the PyTorch ProcessGroup assigned to a specific graph node."""
+        assignment = self.process_group_manager.get_node_assignment(node.node_id)
+        if not (assignment and (name := assignment.get("process_group_name"))):
+            raise ValueError(f"Process group assignment or name not found for node {node.node_id}.")
+
+        pg = self.process_groups.get(name)
+        if pg is None:
+            raise ValueError(f"Process group '{name}' for node {node.node_id} was not created or found.")
+        return pg
+
+    def _get_node_dp_info(self, node: Node) -> tuple[int, int, int, int, int, int]:
+        """
+        Calculates Data Parallel (DP), Tensor Parallel (TP), and Pipeline Parallel (PP) info for a node.
+        
+        Returns:
+            tuple: (dp_size, dp_rank, tp_rank, tp_size, pp_rank, pp_size)
+        """
+        reference_node = node
+        if node.node_type == NodeType.COMPUTE:
+            # If the node is a COMPUTE type, find its true data source ancestor.
+            ancestor = find_first_non_compute_ancestor(self.taskgraph, node.node_id)
+            if ancestor:
+                reference_node = ancestor
+            else:
+                # If no non-COMPUTE ancestor is found, it's a critical error.
+                raise RuntimeError(f"Could not find any non-COMPUTE ancestor for COMPUTE node '{node.node_id}'. Please check your DAG graph configuration.")
+
+        if reference_node.node_type == NodeType.COMPUTE:
+            group_world_size = self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes
+            group_rank = dist.get_rank()
+        else:
+            process_group = self._get_node_process_group(reference_node)
+            group_world_size = dist.get_world_size(process_group)
+            group_rank = dist.get_rank(process_group)
+
+        # Get parallelism configuration based on backend strategy
+        tp_size, pp_size = get_parallelism_config(reference_node)
+        
+        # Calculate total parallel size (TP * PP)
+        total_parallel_size = tp_size * pp_size
+        
+        if group_world_size % total_parallel_size != 0:
+            raise ValueError(f"Configuration error for node {node.node_id}: Group world size ({group_world_size}) is not divisible by total parallel size (TP={tp_size} * PP={pp_size} = {total_parallel_size}). Check your parallel configuration.")
+        
+        dp_size = group_world_size // total_parallel_size
+        
+        # Calculate ranks within the data parallel group
+        dp_rank = group_rank // total_parallel_size
+        
+        # Calculate position within the TP-PP grid
+        local_rank_in_tp_pp_group = group_rank % total_parallel_size
+        
+        # For 2D parallelism: ranks are arranged as [PP0_TP0, PP0_TP1, ..., PP0_TP(tp_size-1), PP1_TP0, ...]
+        pp_rank = local_rank_in_tp_pp_group // tp_size
+        tp_rank = local_rank_in_tp_pp_group % tp_size
+        
+        return dp_size, dp_rank, tp_rank, tp_size, pp_rank, pp_size
+
+    def get_zeromq_address(self):
+        return self.zmq_address
 
     def multi_agent_put_log(self, key: str, data: DataProto, agent_group: int, next_dp_size: int, timing_raw):
         def uuid_hex_to_bucket(uuid_hex: str, num_buckets: int = 8) -> int:

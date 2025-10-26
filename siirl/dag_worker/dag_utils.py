@@ -366,11 +366,6 @@ def generate_node_worker_key(node: Node) -> str:
     return f"{node.agent_group}_{node.node_type.value}_{node.node_role.value}"
 
 
-def generate_agent_group_key(node: Node) -> str:
-    """Generates a unique key for an agent group, used for caching (e.g., tokenizers)."""
-    return f"group_key_{node.agent_group}"
-
-
 def setup_sharding_manager(config, agent_group_process_group, agent_group: int, worker_dict: Dict[NodeRole, Worker]):
     """Configures the sharding manager to sync weights between training backend and inference backend."""
     actor_worker = worker_dict[NodeRole.ACTOR]
