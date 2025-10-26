@@ -238,7 +238,7 @@ class Node:
                 agent_options: AgentArguments = dacite.from_dict(
                 data_class=AgentArguments,
                 data=agent_options,
-                config=dacite.Config(strict=False)    # 允许 YAML 比 dataclass 字段多
+                config=dacite.Config(strict=False)
             )
         self.agent_options = agent_options
         self.agent_process = AgentProcess(agent_options, self.config)
@@ -389,14 +389,35 @@ class Node:
             return self.output
 
         try:
-            # Prepare the parameters to be passed to the executable function
-            # Here, the actual parameters can be constructed based on kwargs and node configuration
-            # For example, only pass the outputs of dependencies
-            # resolved_args = {dep_id: kwargs.get(dep_id) for dep_id in self.dependencies if dep_id in kwargs}
-            # resolved_args.update(self.config) # Or pass the node configuration as well
+            import inspect
+
+            # Check if the executable is an unbound method (needs self parameter)
+            # If it's a method defined in a class but not bound to an instance, bind it now
+            executable = self._executable
+
+            # Check if this is an unbound method that needs 'self'
+            # This happens when the method is loaded from "module:Class.method" format
+            if inspect.isfunction(executable) or inspect.ismethod(executable):
+                sig = inspect.signature(executable)
+                params = list(sig.parameters.keys())
+
+                # If the first parameter is 'self' and it's not bound yet, we need to bind it
+                if params and params[0] == 'self':
+                    # Get the DAGWorker instance from kwargs
+                    # The calling code should pass the DAGWorker instance
+                    dag_worker = kwargs.pop('_dag_worker_instance', None)
+                    if dag_worker is None:
+                        raise ValueError(
+                            f"Node {self.node_id}: Executable '{self.executable_ref}' requires 'self' parameter, "
+                            f"but '_dag_worker_instance' was not provided in kwargs. "
+                            f"Please pass _dag_worker_instance=self when calling node.run()."
+                        )
+                    # Bind the method to the instance
+                    import types
+                    executable = types.MethodType(executable, dag_worker)
 
             # Simplification: Pass all kwargs directly, and the user function handles them
-            node_output = self._executable(**kwargs, node_config=self.config)
+            node_output = executable(**kwargs)
             self.output = node_output
             self.update_status(NodeStatus.COMPLETED)
             logger.debug(f"Node {self.node_id} execution completed.")

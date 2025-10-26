@@ -42,6 +42,7 @@ from siirl.data_coordinator.dataloader import DataLoaderNode
 from siirl.data_coordinator.protocol import collate_fn
 from siirl.dag_worker.data_structures import NodeOutput, ValidationPayload, ValidationResult
 from siirl.dag_worker.constants import DAGConstants, DAGInitializationError
+from siirl.dag_worker import core_algos
 from siirl.dag_worker.core_algos import (
     agg_loss, 
     apply_kl_penalty, 
@@ -50,9 +51,7 @@ from siirl.dag_worker.core_algos import (
     )
 from siirl.dag_worker.metric_aggregator import (
     METRIC_CONFIG_FULL,
-    METRIC_CONFIG_MEAN_ONLY,
-    DistributedMetricAggregator,
-    _ReduceOp
+    METRIC_CONFIG_MEAN_ONLY
 )
 from siirl.dag_worker.dag_utils import  (
     remove_prefix_from_dataproto,
@@ -80,6 +79,7 @@ from siirl.dag_worker.dag_utils import  (
     log_core_performance_metrics,
     aggregate_and_write_performance_metrics,
     prepare_local_batch_metrics,
+    reduce_and_broadcast_metrics,
     )
 from siirl.utils.debug import DistProfiler
 from siirl.utils.extras.device import get_device_name, get_nccl_backend, get_device_id
@@ -122,7 +122,6 @@ class DAGWorker(Worker):
         self.agent_group_process_group: Dict[int, Dict[NodeRole, Any]] = defaultdict(dict)
         self.process_groups: Dict[str, ProcessGroup] = {}
         self.tokenizer_mapping: Dict[str, TokenizerModule] = {}
-        self.kl_ctrl_in_reward = None
         self.logger = None
         self.progress_bar = None
         self._rank: int = -1
@@ -278,6 +277,8 @@ class DAGWorker(Worker):
             # --- 1. Data Loading ---
             with timer(self.enable_perf, "data_loading", timing_raw):
                 batch = DataProto.from_single_dict(self.dataloader.run(epoch=epoch, is_validation_step=False))
+                # Add training context to batch metadata
+                batch.meta_info["global_steps"] = self.global_steps
 
             with timer(self.enable_perf, "get_entry_node", timing_raw):
                 node_queue = self.taskgraph.get_entry_nodes()
@@ -327,24 +328,36 @@ class DAGWorker(Worker):
                     with timer(self.enable_perf, node_name_timer, timing_raw):
                         if cur_node.node_role == NodeRole.REWARD:
                             if self.check_spmd_mode():
-                                node_output = self.compute_reward(batch, cur_tp_size)
+                                node_output = self.compute_reward(self.config, batch, cur_tp_size)
                             elif cur_tp_rank == 0:
-                                node_output = self.compute_reward(batch, cur_tp_size)
+                                node_output = self.compute_reward(self.config, batch, cur_tp_size)
                         elif cur_node.node_role == NodeRole.ADVANTAGE:
                             if self.check_spmd_mode():
-                                node_output = self.compute_advantage(batch, cur_node = cur_node)
+                                node_output = self.compute_advantage(self.config, batch, cur_node=cur_node)
                             elif cur_tp_rank == 0:
-                                node_output = self.compute_advantage(batch, cur_node = cur_node)
+                                node_output = self.compute_advantage(self.config, batch, cur_node=cur_node)
                         elif cur_node.executable:
                             if cur_node.agent_options and cur_node.agent_options.train_cycle:
                                 cycle_round = self.global_steps // cur_node.agent_options.train_cycle
                                 agent_num = len(self.agent_group_worker)
                                 if cycle_round % agent_num == cur_node.agent_group:
-                                    node_output = cur_node.run(batch=batch, worker_group_index=cur_node.agent_group, siirl_args=self.config)
+                                    process_group = self._get_node_process_group(cur_node)
+                                    node_output = cur_node.run(batch=batch,
+                                                               config=self.config,
+                                                               process_group=process_group,
+                                                               agent_group_worker=self.agent_group_worker,
+                                                               worker_group_index=cur_node.agent_group,
+                                                               _dag_worker_instance=self)
                                 else:
                                     node_output = NodeOutput(batch=batch)
                             else:
-                                node_output = cur_node.run(batch=batch, worker_group_index=cur_node.agent_group, siirl_args=self.config)
+                                process_group = self._get_node_process_group(cur_node)
+                                node_output = cur_node.run(batch=batch,
+                                                           config=self.config,
+                                                           process_group=process_group,
+                                                           agent_group_worker=self.agent_group_worker,
+                                                           worker_group_index=cur_node.agent_group,
+                                                           _dag_worker_instance=self)
                         else:  # Passthrough node
                             logger.warning(f"Node {cur_node.node_id} has no executable. Passing data through.")
                             node_output = NodeOutput(batch=batch)
@@ -418,40 +431,31 @@ class DAGWorker(Worker):
 # Module 2: Graph Node Execution Handlers
 # ==========================================================================================
 
-    def _set_node_executables(self):
-        """Maps node roles to their corresponding execution methods."""
-        ROLE_METHOD_MAPPING = {
-            (NodeRole.ROLLOUT, False): self.generate,
-            (NodeRole.REFERENCE, False): self.compute_ref_log_prob,
-            (NodeRole.ACTOR, True): self.compute_old_log_prob,
-            (NodeRole.ACTOR, False): self.train_actor,
-            (NodeRole.CRITIC, True): self.compute_value,
-            (NodeRole.CRITIC, False): self.train_critic,
-        }
-        for node in self.taskgraph.nodes.values():
-            if node.node_role in [NodeRole.REWARD, NodeRole.ADVANTAGE]:
-                continue
-            key = (node.node_role, node.only_forward_compute)
-            if executable_func := ROLE_METHOD_MAPPING.get(key):
-                node.executable = executable_func
-
     @DistProfiler.annotate(role="generate")
-    def generate_sync_mode(self, worker_group_index: int, batch: DataProto, **kwargs) -> NodeOutput:
+    def generate_sync_mode(self,
+                           config,
+                           agent_group_worker,
+                           worker_group_index: int,
+                           batch: DataProto,
+                           ) -> NodeOutput:
         """Sync mode"""
         gen_batch:DataProto = prepare_generation_batch(batch)
-        if self.config.actor_rollout_ref.rollout.name == 'sglang':
-            gen_batch = gen_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-        gen_output = self.agent_group_worker[worker_group_index][NodeRole.ROLLOUT].generate_sequences(gen_batch)
+        if config.actor_rollout_ref.rollout.name == 'sglang':
+            gen_batch = gen_batch.repeat(repeat_times=config.actor_rollout_ref.rollout.n, interleave=True)
+        gen_output = agent_group_worker[worker_group_index][NodeRole.ROLLOUT].generate_sequences(gen_batch)
         metrics = gen_output.meta_info.get("metrics", {})
         gen_output.meta_info = {}
         batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))])
-        batch = batch.repeat(self.config.actor_rollout_ref.rollout.n, interleave=True).union(gen_output)
+        batch = batch.repeat(config.actor_rollout_ref.rollout.n, interleave=True).union(gen_output)
         if "response_mask" not in batch.batch:
             batch.batch["response_mask"] = compute_response_mask(batch)
         return NodeOutput(batch=batch, metrics=metrics)
 
     @DistProfiler.annotate(role="generate")
-    def generate_async_mode(self, worker_group_index: int, batch: DataProto, **kwargs) -> NodeOutput:
+    def generate_async_mode(self, 
+                            config, 
+                            batch: DataProto, 
+                            ) -> NodeOutput:
         """Async mode"""
         if self._async_rollout_manager is not None:
             gen_batch = prepare_generation_batch(batch)
@@ -460,43 +464,56 @@ class DAGWorker(Worker):
             metrics = gen_output.meta_info.get("metrics", {})
             gen_output.meta_info = {}
             batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))])
-            batch = batch.repeat(self.config.actor_rollout_ref.rollout.n, interleave=True).union(gen_output)
+            batch = batch.repeat(config.actor_rollout_ref.rollout.n, interleave=True).union(gen_output)
             if "response_mask" not in batch.batch:
                 batch.batch["response_mask"] = compute_response_mask(batch)
             return NodeOutput(batch=batch, metrics=metrics)
         return NodeOutput(batch=batch, metrics={})
 
     @DistProfiler.annotate(role="generate")
-    def generate_multi_agent_mode(self, worker_group_index: int, batch: DataProto, **kwargs) -> NodeOutput:
+    def generate_multi_agent_mode(self, 
+                                  config, 
+                                  batch: DataProto, 
+                                  ) -> NodeOutput:
         """Generates sequences for a training batch using the multi-agent rollout model."""
         gen_batch = prepare_generation_batch(batch)
-        if self.config.actor_rollout_ref.rollout.agent.rewards_with_env and "reward_model" in batch.non_tensor_batch:
+        if config.actor_rollout_ref.rollout.agent.rewards_with_env and "reward_model" in batch.non_tensor_batch:
             gen_batch.non_tensor_batch["reward_model"] = batch.non_tensor_batch["reward_model"] 
-        assert self.config.actor_rollout_ref.rollout.name == 'sglang'
+        assert config.actor_rollout_ref.rollout.name == 'sglang'
         gen_output = self.multi_agent_loop.generate_sequence(gen_batch)
         if gen_output:
             metrics = gen_output.meta_info.get("metrics", {})
             # gen_output.meta_info = {}
             # batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))])
-            # batch = batch.repeat(self.config.actor_rollout_ref.rollout.n, interleave=True).union(gen_output)
+            # batch = batch.repeat(config.actor_rollout_ref.rollout.n, interleave=True).union(gen_output)
             # if "response_mask" not in batch.batch:
             #     batch.batch["response_mask"] = compute_response_mask(batch)
             return NodeOutput(batch=gen_output, metrics=metrics) 
         return NodeOutput(batch=batch, metrics={})
 
     @DistProfiler.annotate(role="generate")
-    def generate(self, worker_group_index: int, batch: DataProto, **kwargs) -> NodeOutput:
+    def generate(self, 
+                 config, 
+                 process_group,
+                 agent_group_worker, 
+                 worker_group_index: int, 
+                 batch: DataProto, 
+                 ) -> NodeOutput:
         """Generates sequences for a training batch using the rollout model."""
         if self._multi_agent is False:
             if self.rollout_mode == 'sync':
-                return self.generate_sync_mode(worker_group_index, batch, **kwargs)
+                return self.generate_sync_mode(config, agent_group_worker, worker_group_index, batch)
             else: 
-                return self.generate_async_mode(worker_group_index, batch, **kwargs)
+                return self.generate_async_mode(config, batch)
         else:
-            return self.generate_multi_agent_mode(worker_group_index, batch, **kwargs)
+            return self.generate_multi_agent_mode(config, batch)
                     
     @DistProfiler.annotate(role="compute_reward")
-    def compute_reward(self, batch: DataProto, tp_size: int, **kwargs) -> NodeOutput:
+    def compute_reward(self, 
+                       config, 
+                       batch: DataProto, 
+                       tp_size: int
+                       ) -> NodeOutput:
         """Calculates rewards for a batch of generated sequences."""
         if "token_level_rewards" in batch.batch:
             return NodeOutput(batch=batch, metrics={})
@@ -508,56 +525,73 @@ class DAGWorker(Worker):
             batch.non_tensor_batch.update({k: np.array(v) for k, v in extra_infos.items()})
 
         metrics = {}
-        if self.config.algorithm.use_kl_in_reward:
-            batch, kl_metrics = apply_kl_penalty(batch, self.kl_ctrl_in_reward, self.config.algorithm.kl_penalty)
+        if config.algorithm.use_kl_in_reward:
+            kl_ctrl_in_reward = core_algos.get_kl_controller(config.algorithm.kl_ctrl)
+            batch, kl_metrics = apply_kl_penalty(batch, kl_ctrl_in_reward, config.algorithm.kl_penalty)
             metrics.update(kl_metrics)
         else:
             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
         return NodeOutput(batch=batch, metrics=metrics)
 
     @DistProfiler.annotate(role="compute_old_log_prob")
-    def compute_old_log_prob(self, batch: DataProto, worker_group_index: int, **kwargs) -> NodeOutput:
+    def compute_old_log_prob(self,
+                             config,
+                             batch: DataProto,
+                             process_group,
+                             agent_group_worker,
+                             worker_group_index: int
+                             ) -> NodeOutput:
         """Computes log probabilities from the actor model before the policy update."""
         if "global_token_num" not in batch.meta_info:
             # in multi-agent, agentA may don't have reward node
             # insert some info needed
             batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
-        processed_data = self.agent_group_worker[worker_group_index][NodeRole.ACTOR].compute_log_prob(batch)
-        process_group = self._get_node_process_group(self._get_node(NodeRole.ACTOR, worker_group_index))
+        processed_data = agent_group_worker[worker_group_index][NodeRole.ACTOR].compute_log_prob(batch)
 
         local_metrics = processed_data.meta_info.get("metrics", {})
         if "entropys" in processed_data.batch:
-            entropy = agg_loss(processed_data.batch["entropys"], processed_data.batch["response_mask"].to("cpu"), self.config.actor_rollout_ref.actor.loss_agg_mode)
+            entropy = agg_loss(processed_data.batch["entropys"], processed_data.batch["response_mask"].to("cpu"), config.actor_rollout_ref.actor.loss_agg_mode)
             local_metrics["actor/entropy_loss"] = entropy.item()
-        metrics = self._reduce_and_broadcast_metrics(local_metrics, process_group)
+        metrics = reduce_and_broadcast_metrics(local_metrics, process_group)
 
         processed_data.meta_info.pop("metrics", None)
         processed_data.batch.pop("entropys", None)
 
-        if "rollout_log_probs" in processed_data.batch and self._rank == 0:
-            rollout_probs, actor_probs = torch.exp(processed_data.batch["rollout_log_probs"]), torch.exp(processed_data.batch["old_log_probs"])
-            rollout_probs_diff = torch.masked_select(torch.abs(rollout_probs.cpu() - actor_probs), processed_data.batch["response_mask"].bool().cpu())
-            if rollout_probs_diff.numel() > 0:
-                metrics.update({"training/rollout_probs_diff_max": torch.max(rollout_probs_diff).item(), "training/rollout_probs_diff_mean": torch.mean(rollout_probs_diff).item(), "training/rollout_probs_diff_std": torch.std(rollout_probs_diff).item()})
         return NodeOutput(batch=processed_data, metrics=metrics)
 
     @DistProfiler.annotate(role="compute_ref_log_prob")
-    def compute_ref_log_prob(self, batch: DataProto, worker_group_index: int, **kwargs) -> NodeOutput:
+    def compute_ref_log_prob(self, 
+                             config,
+                             batch: DataProto,
+                             process_group,
+                             agent_group_worker,
+                             worker_group_index: int
+                             ) -> NodeOutput:
         """Computes log probabilities from the frozen reference model."""
-        processed_data = self.agent_group_worker[worker_group_index][NodeRole.REFERENCE].compute_ref_log_prob(batch)
+        processed_data = agent_group_worker[worker_group_index][NodeRole.REFERENCE].compute_ref_log_prob(batch)
         metrics = processed_data.meta_info.get("metrics", {})
         return NodeOutput(batch=processed_data, metrics=metrics)
 
     @DistProfiler.annotate(role="compute_value")
-    def compute_value(self, batch: DataProto, worker_group_index: int, **kwargs) -> NodeOutput:
+    def compute_value(self,
+                      config,
+                      batch: DataProto,
+                      process_group,
+                      agent_group_worker,
+                      worker_group_index: int
+                      ) -> NodeOutput:
         """Computes value estimates from the critic model."""
-        processed_data = self.agent_group_worker[worker_group_index][NodeRole.CRITIC].compute_values(batch)
+        processed_data = agent_group_worker[worker_group_index][NodeRole.CRITIC].compute_values(batch)
         return NodeOutput(batch=processed_data)
 
     @DistProfiler.annotate(role="compute_advantage")
-    def compute_multi_agent_advantage(self, batch: DataProto, **kwargs) -> NodeOutput:
-        adv_config = self.config.algorithm
-        rollout_config = self.config.actor_rollout_ref.rollout
+    def compute_multi_agent_advantage(self, 
+                                      config, 
+                                      batch: DataProto, 
+                                      **kwargs
+                                      ) -> NodeOutput:
+        adv_config = config.algorithm
+        rollout_config = config.actor_rollout_ref.rollout
         cur_node = kwargs["cur_node"]
         if "token_level_rewards" not in batch.batch :
             # make sure rewards of angentB has been compute
@@ -589,43 +623,72 @@ class DAGWorker(Worker):
                     
         return NodeOutput(
             batch=compute_advantage(
-                batch, adv_estimator=adv_config.adv_estimator, gamma=adv_config.gamma, lam=adv_config.lam, num_repeat=rollout_config.n, norm_adv_by_std_in_grpo=adv_config.norm_adv_by_std_in_grpo, weight_factor_in_cpgd=adv_config.weight_factor_in_cpgd, multi_turn=rollout_config.multi_turn.enable,
+                batch, 
+                adv_estimator=adv_config.adv_estimator, 
+                gamma=adv_config.gamma, 
+                lam=adv_config.lam, 
+                num_repeat=rollout_config.n, 
+                norm_adv_by_std_in_grpo=adv_config.norm_adv_by_std_in_grpo, 
+                weight_factor_in_cpgd=adv_config.weight_factor_in_cpgd, 
+                multi_turn=rollout_config.multi_turn.enable,
                 **kwargs
             )
         )        
         
     @DistProfiler.annotate(role="compute_advantage")
-    def compute_advantage(self, batch: DataProto, **kwargs) -> NodeOutput:
+    def compute_advantage(self,
+                          config,
+                          batch: DataProto,
+                          **kwargs
+                          ) -> NodeOutput:
         """Computes advantages and returns for PPO using GAE."""
         if self._multi_agent:
-            return self.compute_multi_agent_advantage(batch, **kwargs)
-        adv_config = self.config.algorithm
-        rollout_config = self.config.actor_rollout_ref.rollout
+            return self.compute_multi_agent_advantage(config, batch, **kwargs)
+        adv_config = config.algorithm
+        rollout_config = config.actor_rollout_ref.rollout
         return NodeOutput(
             batch=compute_advantage(
-                batch, adv_estimator=adv_config.adv_estimator, gamma=adv_config.gamma, lam=adv_config.lam, num_repeat=rollout_config.n, norm_adv_by_std_in_grpo=adv_config.norm_adv_by_std_in_grpo, weight_factor_in_cpgd=adv_config.weight_factor_in_cpgd, multi_turn=rollout_config.multi_turn.enable,
+                batch,
+                adv_estimator=adv_config.adv_estimator,
+                gamma=adv_config.gamma,
+                lam=adv_config.lam,
+                num_repeat=rollout_config.n,
+                norm_adv_by_std_in_grpo=adv_config.norm_adv_by_std_in_grpo,
+                weight_factor_in_cpgd=adv_config.weight_factor_in_cpgd,
+                multi_turn=rollout_config.multi_turn.enable,
                 **kwargs
             )
         )
 
     @DistProfiler.annotate(role="train_critic")
-    def train_critic(self, batch: DataProto, worker_group_index: int, **kwargs) -> NodeOutput:
+    def train_critic(self, 
+                     config,  
+                     batch: DataProto, 
+                     process_group,
+                     agent_group_worker,
+                     worker_group_index: int, 
+                     ) -> NodeOutput:
         """Performs a single training step on the critic model."""
-        processed_data = self.agent_group_worker[worker_group_index][NodeRole.CRITIC].update_critic(batch)
-        process_group = self._get_node_process_group(self._get_node(NodeRole.CRITIC, worker_group_index))
-        metrics = self._reduce_and_broadcast_metrics(processed_data.meta_info.get("metrics"), process_group)
+        processed_data = agent_group_worker[worker_group_index][NodeRole.CRITIC].update_critic(batch)
+        metrics = reduce_and_broadcast_metrics(processed_data.meta_info.get("metrics"), process_group)
         return NodeOutput(batch=processed_data, metrics=metrics)
 
     @DistProfiler.annotate(role="train_actor")
-    def train_actor(self, batch: DataProto, worker_group_index: int, **kwargs) -> NodeOutput:
+    def train_actor(self,
+                    config,
+                    batch: DataProto,
+                    process_group,
+                    agent_group_worker,
+                    worker_group_index: int,
+                    ) -> NodeOutput:
         """Performs a single training step on the actor (policy) model."""
-        if self.config.trainer.critic_warmup > self.global_steps:
+        global_steps = batch.meta_info.get("global_steps", 0)
+        if config.trainer.critic_warmup > global_steps:
             return NodeOutput(batch=batch)  # Skip actor update during critic warmup
 
-        batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
-        processed_data = self.agent_group_worker[worker_group_index][NodeRole.ACTOR].update_actor(batch)
-        process_group = self._get_node_process_group(self._get_node(NodeRole.ACTOR, worker_group_index))
-        metrics = self._reduce_and_broadcast_metrics(processed_data.meta_info.get("metrics"), process_group)
+        batch.meta_info["multi_turn"] = config.actor_rollout_ref.rollout.multi_turn.enable
+        processed_data = agent_group_worker[worker_group_index][NodeRole.ACTOR].update_actor(batch)
+        metrics = reduce_and_broadcast_metrics(processed_data.meta_info.get("metrics"), process_group)
         return NodeOutput(batch=processed_data, metrics=metrics)
 
 # ==========================================================================================
@@ -792,9 +855,6 @@ class DAGWorker(Worker):
             **self.config.reward_model.reward_kwargs,
         )
 
-        if self.config.algorithm.use_kl_in_reward:
-            from siirl.dag_worker import core_algos
-            self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
     def _setup_role_worker_mapping(self):
         """Creates a mapping from NodeRole to the corresponding Worker implementation class."""
@@ -878,24 +938,6 @@ class DAGWorker(Worker):
         if pg is None:
             raise ValueError(f"Process group '{name}' for node {node.node_id} was not created or found.")
         return pg
-
-    def _get_node(self, role: NodeRole, agent_group: int) -> Node:
-        """
-        Finds and returns a specific node from the task graph based on its role
-        and agent group.
-        """
-        found_node = next(
-            (
-                node
-                for node in self.taskgraph.nodes.values()
-                if node.node_role == role and node.agent_group == agent_group
-            ),
-            None,
-        )
-
-        if found_node is None:
-            raise RuntimeError(f"Could not find a node with role {role.name} for agent_group {agent_group}")
-        return found_node
 
     def _get_node_dp_info(self, node: Node) -> tuple[int, int, int, int, int, int]:
         """
@@ -986,11 +1028,14 @@ class DAGWorker(Worker):
         logger.info("All models and sharding managers initialized successfully.")
         if self._multi_agent:
             from siirl.execution.rollout_flow.multi_agent.multiagent_generate import MultiAgentLoop
-            self.multi_agent_loop =  MultiAgentLoop(self, config = self.config.actor_rollout_ref, node_workers = self.workers, local_dag = self.taskgraph, databuffer = self.data_buffers, placement_mode = 'colocate')
+            self.multi_agent_loop =  MultiAgentLoop(self, 
+                                                    config = self.config.actor_rollout_ref, 
+                                                    node_workers = self.workers, 
+                                                    local_dag = self.taskgraph, 
+                                                    databuffer = self.data_buffers, 
+                                                    placement_mode = 'colocate')
 
     def init_graph(self):
-        # this is needed by async rollout manager
-        self._set_node_executables()
         self.init_model()
 
         # Initialize CheckpointManager after workers are created
@@ -1027,11 +1072,11 @@ class DAGWorker(Worker):
             for i in range(tp_size):
                 addr_str = ''.join([chr(c.item()) for c in group_addrs[i]])
                 zmq_addresses.append(addr_str)
-        else:  # 组内其他进程（tp1, tp3...）
-            # 发送自己的地址到组内目标进程
+        else:  
             dist.send(encoded_addr, dst=dp_rank * tp_size)
         if tp_rank == 0:
             self._async_rollout_manager = AgentLoopManager(node.config["intern_config"], dp_rank, os.environ['WG_PREFIX'], node_worker.rollout, zmq_addresses)
+            
     def get_zeromq_address(self):
         return self.zmq_address
     
@@ -1409,55 +1454,6 @@ class DAGWorker(Worker):
     def check_spmd_mode(self):
         return self.rollout_mode == 'sync' and self._multi_agent == False
 
-    def _reduce_and_broadcast_metrics(
-        self, local_metrics: Dict[str, Union[float, List[float], torch.Tensor]], group: dist.ProcessGroup
-    ) -> Dict[str, float]:
-        """
-        Aggregates metrics in a distributed environment using a dedicated helper class.
-        For Pipeline Parallel setups, ensures all ranks have the same metric keys to avoid
-        tensor shape mismatch during all_reduce operations.
-
-        Args:
-            local_metrics: A dictionary of metrics on each rank.
-            group: The process group for the aggregation.
-
-        Returns:
-            A dictionary with the globally aggregated metrics, available on all ranks.
-        """
-        if not isinstance(local_metrics, dict) or not local_metrics:
-            return {}
-
-        world_size = dist.get_world_size(group)
-        if world_size <= 1:
-            # If not in a distributed setting, perform local aggregation only.
-            aggregator = DistributedMetricAggregator(local_metrics, group=None)
-            # The bucketed values are already the final values in a non-distributed case.
-            final_metrics = {}
-            for op_type, data in aggregator.op_buckets.items():
-                for key, value in data:
-                    if op_type == _ReduceOp.SUM: # value is a (sum, count) tuple
-                        final_metrics[key] = value[0] / value[1] if value[1] > 0 else 0.0
-                    else: # value is a float
-                        final_metrics[key] = float(value)
-            return final_metrics
-
-        # In Megatron with Pipeline Parallel:
-        # 1. First gather all metric keys from all ranks to ensure consistency
-        local_keys = set(local_metrics.keys())
-        all_keys_list = [None] * world_size
-        dist.all_gather_object(all_keys_list, local_keys, group=group)
-        
-        # 2. Union all keys to get the complete set of expected metrics
-        all_expected_keys = set()
-        for keys_set in all_keys_list:
-            all_expected_keys.update(keys_set)
-        
-        # 3. Use the aggregator with unified keys to perform communication
-        aggregator = DistributedMetricAggregator(local_metrics, group)
-        # NOTE(Ping Zhang): Ensure all ranks have the same metrics by adding missing ones with default values
-        aggregator.op_buckets = aggregator._bucket_local_metrics(local_metrics, all_expected_keys)
-        return aggregator.aggregate_and_get_results()
-
     def _collect_final_metrics(self, batch: DataProto, timing_raw: dict) -> Dict[str, float]:
         """
         Orchestrates the collection and computation of all metrics for a training step
@@ -1509,7 +1505,7 @@ class DAGWorker(Worker):
 
         # --- 3. Perform the aggregated, distributed reduction ---
         with timer(self.enable_perf, "metrics_aggregation", timing_raw):
-            aggregated_metrics = self._reduce_and_broadcast_metrics(metrics_to_aggregate, self._gather_group)
+            aggregated_metrics = reduce_and_broadcast_metrics(metrics_to_aggregate, self._gather_group)
 
         # Post-process keys and values for the final output
         for key, value in aggregated_metrics.items():
@@ -1575,6 +1571,21 @@ class DAGWorker(Worker):
             for key, value in timing_metrics.items():
                 if key.startswith("timing_s/"):
                     final_metrics[key.replace("timing_s/", "perf/delta_time/")] = value
+
+            # Calculate rollout and actor log probs difference statistics
+            if "rollout_log_probs" in batch.batch and "old_log_probs" in batch.batch:
+                rollout_probs = torch.exp(batch.batch["rollout_log_probs"])
+                actor_probs = torch.exp(batch.batch["old_log_probs"])
+                rollout_probs_diff = torch.masked_select(
+                    torch.abs(rollout_probs.cpu() - actor_probs),
+                    batch.batch["response_mask"].bool().cpu()
+                )
+                if rollout_probs_diff.numel() > 0:
+                    final_metrics.update({
+                        "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).item(),
+                        "training/rollout_probs_diff_mean": torch.mean(rollout_probs_diff).item(),
+                        "training/rollout_probs_diff_std": torch.std(rollout_probs_diff).item()
+                    })
 
         # All ranks return the final metrics. Ranks other than 0 can use them if needed,
         # or just ignore them. This is cleaner than returning an empty dict.
