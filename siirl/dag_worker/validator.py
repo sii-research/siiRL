@@ -29,7 +29,7 @@ from siirl.execution.scheduler.reward import create_reward_manager
 from siirl.dag_worker.data_structures import ValidationPayload, ValidationResult
 from siirl.dag_worker.dag_utils import dump_validation_generations, timer
 from siirl.utils.metrics.metric_utils import aggregate_validation_metrics
-from siirl.global_config.params import SiiRLArguments
+from siirl.params import SiiRLArguments
 
 
 

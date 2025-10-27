@@ -28,7 +28,7 @@ from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData
 
 from siirl.models.loader import TokenizerModule, load_tokenizer
-from siirl.global_config.params import SiiRLArguments
+from siirl.params import SiiRLArguments
 from siirl.engine.base_worker import Worker
 from siirl.execution.dag import TaskGraph
 from siirl.execution.dag.node import NodeRole, NodeType, Node

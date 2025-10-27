@@ -17,7 +17,7 @@ from typing import Any, Dict
 
 import numpy as np
 from tensordict import TensorDict
-from siirl.global_config.params import SiiRLArguments
+from siirl.params import SiiRLArguments
 from siirl.dag_worker.data_structures import NodeOutput
 from siirl.data_coordinator import DataProto
 from siirl.data_coordinator.sample import filter_tensordict

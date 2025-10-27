@@ -30,7 +30,7 @@ import torch
 from omegaconf import DictConfig
 
 import siirl.utils.model_utils.torch_functional as siirl_F
-from siirl.global_config.params.model_args import AlgorithmArguments, ActorArguments
+from siirl.params.model_args import AlgorithmArguments, ActorArguments
 from siirl.execution.scheduler.enums import AdvantageEstimator
 from tensordict import TensorDict 
 from siirl import DataProto

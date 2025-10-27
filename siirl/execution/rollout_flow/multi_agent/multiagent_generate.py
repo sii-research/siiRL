@@ -34,7 +34,7 @@ from siirl.engine.rollout.sglang_rollout.async_sglang_server import AsyncSglangS
 from siirl.engine.fsdp_workers import ActorRolloutRefWorker
 from siirl.execution.dag import TaskGraph, Node, NodeRole, NodeType
 from siirl.data_coordinator.protocol import DataProto
-from siirl.global_config.params import RolloutArguments, ActorRolloutRefArguments
+from siirl.params import RolloutArguments, ActorRolloutRefArguments
 from siirl.dag_worker.dag_utils import remove_prefix_from_dataproto
 
 class MultiAgentLoop():

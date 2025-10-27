@@ -81,7 +81,7 @@ from siirl.engine.rollout.schemas import (
     Message,
 )
 
-from siirl.global_config.params import RolloutArguments
+from siirl.params import RolloutArguments
 from siirl.engine.rollout.sglang_rollout.utils import broadcast_pyobj
 from loguru import logger
 

@@ -54,7 +54,7 @@ from siirl.utils.extras.import_utils import import_external_libs
 from siirl.utils.extras.device import get_device_id, get_device_name, get_nccl_backend, get_torch_device
 from siirl.utils.model_utils.model import get_hf_model_path, load_mcore_dist_weights, load_megatron_gptmodel_weights
 from siirl.utils.model_utils.torch_dtypes import PrecisionType
-from siirl.global_config.params.model_args import ActorRolloutRefArguments
+from siirl.params.model_args import ActorRolloutRefArguments
 from siirl.engine.actor.megatron_actor import MegatronPPOActor
 from siirl.engine.critic.megatron_critic import MegatronPPOCritic
 from siirl.engine.reward_model.megatron.reward_model import MegatronRewardModel

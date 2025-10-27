@@ -26,7 +26,7 @@ from loguru import logger
 from omegaconf import DictConfig
 
 from siirl.utils.extras.device import is_cuda_available, is_npu_available
-from siirl.global_config.params.model_args import CheckpointArguments
+from siirl.params.model_args import CheckpointArguments
 
 class BaseCheckpointManager:
     """

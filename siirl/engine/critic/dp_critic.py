@@ -31,7 +31,7 @@ from siirl.utils.model_utils.seqlen_balancing import get_reverse_idx, rearrange_
 from siirl.utils.model_utils.torch_functional import masked_mean
 from siirl.utils.model_utils.ulysses import gather_outpus_and_unpad, ulysses_pad_and_slice_inputs
 from siirl.engine.critic import BasePPOCritic
-from siirl.global_config.params.model_args import CriticArguments
+from siirl.params.model_args import CriticArguments
 
 if is_cuda_available:
     from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
