@@ -295,8 +295,8 @@ class vLLMRollout(BaseRollout):
             start_time = time.time()
 
         
-        do_sample = prompts.get("do_sample", True)
-        is_validate = prompts.get("validate", False)
+        do_sample = prompts["do_sample"] if "do_sample" in prompts else True
+        is_validate = prompts["validate"] if "validate" in prompts else False
 
         if not do_sample:
             kwargs = {

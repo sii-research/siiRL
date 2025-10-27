@@ -677,8 +677,8 @@ class SGLangRollout(BaseRollout):
         idx_list = [input_data["prompt_token_ids"] for input_data in sglang_inputs]
         image_list = [input_data.get("image_data", None) for input_data in sglang_inputs]
 
-        do_sample = prompts.get("do_sample", True)
-        is_validate = prompts.get("validate", False)
+        do_sample = prompts["do_sample"] if "do_sample" in prompts else True
+        is_validate = prompts["validate"] if "validate" in prompts else False
 
         # Create request-level sampling parameters
         request_sampling_params = self.sampling_params.copy()

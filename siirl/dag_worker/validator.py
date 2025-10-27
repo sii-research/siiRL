@@ -201,14 +201,11 @@ class Validator:
             batch["input_ids"], skip_special_tokens=True
         )
         batch["prompt_texts"] = prompt_texts
-        batch["meta_info"] = NonTensorData({
-            "eos_token_id": self.validate_tokenizer.eos_token_id,
-            "pad_token_id": self.validate_tokenizer.pad_token_id,
-            "recompute_log_prob": False,
-            "do_sample": val_kwargs.do_sample,
-            "validate": True,
-        })
-        logger.info(f"_generate_for_validation gen batch meta_info: {batch['meta_info']}")
+        batch["eos_token_id"] = NonTensorData(self.validate_tokenizer.eos_token_id)
+        batch["pad_token_id"] = NonTensorData(self.validate_tokenizer.eos_token_id)
+        batch["recompute_log_prob"] = NonTensorData(self.validate_tokenizer.eos_token_id)
+        batch["validate"] = NonTensorData(True)
+        batch["do_sample"] = NonTensorData(val_kwargs.do_sample)
 
         output = None
         if self.multi_agent is False:
