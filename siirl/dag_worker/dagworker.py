@@ -142,7 +142,7 @@ class DAGWorker(Worker):
         logger.info(f"Rank {self._rank}: Starting DAG execution pipeline...")
         logger.success(f"Rank {self._rank}: All components initialized. Starting training loop from step {self.global_steps + 1}.")
 
-        if self.val_reward_fn and self.config.trainer.val_before_train:
+        if self.config.trainer.val_before_train:
             # Validator handles multi-rank logic internally
             val_metrics = self.validator.validate(global_step=self.global_steps)
             if self._rank == 0 and val_metrics and self.logger:
@@ -214,7 +214,7 @@ class DAGWorker(Worker):
 
                     # (Logging and validation logic remains unchanged)
                     metrics_dict = dict(ordered_metrics)
-                    if self.val_reward_fn and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
+                    if self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
                         val_metrics = self.validator.validate(global_step=self.global_steps)
                         if self._rank == 0 and val_metrics:
                             metrics_dict.update(val_metrics)
@@ -808,13 +808,6 @@ class DAGWorker(Worker):
         if not self.validate_tokenizer:
             logger.warning("No tokenizer loaded; reward functions might fail or use a default one.")
 
-        self.val_reward_fn = create_reward_manager(
-            self.config,
-            self.validate_tokenizer,
-            num_examine=1,
-            max_resp_len=self.config.data.max_response_length,
-            overlong_buffer_cfg=self.config.reward_model.overlong_buffer,
-        )
         self.reward_fn = create_reward_manager(
             self.config,
             self.validate_tokenizer,
@@ -1011,7 +1004,6 @@ class DAGWorker(Worker):
         self.validator = Validator(
             config=self.config,
             dataloader=self.dataloader,
-            val_reward_fn=self.val_reward_fn,
             validate_tokenizer=self.validate_tokenizer,
             agent_group_worker=self.agent_group_worker,
             rollout_mode=self.rollout_mode,

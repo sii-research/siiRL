@@ -22,13 +22,15 @@ from loguru import logger
 from tensordict import TensorDict, NonTensorData
 from torch.distributed import ProcessGroup
 
-from siirl.data_coordinator import DataProto, preprocess_dataloader
+from siirl.data_coordinator import preprocess_dataloader
 from siirl.data_coordinator.dataloader import DataLoaderNode
 from siirl.execution.dag.node import NodeRole, Node
+from siirl.execution.scheduler.reward import create_reward_manager
 from siirl.dag_worker.data_structures import ValidationPayload, ValidationResult
-from siirl.dag_worker.dag_utils import prepare_generation_batch, dump_validation_generations, timer
+from siirl.dag_worker.dag_utils import dump_validation_generations, timer
 from siirl.utils.metrics.metric_utils import aggregate_validation_metrics
 from siirl.global_config.params import SiiRLArguments
+
 
 
 class Validator:
@@ -49,7 +51,6 @@ class Validator:
         self,
         config: SiiRLArguments,
         dataloader: DataLoaderNode,
-        val_reward_fn: Callable,
         validate_tokenizer: Any,
         agent_group_worker: Dict[int, Dict[NodeRole, Any]],
         rollout_mode: str,
@@ -85,7 +86,6 @@ class Validator:
         """
         self.config = config
         self.dataloader = dataloader
-        self.val_reward_fn = val_reward_fn
         self.validate_tokenizer = validate_tokenizer
         self.agent_group_worker = agent_group_worker
         self.rollout_mode = rollout_mode
@@ -98,6 +98,14 @@ class Validator:
         self.first_rollout_node = first_rollout_node
         self.get_node_dp_info_fn = get_node_dp_info_fn
         self.enable_perf = enable_perf
+        
+        self.val_reward_fn = create_reward_manager(
+            self.config,
+            self.validate_tokenizer,
+            num_examine=1,
+            max_resp_len=self.config.data.max_response_length,
+            overlong_buffer_cfg=self.config.reward_model.overlong_buffer,
+        )
 
         # Validation timing tracking
         self.val_timedict = defaultdict(float)
