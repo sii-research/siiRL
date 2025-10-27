@@ -1156,7 +1156,7 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: AdaptiveKLController, kl_penalty=
     return data, metrics
 
 
-def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, multi_turn=False, norm_adv_by_std_in_grpo=True, weight_factor_in_cpgd="STD_weight", **kwargs):
+def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, norm_adv_by_std_in_grpo=True, weight_factor_in_cpgd="STD_weight", **kwargs):
     """Compute advantage estimates for policy optimization.
 
     This function computes advantage estimates using various estimators like GAE, GRPO, REINFORCE++, CPGD, etc.

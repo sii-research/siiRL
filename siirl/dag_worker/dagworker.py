@@ -100,7 +100,7 @@ class DAGWorker(Worker):
         self.global_steps = 0
         self.total_training_steps = 0
         self.workers: Dict[str, Any] = {}
-        self.agent_group_worker: Dict[int, Dict[NodeRole, Any]] = defaultdict(dict)
+        self.multi_agent_group: Dict[int, Dict[NodeRole, Any]] = defaultdict(dict)
         self.agent_group_process_group: Dict[int, Dict[NodeRole, Any]] = defaultdict(dict)
         self.process_groups: Dict[str, ProcessGroup] = {}
         self.tokenizer_mapping: Dict[str, TokenizerModule] = {}
@@ -143,7 +143,6 @@ class DAGWorker(Worker):
         logger.success(f"Rank {self._rank}: All components initialized. Starting training loop from step {self.global_steps + 1}.")
 
         if self.config.trainer.val_before_train:
-            # Validator handles multi-rank logic internally
             val_metrics = self.validator.validate(global_step=self.global_steps)
             if self._rank == 0 and val_metrics and self.logger:
                 logger.info(f"Initial validation metrics:\n{pformat(val_metrics)}")
@@ -183,7 +182,6 @@ class DAGWorker(Worker):
 
         for epoch in range(start_epoch, self.config.trainer.total_epochs):
             for batch_idx in range(self.dataloader.num_train_batches):
-                # If resuming, skip batches that have already been completed in the starting epoch.
                 if epoch == start_epoch and batch_idx < batches_to_skip:
                     continue
 
@@ -192,9 +190,12 @@ class DAGWorker(Worker):
                     if self._rank == 0 and last_val_metrics:
                         logger.info(f"Final validation metrics:\n{pformat(last_val_metrics)}")
                     return
+                
                 if self.global_steps in self.config.profiler.profile_steps:
                     self._profiler.start(role="e2e", profile_step=self.global_steps)
+                    
                 ordered_metrics = self._run_training_step(epoch, batch_idx)
+                
                 if self.global_steps in self.config.profiler.profile_steps:
                     self._profiler.stop()
 
@@ -208,11 +209,9 @@ class DAGWorker(Worker):
                 if ordered_metrics is not None:
                     is_last_step = self.global_steps >= self.total_training_steps
 
-                    # Save checkpoint at the configured frequency.
                     if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
                         self.checkpoint_manager.save_checkpoint(self.global_steps)
 
-                    # (Logging and validation logic remains unchanged)
                     metrics_dict = dict(ordered_metrics)
                     if self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
                         val_metrics = self.validator.validate(global_step=self.global_steps)
@@ -257,30 +256,26 @@ class DAGWorker(Worker):
 
         with timer(self.enable_perf, "step", timing_raw):
             # --- 1. Data Loading ---
-            with timer(self.enable_perf, "data_loading", timing_raw):
+            with timer(self.enable_perf, "get_data_from_dataloader", timing_raw):
                 batch = preprocess_dataloader(self.dataloader.run(epoch=epoch, is_validation_step=False), self.config.actor_rollout_ref.rollout.n)
 
-            with timer(self.enable_perf, "get_entry_node", timing_raw):
-                node_queue = self.taskgraph.get_entry_nodes()
-                if not node_queue:
-                    logger.error("Task graph has no entry nodes. Cannot start execution.")
-                    return None
-
-                entry_node_id = node_queue[0].node_id
+            node_queue = self.taskgraph.get_entry_nodes()
+            if not node_queue:
+                logger.error("Taskgraph has no entry nodes. Cannot start execution.")
+                return None
+            entry_node_id = node_queue[0].node_id
 
             # --- 2. Graph Traversal ---
             visited_nodes = set()
             with timer(self.enable_perf, "graph_execution", timing_raw):
                 while node_queue:
-                    with timer(self.enable_perf, "graph_loop_management", timing_raw):
-                        cur_node = node_queue.pop(0)
-                        if cur_node.node_id in visited_nodes:
-                            continue
-                        visited_nodes.add(cur_node.node_id)
+                    cur_node = node_queue.pop(0)
+                    if cur_node.node_id in visited_nodes:
+                        continue
+                    visited_nodes.add(cur_node.node_id)
 
-                        cur_dp_size, cur_dp_rank, cur_tp_rank, cur_tp_size, cur_pp_rank, cur_pp_size = self._get_node_dp_info(cur_node)
-                        logger.debug(f"current node({cur_node.node_id}) dp_size: {cur_dp_size}, dp_rank: {cur_dp_rank}, tp_rank: {cur_tp_rank}, pp_rank: {cur_pp_rank}, pp_size: {cur_pp_size}")
-                    from siirl.execution.dag.node import NodeRole
+                    cur_dp_size, cur_dp_rank, cur_tp_rank, cur_tp_size, cur_pp_rank, cur_pp_size = self._get_node_dp_info(cur_node)
+                    logger.debug(f"current node({cur_node.node_id}) dp_size: {cur_dp_size}, dp_rank: {cur_dp_rank}, tp_rank: {cur_tp_rank}, pp_rank: {cur_pp_rank}, pp_size: {cur_pp_size}")
 
                     # --- 3. Get Input Data ---
                     if cur_node.node_id != entry_node_id:
@@ -288,53 +283,42 @@ class DAGWorker(Worker):
                             batch = self.get_data_from_buffers(key=cur_node.node_id, timing_raw=timing_raw)
                             if batch is None:
                                 logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
-                                return None  # Abort the entire step
+                                return None 
                             # batch = remove_prefix_from_dataproto(batch, cur_node)
                             logger.debug(f"current node({cur_node.node_id}) get data from databuffer batch size: {batch.size()}")
                     if self.enable_perf:
                         with timer(self.enable_perf, "get_data_from_buffer_barrier", timing_raw):
                             dist.barrier(self._gather_group)
                     # --- 4. Node Execution ---
-                    node_name_timer = f"{cur_node.node_role.name.lower()}"
-                    if cur_node.only_forward_compute and cur_node.node_role == NodeRole.ACTOR:
-                        node_name_timer = "actor_log_prob"
+                    node_name_timer = f"{cur_node.node_id}"
                     with timer(self.enable_perf, node_name_timer, timing_raw):
-                        if cur_node.node_role == NodeRole.REWARD:
-                            if self.check_spmd_mode():
-                                node_output = self.compute_reward(self.config, batch, cur_tp_size)
-                            elif cur_tp_rank == 0:
-                                node_output = self.compute_reward(self.config, batch, cur_tp_size)
-                        elif cur_node.node_role == NodeRole.ADVANTAGE:
-                            if self.check_spmd_mode():
-                                node_output = self.compute_advantage(self.config, batch, cur_node=cur_node)
-                            elif cur_tp_rank == 0:
-                                node_output = self.compute_advantage(self.config, batch, cur_node=cur_node)
-                        elif cur_node.executable:
+                        if cur_node.executable:
+                            node_kwargs = {"_dag_worker_instance": self}
+                            node_kwargs["process_group"] = self._get_node_process_group(cur_node) if cur_node.node_type != NodeType.COMPUTE else None
+                            node_kwargs["agent_group"] = self.multi_agent_group[cur_node.agent_group]
+
+                            if cur_node.node_role == NodeRole.REWARD:
+                                node_kwargs["tp_size"] = cur_tp_size
+                            elif cur_node.node_role == NodeRole.ADVANTAGE:
+                                node_kwargs["cur_node"] = cur_node
+
                             if cur_node.agent_options and cur_node.agent_options.train_cycle:
                                 cycle_round = self.global_steps // cur_node.agent_options.train_cycle
-                                agent_num = len(self.agent_group_worker)
+                                agent_num = len(self.multi_agent_group)
                                 if cycle_round % agent_num == cur_node.agent_group:
-                                    process_group = self._get_node_process_group(cur_node)
                                     node_output = cur_node.run(batch=batch,
                                                                config=self.config,
-                                                               process_group=process_group,
-                                                               agent_group_worker=self.agent_group_worker,
-                                                               worker_group_index=cur_node.agent_group,
-                                                               _dag_worker_instance=self)
+                                                               **node_kwargs)
                                 else:
                                     node_output = NodeOutput(batch=batch)
                             else:
-                                process_group = self._get_node_process_group(cur_node)
                                 node_output = cur_node.run(batch=batch,
                                                            config=self.config,
-                                                           process_group=process_group,
-                                                           agent_group_worker=self.agent_group_worker,
-                                                           worker_group_index=cur_node.agent_group,
-                                                           _dag_worker_instance=self)
-                        else:  # Passthrough node
+                                                           **node_kwargs)
+                        else:
                             logger.warning(f"Node {cur_node.node_id} has no executable. Passing data through.")
                             node_output = NodeOutput(batch=batch)
-                    if self.enable_perf:
+                    if self.enable_perf:        
                         with timer(self.enable_perf, f"{node_name_timer}_barrier", timing_raw):
                             dist.barrier(self._gather_group)
                     if cur_node.node_role == NodeRole.ROLLOUT and self._multi_agent:
@@ -343,16 +327,8 @@ class DAGWorker(Worker):
                             cur_node = next_nodes[0]
                             next_nodes = self.taskgraph.get_downstream_nodes(cur_node.node_id)
 
-                    # --- 5. Process Output & Pass to Children ---
+                    # --- 5. Process Output & Get next node ---
                     with timer(self.enable_perf, "graph_output_handling", timing_raw):
-                        if cur_node.node_role == NodeRole.POSTPROCESS_SAMPLING:
-                            if node_output.batch.size(0) == 0:
-                                logger.warning(f"Rank {self._rank}: Data after postprocess_sampling is insufficient. Caching and skipping the rest of the training step. {node_output.batch}")
-                                self._cleanup_step_buffers(visited_nodes, timing_raw)
-                                return None
-                            if "postprocess_status" in node_output.metrics:
-                                del node_output.metrics["postprocess_status"]
-
                         if self._rank == 0 and node_output.metrics:
                             # if self._multi_agent:
                             #     node_output.metrics = add_prefix_to_metrics(node_output.metrics, cur_node)
@@ -377,13 +353,10 @@ class DAGWorker(Worker):
                             with timer(self.enable_perf, "put_data_to_buffer_barrier", timing_raw):
                                 dist.barrier(self._gather_group)
                         with timer(self.enable_perf, "get_next_node", timing_raw):
-                            # Add unvisited downstream nodes to the queue
                             for n in next_nodes:
                                 if n.node_id not in visited_nodes:
                                     node_queue.append(n)
 
-                    # barrier after each node execution ensures synchronization.
-                    # This is safer but might be slower. Can be configured to be optional.
                     with timer(self.enable_perf, "step_barrier", timing_raw):
                         dist.barrier(self._gather_group)
 
@@ -405,23 +378,15 @@ class DAGWorker(Worker):
 # ==========================================================================================
 
     @DistProfiler.annotate(role="generate")
-    def generate_sync_mode(self,
-                           config,
-                           agent_group_worker,
-                           worker_group_index: int,
-                           batch: TensorDict,
-                           ) -> NodeOutput:
+    def generate_sync_mode(self, agent_group, batch: TensorDict) -> NodeOutput:
         """Sync mode"""
-        gen_output = agent_group_worker[worker_group_index][NodeRole.ROLLOUT].generate_sequences(batch)
+        gen_output = agent_group[NodeRole.ROLLOUT].generate_sequences(batch)
         if "response_mask" not in batch:
             gen_output["response_mask"] = compute_response_mask(gen_output)
         return NodeOutput(batch=gen_output, metrics=gen_output.pop("metrics", {})[0].data)
 
     @DistProfiler.annotate(role="generate")
-    def generate_async_mode(self,
-                            config,
-                            batch: TensorDict,
-                            ) -> NodeOutput:
+    def generate_async_mode(self, batch: TensorDict) -> NodeOutput:
         """Async mode"""
         if self._async_rollout_manager is not None:
             loop = asyncio.get_event_loop()
@@ -433,10 +398,7 @@ class DAGWorker(Worker):
         return NodeOutput(batch=batch, metrics={})
 
     @DistProfiler.annotate(role="generate")
-    def generate_multi_agent_mode(self,
-                                  config,
-                                  batch: DataProto,
-                                  ) -> NodeOutput:
+    def generate_multi_agent_mode(self, config, batch: DataProto) -> NodeOutput:
         """Generates sequences for a training batch using the multi-agent rollout model."""
         gen_batch = prepare_generation_batch(batch)
         if config.actor_rollout_ref.rollout.agent.rewards_with_env and "reward_model" in batch.non_tensor_batch:
@@ -454,29 +416,25 @@ class DAGWorker(Worker):
         return NodeOutput(batch=batch, metrics={})
 
     @DistProfiler.annotate(role="generate")
-    def generate(self,
-                 config,
-                 process_group,
-                 agent_group_worker,
-                 worker_group_index: int,
-                 batch: TensorDict,
-                 ) -> NodeOutput:
+    def generate(self, config, batch: TensorDict, **kwargs) -> NodeOutput:
         """Generates sequences for a training batch using the rollout model."""
+        agent_group = kwargs.pop("agent_group")
         if self._multi_agent is False:
             if self.rollout_mode == 'sync':
-                return self.generate_sync_mode(config, agent_group_worker, worker_group_index, batch)
+                return self.generate_sync_mode(agent_group, batch)
             else:
-                return self.generate_async_mode(config, batch)
+                return self.generate_async_mode(batch)
         else:
             return self.generate_multi_agent_mode(config, batch)
 
     @DistProfiler.annotate(role="compute_reward")
-    def compute_reward(self,
-                       config,
-                       batch: TensorDict,
-                       tp_size: int
-                       ) -> NodeOutput:
+    def compute_reward(self, config, batch: TensorDict, **kwargs) -> NodeOutput:
         """Calculates rewards for a batch of generated sequences."""
+        
+        if not self.check_mode() and self._rank != 0:
+            return
+        
+        tp_size = kwargs.pop("tp_size")
         if "token_level_rewards" in batch and batch["token_level_rewards"].numel() > 0:
             return NodeOutput(batch=batch, metrics={})
         batch["global_token_num"] = NonTensorData((torch.sum(batch["attention_mask"], dim=-1) // tp_size).tolist())
@@ -497,19 +455,15 @@ class DAGWorker(Worker):
         return NodeOutput(batch=batch, metrics=metrics)
 
     @DistProfiler.annotate(role="compute_old_log_prob")
-    def compute_old_log_prob(self,
-                             config,
-                             batch: TensorDict,
-                             process_group,
-                             agent_group_worker,
-                             worker_group_index: int
-                             ) -> NodeOutput:
+    def compute_old_log_prob(self, config, batch: TensorDict, **kwargs) -> NodeOutput:
         """Computes log probabilities from the actor model before the policy update."""
+        process_group = kwargs.pop("process_group")
+        agent_group = kwargs.pop("agent_group")
         if "global_token_num" not in batch:
             # in multi-agent, agentA may don't have reward node
             # insert some info needed
             batch["global_token_num"] = NonTensorData(torch.sum(batch["attention_mask"], dim=-1).tolist())
-        processed_data = agent_group_worker[worker_group_index][NodeRole.ACTOR].compute_log_prob(batch)
+        processed_data = agent_group[NodeRole.ACTOR].compute_log_prob(batch)
         local_metrics = processed_data["metrics"]  if "metrics" in processed_data else {}
         if "entropys" in processed_data:
             entropy = agg_loss(processed_data["entropys"], processed_data["response_mask"].to("cpu"), config.actor_rollout_ref.actor.loss_agg_mode)
@@ -522,36 +476,22 @@ class DAGWorker(Worker):
         return NodeOutput(batch=processed_data, metrics=metrics)
 
     @DistProfiler.annotate(role="compute_ref_log_prob")
-    def compute_ref_log_prob(self,
-                             config,
-                             batch: TensorDict,
-                             process_group,
-                             agent_group_worker,
-                             worker_group_index: int
-                             ) -> NodeOutput:
+    def compute_ref_log_prob(self, config, batch: TensorDict, **kwargs) -> NodeOutput:
         """Computes log probabilities from the frozen reference model."""
-        processed_data = agent_group_worker[worker_group_index][NodeRole.REFERENCE].compute_ref_log_prob(batch)
+        agent_group = kwargs.pop("agent_group")
+        processed_data = agent_group[NodeRole.REFERENCE].compute_ref_log_prob(batch)
         metrics = processed_data["metrics"]
         return NodeOutput(batch=processed_data, metrics=metrics)
 
     @DistProfiler.annotate(role="compute_value")
-    def compute_value(self,
-                      config,
-                      batch: TensorDict,
-                      process_group,
-                      agent_group_worker,
-                      worker_group_index: int
-                      ) -> NodeOutput:
+    def compute_value(self, config, batch: TensorDict, **kwargs) -> NodeOutput:
         """Computes value estimates from the critic model."""
-        processed_data = agent_group_worker[worker_group_index][NodeRole.CRITIC].compute_values(batch)
+        agent_group = kwargs.pop("agent_group")
+        processed_data = agent_group[NodeRole.CRITIC].compute_values(batch)
         return NodeOutput(batch=processed_data)
 
     @DistProfiler.annotate(role="compute_advantage")
-    def compute_multi_agent_advantage(self,
-                                      config,
-                                      batch: DataProto,
-                                      **kwargs
-                                      ) -> NodeOutput:
+    def compute_multi_agent_advantage(self, config, batch: DataProto, **kwargs) -> NodeOutput:
         adv_config = config.algorithm
         rollout_config = config.actor_rollout_ref.rollout
         cur_node = kwargs["cur_node"]
@@ -569,7 +509,7 @@ class DAGWorker(Worker):
                 raise RuntimeError(f"cur_node {cur_node.node_id} have no rewards with can't find it's dependencies reward")
         if adv_config.adv_estimator == AdvantageEstimator.GAE_MARFT:
             # make sure adv node define in last agent node
-            cur_agent_id = len(self.agent_group_worker) - 1
+            cur_agent_id = len(self.multi_agent_group) - 1
             agent_groups_ids = list(range(cur_agent_id))
             kwargs["agent_group_ids"] = agent_groups_ids
             # pre_agent may have no reward token
@@ -598,57 +538,46 @@ class DAGWorker(Worker):
         )
 
     @DistProfiler.annotate(role="compute_advantage")
-    def compute_advantage(self,
-                          config,
-                          batch: DataProto,
-                          **kwargs
-                          ) -> NodeOutput:
+    def compute_advantage(self, config, batch: TensorDict, **kwargs) -> NodeOutput:
         """Computes advantages and returns for PPO using GAE."""
+        
+        if not self.check_mode() and self._rank != 0:
+            return
+        
         if self._multi_agent:
             return self.compute_multi_agent_advantage(config, batch, **kwargs)
-        adv_config = config.algorithm
-        rollout_config = config.actor_rollout_ref.rollout
+        algo_config = config.algorithm
         return NodeOutput(
             batch=compute_advantage(
                 batch,
-                adv_estimator=adv_config.adv_estimator,
-                gamma=adv_config.gamma,
-                lam=adv_config.lam,
-                num_repeat=rollout_config.n,
-                norm_adv_by_std_in_grpo=adv_config.norm_adv_by_std_in_grpo,
-                weight_factor_in_cpgd=adv_config.weight_factor_in_cpgd,
-                multi_turn=rollout_config.multi_turn.enable,
+                adv_estimator=algo_config.adv_estimator,
+                gamma=algo_config.gamma,
+                lam=algo_config.lam,
+                norm_adv_by_std_in_grpo=algo_config.norm_adv_by_std_in_grpo,
+                weight_factor_in_cpgd=algo_config.weight_factor_in_cpgd,
                 **kwargs
             )
         )
 
     @DistProfiler.annotate(role="train_critic")
-    def train_critic(self,
-                     config,
-                     batch: TensorDict,
-                     process_group,
-                     agent_group_worker,
-                     worker_group_index: int,
-                     ) -> NodeOutput:
+    def train_critic(self, config, batch: TensorDict, **kwargs) -> NodeOutput:
         """Performs a single training step on the critic model."""
-        processed_data = agent_group_worker[worker_group_index][NodeRole.CRITIC].update_critic(batch)
+        agent_group = kwargs.pop("agent_group")
+        process_group = kwargs.pop("process_group")
+        processed_data = agent_group[NodeRole.CRITIC].update_critic(batch)
         metrics = reduce_and_broadcast_metrics(processed_data["metrics"], process_group)
         return NodeOutput(batch=processed_data, metrics=metrics)
 
     @DistProfiler.annotate(role="train_actor")
-    def train_actor(self,
-                    config,
-                    batch: TensorDict,
-                    process_group,
-                    agent_group_worker,
-                    worker_group_index: int,
-                    ) -> NodeOutput:
+    def train_actor(self, config, batch: TensorDict, **kwargs) -> NodeOutput:
         """Performs a single training step on the actor (policy) model."""
+        process_group = kwargs.pop("process_group")
+        agent_group = kwargs.pop("agent_group")
         global_steps = batch["global_steps"] if "global_steps" in batch else 0
         if config.trainer.critic_warmup > global_steps:
             return NodeOutput(batch=batch)  # Skip actor update during critic warmup
         batch["multi_turn"] = NonTensorData(self.config.actor_rollout_ref.rollout.multi_turn.enable)
-        processed_data = agent_group_worker[worker_group_index][NodeRole.ACTOR].update_actor(batch)
+        processed_data = agent_group[NodeRole.ACTOR].update_actor(batch)
         metrics = reduce_and_broadcast_metrics(processed_data["metrics"], process_group)
         return NodeOutput(batch=processed_data, metrics=metrics)
 
@@ -869,11 +798,11 @@ class DAGWorker(Worker):
                         worker_args["role"] = DAGConstants.WORKER_ROLE_MAPPING[node.node_role]
                 if node.agent_options and node.agent_options.share_instance:
                     # cur agent share same critic with target agent
-                    self.agent_group_worker[node.agent_group][node.node_role] = self.agent_group_worker[node.agent_options.share_instance][node.node_role]
+                    self.multi_agent_group[node.agent_group][node.node_role] = self.multi_agent_group[node.agent_options.share_instance][node.node_role]
                 else:
                     worker_instance = worker_cls(**worker_args)
                     self.workers[node_worker_key] = worker_instance
-                    self.agent_group_worker[node.agent_group][node.node_role] = worker_instance
+                    self.multi_agent_group[node.agent_group][node.node_role] = worker_instance
                     self.agent_group_process_group[node.agent_group][node.node_role] = node_process_group
                     logger.success(
                         f"Rank {self._rank}: Successfully created worker '{worker_cls.__name__}' for node: {node.node_id}"
@@ -887,7 +816,7 @@ class DAGWorker(Worker):
                 )
                 raise RuntimeError(f"Worker instantiation failed for node {node.node_id}") from e
 
-        if len(self.agent_group_worker) > 1:
+        if len(self.multi_agent_group) > 1:
             self._multi_agent = True
 
     def init_graph(self):
@@ -947,7 +876,7 @@ class DAGWorker(Worker):
         """Sets up sharding managers for actor-rollout weight synchronization."""
         logger.info(f"Setting up weight sharing infrastructure ({self.config.actor_rollout_ref.rollout.name})...")
 
-        for agent_group, worker_dict in self.agent_group_worker.items():
+        for agent_group, worker_dict in self.multi_agent_group.items():
             if NodeRole.ACTOR in worker_dict and NodeRole.ROLLOUT in worker_dict:
                 try:
                     setup_sharding_manager(
@@ -1005,7 +934,7 @@ class DAGWorker(Worker):
             config=self.config,
             dataloader=self.dataloader,
             validate_tokenizer=self.validate_tokenizer,
-            agent_group_worker=self.agent_group_worker,
+            multi_agent_group=self.multi_agent_group,
             rollout_mode=self.rollout_mode,
             async_rollout_manager=self._async_rollout_manager,
             multi_agent_loop=getattr(self, 'multi_agent_loop', None),
@@ -1245,5 +1174,5 @@ class DAGWorker(Worker):
         logger.warning("`multi_agent_put_log` is not yet refactored for DataCoordinator and is a no-op.")
         pass
 
-    def check_spmd_mode(self):
+    def check_mode(self):
         return self.rollout_mode == 'sync' and self._multi_agent == False

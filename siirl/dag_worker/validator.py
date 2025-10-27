@@ -52,7 +52,7 @@ class Validator:
         config: SiiRLArguments,
         dataloader: DataLoaderNode,
         validate_tokenizer: Any,
-        agent_group_worker: Dict[int, Dict[NodeRole, Any]],
+        multi_agent_group: Dict[int, Dict[NodeRole, Any]],
         rollout_mode: str,
         async_rollout_manager: Optional[Any],
         multi_agent_loop: Optional[Any],
@@ -72,7 +72,7 @@ class Validator:
             dataloader: Data loading utilities
             val_reward_fn: Validation reward function
             validate_tokenizer: Tokenizer for decoding sequences
-            agent_group_worker: Worker groups for generation (indexed by agent_group -> role)
+            multi_agent_group: Worker groups for generation (indexed by agent_group -> role)
             rollout_mode: Generation mode ('sync' or 'async')
             async_rollout_manager: Manager for async rollout (None if not using async)
             multi_agent_loop: Manager for multi-agent generation (None if not multi-agent)
@@ -87,7 +87,7 @@ class Validator:
         self.config = config
         self.dataloader = dataloader
         self.validate_tokenizer = validate_tokenizer
-        self.agent_group_worker = agent_group_worker
+        self.multi_agent_group = multi_agent_group
         self.rollout_mode = rollout_mode
         self.async_rollout_manager = async_rollout_manager
         self.multi_agent_loop = multi_agent_loop
@@ -194,7 +194,7 @@ class Validator:
         Returns:
             DataProto: Batch with generated sequences added
         """
-        rollout_worker = self.agent_group_worker[0][NodeRole.ROLLOUT]
+        rollout_worker = self.multi_agent_group[0][NodeRole.ROLLOUT]
         val_kwargs = self.config.actor_rollout_ref.rollout.val_kwargs
 
         prompt_texts = self.validate_tokenizer.batch_decode(
