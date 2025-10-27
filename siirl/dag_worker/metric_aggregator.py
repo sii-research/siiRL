@@ -22,8 +22,6 @@ import torch.distributed as dist
 
 from siirl.utils.extras.device import get_device_id, get_device_name
 
-
-
 class _ReduceOp(Enum):
     """Enumeration for supported reduction operations."""
 
