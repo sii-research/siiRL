@@ -31,7 +31,7 @@ from ray.util import list_named_actors
 
 from siirl.utils.extras.device import get_device_name
 from siirl.execution.scheduler.process_group_manager import ProcessGroupManager
-from siirl.global_config.params import SiiRLArguments
+from siirl.params import SiiRLArguments
 from siirl.engine.base_worker import RayClassWithInitArgs, RayResourcePool, WorkerGroup, get_random_string, sort_placement_group_by_node_ip
 from siirl.execution.dag import TaskGraph
 from siirl.dag_worker.dagworker import DAGWorker

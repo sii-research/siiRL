@@ -33,7 +33,7 @@ from siirl.models.model_utils.visual import (
 if TYPE_CHECKING:
     from transformers import PretrainedConfig, PreTrainedTokenizer, ProcessorMixin
 
-    from siirl.global_config.params import ModelArguments
+    from siirl.params import ModelArguments
 
 
 def patch_tokenizer(tokenizer: "PreTrainedTokenizer", model_args: "ModelArguments", config: "PretrainedConfig") -> None:

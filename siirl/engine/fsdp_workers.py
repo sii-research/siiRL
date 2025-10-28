@@ -66,7 +66,7 @@ from siirl.utils.model_utils.fsdp_utils import (
 from siirl.utils.extras.import_utils import import_external_libs
 from siirl.utils.model_utils.model import compute_position_id_with_mask
 from siirl.utils.extras.py_functional import convert_to_regular_types
-from siirl.global_config.params.model_args import ActorRolloutRefArguments, CriticArguments, FSDPArguments, OptimizerArguments, RewardModelArguments
+from siirl.params.model_args import ActorRolloutRefArguments, CriticArguments, FSDPArguments, OptimizerArguments, RewardModelArguments
 from siirl.engine.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
 device_name = get_device_name()

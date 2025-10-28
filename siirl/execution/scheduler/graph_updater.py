@@ -20,13 +20,13 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 
 from siirl.execution.dag import NodeRole, NodeType, TaskGraph
-from siirl.global_config.params import ActorRolloutRefArguments, CriticArguments, RewardModelArguments, SiiRLArguments
+from siirl.params import ActorRolloutRefArguments, CriticArguments, RewardModelArguments, SiiRLArguments
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from siirl.execution.dag import TaskGraph
-from siirl.global_config.params import log_dict_formatted
+from siirl.params import log_dict_formatted
 
 NODE_ID = "_node_id_"
 INTERN_CONFIG = "intern_config"

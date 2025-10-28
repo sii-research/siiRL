@@ -29,7 +29,7 @@ except Exception:
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
-    from siirl.global_config.params import ModelArguments
+    from siirl.params import ModelArguments
 
 
 class AverageMeter:

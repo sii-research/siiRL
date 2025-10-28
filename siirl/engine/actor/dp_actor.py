@@ -37,7 +37,7 @@ from siirl.utils.extras.py_functional import append_to_dict
 from siirl.utils.model_utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from siirl.utils.model_utils.torch_functional import logprobs_from_logits
 from siirl.utils.model_utils.ulysses import gather_outpus_and_unpad, ulysses_pad, ulysses_pad_and_slice_inputs
-from siirl.global_config.params import ActorArguments, RefArguments
+from siirl.params import ActorArguments, RefArguments
 from siirl.engine.actor import BasePPOActor
 
 if is_cuda_available:

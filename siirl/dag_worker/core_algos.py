@@ -30,7 +30,7 @@ import torch
 from omegaconf import DictConfig
 
 import siirl.utils.model_utils.torch_functional as siirl_F
-from siirl.global_config.params.model_args import AlgorithmArguments, ActorArguments
+from siirl.params.model_args import AlgorithmArguments, ActorArguments
 from siirl.execution.scheduler.enums import AdvantageEstimator
 from tensordict import TensorDict 
 from siirl import DataProto
@@ -1156,7 +1156,7 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: AdaptiveKLController, kl_penalty=
     return data, metrics
 
 
-def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, multi_turn=False, norm_adv_by_std_in_grpo=True, weight_factor_in_cpgd="STD_weight", **kwargs):
+def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, norm_adv_by_std_in_grpo=True, weight_factor_in_cpgd="STD_weight", **kwargs):
     """Compute advantage estimates for policy optimization.
 
     This function computes advantage estimates using various estimators like GAE, GRPO, REINFORCE++, CPGD, etc.

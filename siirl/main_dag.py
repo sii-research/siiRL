@@ -14,10 +14,7 @@
 
 import os
 import time
-
-import hydra
 import ray
-from omegaconf import DictConfig
 
 from siirl.execution.scheduler.enums import AdvantageEstimator, AlgorithmType
 from siirl.execution.scheduler.graph_updater import display_node_config, update_task_graph_node_configs
@@ -25,7 +22,7 @@ from siirl.execution.scheduler.launch import RayTrainer
 from siirl.execution.scheduler.process_group_manager import ProcessGroupManager, log_process_group_manager_details
 from siirl.execution.scheduler.task_scheduler import TaskScheduler, log_schedule_assignments
 from siirl.utils.logger.logging_utils import set_basic_config
-from siirl.global_config.params import SiiRLArguments, log_dict_formatted, parse_config
+from siirl.params import SiiRLArguments, log_dict_formatted, parse_config
 from siirl.execution.dag import TaskGraph
 from siirl.execution.dag.builtin_pipelines import grpo_pipeline, ppo_pipeline, dapo_pipeline
 from siirl.data_coordinator.data_buffer import init_data_coordinator

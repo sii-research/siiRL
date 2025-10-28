@@ -33,7 +33,7 @@ from siirl.utils.debug import GPUMemoryLogger
 from siirl.utils.extras.fs import copy_to_local
 from siirl.engine.rollout.async_server import AsyncServerBase
 from siirl import DataProto
-from siirl.global_config.params.model_args import ActorRolloutRefArguments
+from siirl.params.model_args import ActorRolloutRefArguments
 import torch
 logger = logging.getLogger(__file__)
 

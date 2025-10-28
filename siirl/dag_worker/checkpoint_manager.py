@@ -21,7 +21,7 @@ from typing import Dict, Optional, Any
 from loguru import logger
 
 from siirl.execution.dag.node import NodeRole, NodeType
-from siirl.global_config.params import SiiRLArguments
+from siirl.params import SiiRLArguments
 from siirl.dag_worker.constants import DAGConstants
 from siirl.dag_worker.dag_utils import generate_node_worker_key
 from siirl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path

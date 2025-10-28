@@ -16,7 +16,7 @@
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Literal, Optional
 
-from siirl.global_config.params.model_args import ProcessorArguments
+from siirl.params.model_args import ProcessorArguments
 
 
 @dataclass

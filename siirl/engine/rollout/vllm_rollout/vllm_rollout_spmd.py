@@ -65,7 +65,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from siirl.data_coordinator import SampleManager, Sample, MetaInfo
 from siirl.utils.debug import GPUMemoryLogger
 from siirl.utils.model_utils.torch_functional import get_response_mask, pad_2d_list_to_length
-from siirl.global_config.params import RolloutArguments
+from siirl.params import RolloutArguments
 from siirl.engine.rollout.base import BaseRollout
 from siirl.utils.extras.device import is_cuda_available, device_synchronize
 from siirl.utils.extras.device import get_device_id

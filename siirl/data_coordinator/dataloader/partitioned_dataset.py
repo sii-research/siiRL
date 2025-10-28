@@ -31,7 +31,7 @@ from transformers import PreTrainedTokenizer, ProcessorMixin
 
 import siirl.utils.model_utils.torch_functional as F
 from siirl.utils.model_utils.model import compute_position_id_with_mask
-from siirl.global_config.params import SiiRLArguments
+from siirl.params import SiiRLArguments
 
 
 def collate_fn(data_list: list[dict]) -> dict:

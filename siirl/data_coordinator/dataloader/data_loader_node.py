@@ -21,7 +21,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 
 from siirl.execution.dag import Node, NodeRole, NodeStatus, NodeType
 from siirl.models.loader import load_tokenizer
-from siirl.global_config.params import SiiRLArguments
+from siirl.params import SiiRLArguments
 
 from siirl.data_coordinator.dataloader.partitioned_dataset import PartitionedRLHFDataset
 

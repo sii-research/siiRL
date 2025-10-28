@@ -19,7 +19,7 @@ from loguru import logger
 
 from siirl.execution.dag import Node, NodeRole, NodeType, TaskGraph
 
-from siirl.global_config.params import ActorRolloutRefArguments, ActorArguments, RefArguments, RolloutArguments, CriticArguments, RewardModelArguments, SiiRLArguments
+from siirl.params import ActorRolloutRefArguments, ActorArguments, RefArguments, RolloutArguments, CriticArguments, RewardModelArguments, SiiRLArguments
 from siirl.execution.scheduler.enums import AdvantageEstimator
 
 from .process_group_manager import ProcessGroupManager
