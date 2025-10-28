@@ -1,6 +1,6 @@
 # Copyright 2025, Shanghai Innovation Institute. All rights reserved.
 # Copyright 2025, Infrawaves. All rights reserved.
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -33,7 +33,9 @@ class MixedPrecisionArguments:
     )
     keep_low_precision_grads: bool = field(default=False, metadata={"help": "Whether or not to use low precision grad"})
     cast_forward_inputs: bool = field(default=False, metadata={"help": "Whether or not to cast forward inputs"})
-    cast_root_forward_inputs: bool = field(default=True, metadata={"help": "Whether or not to cast root forward inputs"})
+    cast_root_forward_inputs: bool = field(
+        default=True, metadata={"help": "Whether or not to cast root forward inputs"}
+    )
 
 
 @dataclass
@@ -65,7 +67,9 @@ class MegatronArguments:
     context_parallel_size: int = field(default=1, metadata={"help": "Context parallelism size"})
     expert_model_parallel_size: int = field(default=1, metadata={"help": "Expert model parallelism size"})
     expert_tensor_parallel_size: int = field(default=1, metadata={"help": "Expert tensor parallelism size"})
-    virtual_pipeline_model_parallel_size: Optional[int] = field(default=None, metadata={"help": "Virtual pipeline model parallel size"})
+    virtual_pipeline_model_parallel_size: Optional[int] = field(
+        default=None, metadata={"help": "Virtual pipeline model parallel size"}
+    )
     sequence_parallel: bool = field(default=False, metadata={"help": "Whether the sequence parallel is enabled."})
     use_distributed_optimizer: bool = field(
         default=False,
@@ -77,7 +81,9 @@ class MegatronArguments:
     grad_offload: bool = field(default=False, metadata={"help": "Offload gradients to CPU"})
     optimizer_offload: bool = field(default=False, metadata={"help": "Offload optimizer states to CPU"})
     extra: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Extra settings"})
-    override_transformer_config: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Override transformer config"})
+    override_transformer_config: Dict[str, Any] = field(
+        default_factory=dict, metadata={"help": "Override transformer config"}
+    )
     use_dist_checkpointing: bool = field(default=False, metadata={"help": "Whether to use distributed checkpointing"})
     dist_checkpointing_path: str = field(default="", metadata={"help": "Path to save distributed checkpointing"})
     override_ddp_config: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Override ddp config"})
@@ -100,7 +106,9 @@ class OptimizerArguments:
     weight_decay_incr_style: str = field(default="constant", metadata={"help": "Weight decay increase style"})
     lr_wsd_decay_style: str = field(default="exponential", metadata={"help": "Learning rate warmup decay style"})
     lr_wsd_decay_steps: Optional[int] = field(default=None, metadata={"help": "Learning rate warmup decay steps"})
-    use_checkpoint_opt_param_scheduler: bool = field(default=False, metadata={"help": "Whether to use checkpoint opt param scheduler"})
+    use_checkpoint_opt_param_scheduler: bool = field(
+        default=False, metadata={"help": "Whether to use checkpoint opt param scheduler"}
+    )
     total_training_steps: int = field(default=0, metadata={"help": "Total training steps"})
     betas: tuple[float, float] = field(default=(0.9, 0.999), metadata={"help": "Beta params Of Optimizer"})
     weight_decay: float = field(default=1e-2, metadata={"help": "Weight decay params of Optimizer"})
@@ -157,7 +165,9 @@ class ModelArguments(ProcessorArguments):
     external_lib: Optional[str] = field(default=None, metadata={"help": "External model library"})
     override_config: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Model config overrides"})
     enable_gradient_checkpointing: bool = field(default=True, metadata={"help": "Gradient checkpointing"})
-    gradient_checkpointing_kwargs: Dict[str, Any] = field(default_factory=dict, metadata={"help": "Gradient checkpointing kwargs"})
+    gradient_checkpointing_kwargs: Dict[str, Any] = field(
+        default_factory=dict, metadata={"help": "Gradient checkpointing kwargs"}
+    )
     use_remove_padding: bool = field(default=False, metadata={"help": "Padding removal optimization"})
     use_fused_kernels: bool = field(default=False, metadata={"help": "Kernels fuse optimization"})
     cache_dir: Optional[str] = field(
@@ -206,7 +216,10 @@ class ModelArguments(ProcessorArguments):
     rm_tokenizer: Optional[str] = field(default=None, metadata={"help": "rmokenizer path"})
     lora_rank: int = field(default=0, metadata={"help": "set to positive value to enable LoRA (e.g., 32)"})
     lora_alpha: float = field(default=16, metadata={"help": "LoRA scaling factor"})
-    target_modules: str = field(default="all-linear", metadata={"help": "all-linear or [q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]"})
+    target_modules: str = field(
+        default="all-linear",
+        metadata={"help": "all-linear or [q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]"},
+    )
     use_shm: bool = field(default=False)
     enable_activation_offload: bool = field(default=False, metadata={"help": "enable activation offload"})
 
@@ -226,19 +239,30 @@ class ModelArguments(ProcessorArguments):
 
 @dataclass
 class CheckpointArguments:
-    contents: List[str] = field(default_factory=["model", "hf_model", "optimizer", "extra"], metadata={"help": "The contents to save and load in the checkpoint."})
-    save_contents: List[str] = field(default_factory=["model", "optimizer", "extra"], metadata={"help": "The contents to save in the checkpoint."})
-    load_contents: List[str] = field(default_factory=["model", "optimizer", "extra"], metadata={"help": "The contents to load in the checkpoint."})
+    contents: List[str] = field(
+        default_factory=["model", "hf_model", "optimizer", "extra"],
+        metadata={"help": "The contents to save and load in the checkpoint."},
+    )
+    save_contents: List[str] = field(
+        default_factory=["model", "optimizer", "extra"], metadata={"help": "The contents to save in the checkpoint."}
+    )
+    load_contents: List[str] = field(
+        default_factory=["model", "optimizer", "extra"], metadata={"help": "The contents to load in the checkpoint."}
+    )
     async_save: bool = field(default=False, metadata={"help": "Async checkpoint save mode"})
 
 
 @dataclass
 class PolicyLossArguments:
-    loss_mode: str = field(default="vanilla", metadata={"help": "Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg'."})
+    loss_mode: str = field(
+        default="vanilla", metadata={"help": "Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg'."}
+    )
     clip_cov_ratio: float = field(default=0.0002, metadata={"help": "Ratio of tokens to be clipped for clip-cov loss."})
     clip_cov_lb: float = field(default=1.0, metadata={"help": "Lower bound for clip-cov loss."})
     clip_cov_ub: float = field(default=5.0, metadata={"help": "Upper bound for clip-cov loss."})
-    kl_cov_ratio: float = field(default=0.0002, metadata={"help": "Ratio of tokens to be applied KL penalty for kl-cov loss."})
+    kl_cov_ratio: float = field(
+        default=0.0002, metadata={"help": "Ratio of tokens to be applied KL penalty for kl-cov loss."}
+    )
     ppo_kl_coef: float = field(default=0.1, metadata={"help": "KL divergence penalty coefficient."})
 
 
@@ -254,7 +278,10 @@ class ActorArguments:
     clip_ratio: float = field(default=0.2, metadata={"help": "Clipping ratio"})
     clip_ratio_low: float = field(default=0.2, metadata={"help": "Min value for clip ratio"})
     clip_ratio_high: float = field(default=0.2, metadata={"help": "Max value for clip ratio"})
-    clip_ratio_c: float = field(default=3.0, metadata={"help": "lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729"})
+    clip_ratio_c: float = field(
+        default=3.0,
+        metadata={"help": "lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729"},
+    )
     entropy_coeff: float = field(default=0.001, metadata={"help": "Entropy coefficient"})
     use_kl_loss: bool = field(default=False, metadata={"help": "Enable KL loss"})
     kl_loss_coef: float = field(default=0.001, metadata={"help": "KL loss coefficient"})
@@ -262,7 +289,9 @@ class ActorArguments:
     ppo_epochs: int = field(default=1, metadata={"help": "PPO epochs"})
     shuffle: bool = field(default=False, metadata={"help": "Data shuffling"})
     ulysses_sequence_parallel_size: int = field(default=1, metadata={"help": "Sequence parallel size"})
-    policy_loss: PolicyLossArguments = field(default_factory=PolicyLossArguments, metadata={"help": "Policy loss settings"})
+    policy_loss: PolicyLossArguments = field(
+        default_factory=PolicyLossArguments, metadata={"help": "Policy loss settings"}
+    )
     tis_imp_ratio_cap: float = field(default=-1, metadata={"help": "Truncated importance sampling ratio cap"})
     optim: OptimizerArguments = field(default_factory=OptimizerArguments, metadata={"help": "Optimizer settings"})
     fsdp_config: FSDPArguments = field(default_factory=FSDPArguments, metadata={"help": "FSDP settings"})
@@ -270,7 +299,9 @@ class ActorArguments:
     use_remove_padding: bool = field(default=False, metadata={"help": "Padding removal optimization"})
     use_fused_kernels: bool = field(default=False, metadata={"help": "Kernels fuse optimization"})
     use_torch_compile: bool = field(default=True, metadata={"help": "Whether or not use torch compile"})
-    checkpoint: CheckpointArguments = field(default_factory=CheckpointArguments, metadata={"help": "Checkpoint configuration"})
+    checkpoint: CheckpointArguments = field(
+        default_factory=CheckpointArguments, metadata={"help": "Checkpoint configuration"}
+    )
     param_offload: bool = field(default=False, metadata={"help": "Enable param offload or not"})
     grad_offload: bool = field(default=False, metadata={"help": "Enable grad offload or not"})
     optimizer_offload: bool = field(default=False, metadata={"help": "Enable optimizer offload or not"})
@@ -281,6 +312,10 @@ class ActorArguments:
     policy_drift_coeff: float = field(default=0.0, metadata={"help": "policy drift coeff for CPGD"})
     data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
     profile: dict[str, Any] = field(default_factory=dict, metadata={"help": "Actor Profile settings"})
+    entropy_checkpointing: bool = field(default=False, metadata={"help": "Enable entropy checkpointing"})
+    entropy_from_logits_with_chunking: bool = field(
+        default=False, metadata={"help": "Enable entropy from logits with chunking"}
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -306,24 +341,40 @@ class LayerNameMapArguments:
 
 @dataclass
 class MultiTurnArguments:
-    use_all_traj: bool = field(default=False, metadata={"help": "Set to True for multi-agent generation when trajectories from each round of multi-turn are needed for training."})
+    use_all_traj: bool = field(
+        default=False,
+        metadata={
+            "help": "Set to True for multi-agent generation when trajectories from each round of "
+            "multi-turn are needed for training."
+        },
+    )
     enable: bool = field(default=False, metadata={"help": "should set rollout.name to sglang_async if True"})
-    max_assistant_turns: Optional[int] = field(default=None, metadata={"help": "null for no limit (default max_length // 3)"})
+    max_assistant_turns: Optional[int] = field(
+        default=None, metadata={"help": "null for no limit (default max_length // 3)"}
+    )
     tool_config_path: Optional[str] = field(default=None, metadata={"help": "null for no tool"})
-    format: str = field(default="hermes", metadata={"help": "Format of the multi-turn interaction. Options: hermes, llama3_json, ..."})
+    format: str = field(
+        default="hermes", metadata={"help": "Format of the multi-turn interaction. Options: hermes, llama3_json, ..."}
+    )
     tool_config_path: Optional[str] = field(default=None, metadata={"help": " null for no tool"})
-    max_user_turns: Optional[int] = field(default=None, metadata={"help": "null for no limit (default max_length // 3)"})
+    max_user_turns: Optional[int] = field(
+        default=None, metadata={"help": "null for no limit (default max_length // 3)"}
+    )
     max_parallel_calls: int = field(default=1, metadata={"help": "max parallel call for tools in single turn"})
     max_tool_response_length: int = field(default=256, metadata={"help": "max length of tool response"})
-    tool_response_truncate_side: str = field(default="middle", metadata={"help": "truncate side of tool response: left, middle, right"})
+    tool_response_truncate_side: str = field(
+        default="middle", metadata={"help": "truncate side of tool response: left, middle, right"}
+    )
     interaction_config_path: Optional[str] = field(default=None, metadata={"help": "null for no interaction"})
     completion_callback: Optional[str] = field(default=None, metadata={"help": "null for default callback"})
     use_inference_chat_template: bool = field(
         default=False,
         metadata={
-            "help": "- When set to True, the model's default chat template is used for multi-turn rollout, which typically matches production behavior. \n \
-    - When set to False, the token ids recorded for training are used instead; unlike the default chat template, these always include the model's full output, \n \
-      which may contain additional content such as reasoning content. This maintains the consistency between training and rollout, but it will lead to longer prompts."
+            "help": "- When set to True, the model's default chat template is used for multi-turn rollout, "
+            "which typically matches production behavior. \n \- When set to False, the token ids recorded for "
+            "training are used instead; unlike the default chat template, these always include the model's "
+            "full output, \n \which may contain additional content such as reasoning content. This maintains "
+            "the consistency between training and rollout, but it will lead to longer prompts."
         },
     )
     tokenization_sanity_check_mode: str = field(
@@ -357,9 +408,11 @@ class AgentArguments:
     pre_process_kwargs: dict = field(default_factory=dict, metadata={"help": "Pre-process function arguments"})
     post_process_kwargs: dict = field(default_factory=dict, metadata={"help": "Post-process function arguments"})
     env_path: list = field(default_factory=list, metadata={"help": "Env path list"})
-    obs_with_env: bool = field(default=False, metadata={"help": "Rollout wiht obs from Env"})
+    obs_with_env: bool = field(default=False, metadata={"help": "Rollout with obs from Env"})
     rewards_with_env: bool = field(default=False, metadata={"help": "Use rewards from Env"})
     share_instance: int = field(default=None, metadata={"help": "Use the same instance with the target agent group"})
+
+
 @dataclass
 class EngineArguments:
     vllm: Dict[str, Any] = field(default_factory=lambda: {})
@@ -388,8 +441,12 @@ class RolloutArguments:
     limit_images: Optional[int] = field(default=None, metadata={"help": "support for multi-image data"})
     do_sample: bool = field(default=True, metadata={"help": "Enable sampling"})
     n: int = field(default=1, metadata={"help": "Number of responses"})
-    log_prob_micro_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Log prob batch size"})
-    log_prob_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU log prob batch size"})
+    log_prob_micro_batch_size: Optional[int] = field(
+        default=None, metadata={"help": "[Deprecated] Log prob batch size"}
+    )
+    log_prob_micro_batch_size_per_gpu: Optional[int] = field(
+        default=None, metadata={"help": "Per-GPU log prob batch size"}
+    )
     log_prob_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU"})
     log_prob_use_dynamic_bsz: bool = field(default=False, metadata={"help": "Dynamic log prob batch size"})
     disable_log_stats: bool = field(default=True, metadata={"help": "Whether or not disable log stats"})
@@ -402,9 +459,17 @@ class RolloutArguments:
     multi_turn: MultiTurnArguments = field(default_factory=MultiTurnArguments)
     micro_batch_size: Optional[int] = field(default=None, metadata={"help": "Inference micro-batch size"})
     engine_kwargs: EngineArguments = field(default_factory=EngineArguments)
-    calculate_log_probs: bool = field(default=False, metadata={"help": "support logging rollout prob for debugging purpose"})
+    calculate_log_probs: bool = field(
+        default=False, metadata={"help": "support logging rollout prob for debugging purpose"}
+    )
     agent: AgentArguments = field(default_factory=AgentArguments)
-    multi_stage_wake_up: bool = field(default=False, metadata={"help": "# Whether to wake up inference engine in multi-stage. (Wake up model weights first, then resume kv cache)"})
+    multi_stage_wake_up: bool = field(
+        default=False,
+        metadata={
+            "help": "# Whether to wake up inference engine in multi-stage. (Wake up model weights first, "
+            "then resume kv cache)"
+        },
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -415,8 +480,12 @@ class RefArguments:
     strategy: str = field(default="fsdp", metadata={"help": "Parallel strategy"})
     fsdp_config: FSDPArguments = field(default_factory=FSDPArguments, metadata={"help": "Reference FSDP settings"})
     megatron: MegatronArguments = field(default_factory=MegatronArguments, metadata={"help": "Megatron settings"})
-    log_prob_micro_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Log prob batch size"})
-    log_prob_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU log prob batch size"})
+    log_prob_micro_batch_size: Optional[int] = field(
+        default=None, metadata={"help": "[Deprecated] Log prob batch size"}
+    )
+    log_prob_micro_batch_size_per_gpu: Optional[int] = field(
+        default=None, metadata={"help": "Per-GPU log prob batch size"}
+    )
     log_prob_use_dynamic_bsz: bool = field(default=False, metadata={"help": "Dynamic log prob batch size"})
     log_prob_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU"})
     ulysses_sequence_parallel_size: int = field(default=1, metadata={"help": "Sequence parallel size"})
@@ -433,6 +502,10 @@ class RefArguments:
     shuffle: bool = field(default=False, metadata={"help": "Data shuffling"})
     data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
     recompute_old_log_prob: bool = field(default=True, metadata={"help": "recompute old log prob"})
+    entropy_checkpointing: bool = field(default=False, metadata={"help": "Enable entropy checkpointing"})
+    entropy_from_logits_with_chunking: bool = field(
+        default=False, metadata={"help": "Enable entropy from logits with chunking"}
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -458,7 +531,9 @@ class CriticArguments:
         metadata={"help": "Optimizer settings"},
     )
     model: ModelArguments = field(
-        default_factory=lambda: ModelArguments(path="~/models/deepseek-llm-7b-chat", enable_gradient_checkpointing=True),
+        default_factory=lambda: ModelArguments(
+            path="~/models/deepseek-llm-7b-chat", enable_gradient_checkpointing=True
+        ),
         metadata={"help": "Critic model"},
     )
     fsdp_config: FSDPArguments = field(default_factory=FSDPArguments, metadata={"help": "FSDP settings"})
@@ -477,9 +552,13 @@ class CriticArguments:
     forward_max_token_len_per_gpu: int = field(default=32768, metadata={"help": "Forward max token length in per gpu"})
     load_weight: bool = field(default=True)
     rollout_n: int = field(default=5, metadata={"help": "rollout n"})
-    checkpoint: CheckpointArguments = field(default_factory=CheckpointArguments, metadata={"help": "Checkpoint configuration"})
+    checkpoint: CheckpointArguments = field(
+        default_factory=CheckpointArguments, metadata={"help": "Checkpoint configuration"}
+    )
     ppo_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU"})
-    loss_agg_mode: str = field(default="token-mean", metadata={"help": "token-mean, seq-mean-token-sum, seq-mean-token-mean"})
+    loss_agg_mode: str = field(
+        default="token-mean", metadata={"help": "token-mean, seq-mean-token-sum, seq-mean-token-mean"}
+    )
     profile: dict[str, Any] = field(default_factory=dict, metadata={"help": "Critic Profile settings"})
     data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
 
@@ -505,7 +584,9 @@ class RewardModelArguments:
     enable: bool = field(default=False, metadata={"help": "Enable reward model"})
     strategy: str = field(default="fsdp", metadata={"help": "Parallel strategy"})
     model: ModelArguments = field(
-        default_factory=lambda: ModelArguments(path="~/models/deepseek-llm-7b-chat", enable_gradient_checkpointing=True),
+        default_factory=lambda: ModelArguments(
+            path="~/models/deepseek-llm-7b-chat", enable_gradient_checkpointing=True
+        ),
         metadata={"help": "Critic model"},
     )
     fsdp_config: FSDPArguments = field(
@@ -523,10 +604,14 @@ class RewardModelArguments:
     forward_micro_batch_size: int = field(default=None, metadata={"help": "Forward micro batch size"})
     forward_max_token_len_per_gpu: int = field(default=32768, metadata={"help": "Forward max token length in per gpu"})
     load_weight: bool = field(default=True)
-    launch_reward_fn_async: bool = field(default=False, metadata={"help": "custom reward function executed async on CPU, during log_prob"})
+    launch_reward_fn_async: bool = field(
+        default=False, metadata={"help": "custom reward function executed async on CPU, during log_prob"}
+    )
     reward_kwargs: Dict[str, Any] = field(default_factory=lambda: {})
     sandbox_fusion: Optional[Dict[str, Any]] = field(default=None)
-    overlong_buffer: OverlongBufferArguments = field(default_factory=OverlongBufferArguments, metadata={"help": "DAPO overlong buffer configuration"})
+    overlong_buffer: OverlongBufferArguments = field(
+        default_factory=OverlongBufferArguments, metadata={"help": "DAPO overlong buffer configuration"}
+    )
     profile: dict[str, Any] = field(default_factory=dict, metadata={"help": "Reward Model Profile settings"})
     shuffle: bool = field(default=False, metadata={"help": "Data shuffling"})
     data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
@@ -548,7 +633,9 @@ class FilterGroupsArguments:
     """DAPO-specific filter groups configuration for dynamic sampling."""
 
     enable: bool = field(default=False, metadata={"help": "Enable trajectory filtering based on variance"})
-    metric: str = field(default="acc", metadata={"help": "Metric used for filtering (acc, seq_final_reward, seq_reward)"})
+    metric: str = field(
+        default="acc", metadata={"help": "Metric used for filtering (acc, seq_final_reward, seq_reward)"}
+    )
     max_num_gen_batches: int = field(default=10, metadata={"help": "Maximum generation batches before giving up"})
 
     def to_dict(self) -> Dict[str, Any]:
@@ -565,9 +652,14 @@ class AlgorithmArguments:
     use_kl_in_reward: bool = field(default=True, metadata={"help": "Use KL In-Reward"})
     share_reward_in_agent: bool = field(default=True, metadata={"help": "Shard Reward in Reward"})
     norm_adv_by_std_in_grpo: bool = field(default=True, metadata={"help": "Whether to scale the GRPO advantage"})
-    weight_factor_in_cpgd: str = field(default="STD_weight", metadata={"help": "The weighting methods for advantage {STD_weight, clip_filter_like_weight, naive}"})
+    weight_factor_in_cpgd: str = field(
+        default="STD_weight",
+        metadata={"help": "The weighting methods for advantage {STD_weight, clip_filter_like_weight, naive}"},
+    )
     algorithm_name: str = field(default="grpo", metadata={"help": "Algorithm name, e.g., grpo, ppo, dapo"})
-    filter_groups: FilterGroupsArguments = field(default_factory=FilterGroupsArguments, metadata={"help": "DAPO filter groups configuration"})
+    filter_groups: FilterGroupsArguments = field(
+        default_factory=FilterGroupsArguments, metadata={"help": "DAPO filter groups configuration"}
+    )
     use_pf_ppo: bool = field(default=False, metadata={"help": "Whether to enable preference feedback PPO."})
     pf_ppo: dict[str, Any] = field(default_factory=dict, metadata={"help": " Preference feedback PPO settings."})
 

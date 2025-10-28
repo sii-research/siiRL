@@ -69,7 +69,7 @@ def initialize_parallel_state(
 
 
 # NOTE(linjunrong): After init SGLang rollout using class EngineFragment, user should always remember to call
-# this function to sync the _TP, _PP define at the beginning of this file. Otherwise, only the conterparts
+# this function to sync the _TP, _PP define at the beginning of this file. Otherwise, only the counterparts
 # inside sglang.srt.distributed are init as ProcessGroup, the symbols defined in this file remain as None.
 # It could be weird to maintain two _TP and _PP, I follow the same way to maintain an extra ones for
 # siirl itself as how it was done in siirl.third_party.vllm.parallel_state. Note that the process is a little
@@ -89,9 +89,15 @@ def ensure_model_parallel_initialized(
         initialize_model_parallel(tensor_model_parallel_size, pipeline_model_parallel_size, backend)
         return
 
-    assert get_tensor_model_parallel_world_size() == tensor_model_parallel_size, f"tensor parallel group already initialized, but of unexpected size: {get_tensor_model_parallel_world_size()=} vs. {tensor_model_parallel_size=}"
+    assert get_tensor_model_parallel_world_size() == tensor_model_parallel_size, (
+        f"tensor parallel group already initialized, but of unexpected size: "
+        f"{get_tensor_model_parallel_world_size()=} vs. {tensor_model_parallel_size=}"
+    )
     pp_world_size = get_pp_group().world_size
-    assert pp_world_size == pipeline_model_parallel_size, f"pipeline parallel group already initialized, but of unexpected size: {pp_world_size=} vs. {pipeline_model_parallel_size=}"
+    assert pp_world_size == pipeline_model_parallel_size, (
+        f"pipeline parallel group already initialized, but of unexpected size: {pp_world_size=} vs. "
+        f"{pipeline_model_parallel_size=}"
+    )
 
 
 # TODO(sgm): deviate from the v0.5.4, not pp now
@@ -202,7 +208,7 @@ def initialize_model_parallel(
 ) -> None:
     """
     NOTE: This method is a hack from the open-sourced version without
-    asertion of world_size = tp * pp
+    assertion of world_size = tp * pp
 
     Initialize model parallel groups.
 
@@ -231,7 +237,7 @@ def initialize_model_parallel(
     backend = backend or torch.distributed.get_backend(ps.get_world_group().device_group)
 
     # NOTE(sgm) we don't assert world_size == tp * pp
-    # DP is not managed by vllm but by the VeRL WorkerGroup
+    # DP is not managed by vllm but by the siiRL WorkerGroup
     # if (world_size !=
     #         tensor_model_parallel_size * pipeline_model_parallel_size):
     #     raise RuntimeError(

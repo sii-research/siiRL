@@ -19,10 +19,11 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import torch
+
 from siirl import DataProto
-from siirl.workers.dag_worker import core_algos
-from siirl.utils.model_utils.torch_functional import masked_mean
 from siirl.scheduler.enums import AdvantageEstimator
+from siirl.utils.model_utils.torch_functional import masked_mean
+from siirl.workers.dag_worker import core_algos
 
 
 def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, kl_penalty="kl", multi_turn=False):
@@ -42,14 +43,16 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
             - The updated data with token-level rewards adjusted by KL penalty
             - A dictionary of metrics related to the KL penalty
     """
-    responses = data.batch["responses"]
+    # responses = data.batch["responses"]
     token_level_scores = data.batch["token_level_scores"]
     batch_size = data.batch.batch_size[0]
     response_mask = data.batch["response_mask"]
 
     # compute kl between ref_policy and current policy
     # When apply_kl_penalty, algorithm.use_kl_in_reward=True, so the reference model has been enabled.
-    kld = core_algos.kl_penalty(data.batch["old_log_probs"], data.batch["ref_log_prob"], kl_penalty=kl_penalty)  # (batch_size, response_length)
+    kld = core_algos.kl_penalty(
+        data.batch["old_log_probs"], data.batch["ref_log_prob"], kl_penalty=kl_penalty
+    )  # (batch_size, response_length)
     kld = kld * response_mask
     beta = kl_ctrl.value
 
@@ -58,7 +61,8 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     current_kl = masked_mean(kld, mask=response_mask, axis=-1)  # average over sequence
     current_kl = torch.mean(current_kl, dim=0).item()
 
-    # according to https://github.com/huggingface/trl/blob/951ca1841f29114b969b57b26c7d3e80a39f75a0/trl/trainer/ppo_trainer.py#L837
+    # according to https://github.com/huggingface/trl/blob/951ca1841f29114b969b57b26c7d3e80
+    # a39f75a0/trl/trainer/ppo_trainer.py#L837
     kl_ctrl.update(current_kl=current_kl, n_steps=batch_size)
     data.batch["token_level_rewards"] = token_level_rewards
 
@@ -85,7 +89,17 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
-def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, multi_turn=False, norm_adv_by_std_in_grpo=True, weight_factor_in_cpgd="STD_weight", **kwargs):
+def compute_advantage(
+    data: DataProto,
+    adv_estimator,
+    gamma=1.0,
+    lam=1.0,
+    num_repeat=1,
+    multi_turn=False,
+    norm_adv_by_std_in_grpo=True,
+    weight_factor_in_cpgd="STD_weight",
+    **kwargs,
+):
     """Compute advantage estimates for policy optimization.
 
     This function computes advantage estimates using various estimators like GAE, GRPO, REINFORCE++, CPGD, etc.
@@ -98,8 +112,10 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         lam (float, optional): Lambda parameter for GAE. Defaults to 1.0.
         num_repeat (int, optional): Number of times to repeat the computation. Defaults to 1.
         multi_turn (bool, optional): Whether the data is from a multi-turn conversation. Defaults to False.
-        norm_adv_by_std_in_grpo (bool, optional): Whether to normalize advantages by standard deviation in GRPO. Defaults to True.
-        weight_factor_in_cpgd (str, optional): whether to use the STD weight as GRPO or clip_filter_like_weight. choices: {STD_weight, clip_filter_like_weight, naive}
+        norm_adv_by_std_in_grpo (bool, optional): Whether to normalize advantages by standard deviation in GRPO.
+        Defaults to True.
+        weight_factor_in_cpgd (str, optional): whether to use the STD weight as GRPO or clip_filter_like_weight.
+        choices: {STD_weight, clip_filter_like_weight, naive}
 
     Returns:
         DataProto: The updated data with computed advantages and returns.

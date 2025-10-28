@@ -12,9 +12,8 @@ export ALG=gae
 export MODEL_NAME=qwen3-8b
 
 # --- Path Definitions ---
-export HOME={your_home_path}
-export TRAIN_DATA_PATH=$HOME/data/datasets/$DATASET/train.parquet
-export TEST_DATA_PATH=$HOME/data/datasets/$DATASET/test.parquet
+export TRAIN_DATA_PATH=$HOME/data/dataset/$DATASET/train.parquet
+export TEST_DATA_PATH=$HOME/data/dataset/$DATASET/test.parquet
 export MODEL_PATH=$HOME/data/models/Qwen3-8B
 
 # Base output paths
@@ -22,8 +21,8 @@ export BASE_CKPT_PATH=ckpts
 export BASE_TENSORBOARD_PATH=tensorboard
 
 # --- Key Training Hyperparameters ---
-export TRAIN_BATCH_SIZE_PER_NODE=128
-export PPO_MINI_BATCH_SIZE_PER_NODE=64
+export TRAIN_BATCH_SIZE_PER_NODE=1024
+export PPO_MINI_BATCH_SIZE_PER_NODE=256
 export PPO_MICRO_BATCH_SIZE_PER_GPU=8
 export MAX_PROMPT_LENGTH=2048
 export MAX_RESPONSE_LENGTH=4096
@@ -35,8 +34,8 @@ export TEST_FREQ=10
 export TOTAL_EPOCHS=30
 export MAX_CKPT_KEEP=5
 
-export ACTOR_REF_CRITIC_TP=4
-export ACTOR_REF_CRITIC_PP=1
+export ACTOR_REF_CRITIC_TP=2
+export ACTOR_REF_CRITIC_PP=2
 export ACTOR_REF_CRITIC_CP=1
 export ACTOR_REF_CRITIC_SP=False
 
@@ -110,7 +109,7 @@ TRAINING_CMD=(
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=\$ACTOR_REF_CRITIC_PP
     actor_rollout_ref.ref.megatron.context_parallel_size=\$ACTOR_REF_CRITIC_CP
     actor_rollout_ref.ref.megatron.sequence_parallel=\$ACTOR_REF_CRITIC_SP
-    actor_rollout_ref.ref.megatron.param_offload=True
+    actor_rollout_ref.ref.megatron.param_offload=False
     critic.optim.lr=1e-5
     critic.model.use_remove_padding=True
     critic.model.path=\$MODEL_PATH
@@ -127,7 +126,7 @@ TRAINING_CMD=(
     critic.megatron.optimizer_offload=True
     algorithm.kl_ctrl.kl_coef=0.001
     trainer.critic_warmup=0
-    trainer.logger=['console','wandb']
+    trainer.logger=['console','tensorboard']
     trainer.project_name=\$PROJECT_NAME
     trainer.experiment_name=\$EXPERIMENT_NAME
     trainer.n_gpus_per_node=\$N_GPUS_PER_NODE
@@ -199,7 +198,7 @@ main() {
     local timestamp=$(date +"%Y%m%d_%H%M%S")
     ray stop --force
 
-    
+
 
     export VLLM_USE_V1=1
     export GLOO_SOCKET_TIMEOUT=600
