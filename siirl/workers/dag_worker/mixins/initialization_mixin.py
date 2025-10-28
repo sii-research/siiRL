@@ -24,7 +24,7 @@ from loguru import logger
 
 from siirl.dataloader import DataLoaderNode
 from siirl.models.loader import load_tokenizer
-from siirl.scheduler.enums import AlgorithmType
+from siirl.scheduler.enums import WorkflowType
 from siirl.scheduler.reward import create_reward_manager
 from siirl.utils.debug import DistProfiler
 from siirl.utils.extras.device import get_device_name, get_nccl_backend
@@ -187,7 +187,7 @@ class InitializationMixin:
         self._resolve_taskgraph_process_groups()
 
         # try create post sampling process_groups for dapo
-        if self.config.algorithm.algorithm_name == AlgorithmType.DAPO.value:
+        if self.config.algorithm.workflow_type == WorkflowType.DAPO:
             self._create_data_rebalance_masters_group()
 
         # Ensure all ranks have finished group creation before proceeding.

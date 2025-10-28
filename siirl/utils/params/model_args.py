@@ -656,7 +656,10 @@ class AlgorithmArguments:
         default="STD_weight",
         metadata={"help": "The weighting methods for advantage {STD_weight, clip_filter_like_weight, naive}"},
     )
-    algorithm_name: str = field(default="grpo", metadata={"help": "Algorithm name, e.g., grpo, ppo, dapo"})
+    workflow_type: str = field(
+        default="default",
+        metadata={"help": "Selects the workflow graph. 'default' for standard PPO/GRPO, 'dapo' for the DAPO workflow."},
+    )
     filter_groups: FilterGroupsArguments = field(
         default_factory=FilterGroupsArguments, metadata={"help": "DAPO filter groups configuration"}
     )
