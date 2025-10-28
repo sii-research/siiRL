@@ -128,15 +128,15 @@ def Dict2Samples(data:TensorDict)-> List[SampleManager]:
         local_sample.prompts = data['prompts'][index].numpy() if 'prompts' in data else None
         local_sample.responses = data['responses'][index].numpy() if 'responses' in data else None
         local_sample.response_mask = data['response_mask'][index].numpy() if 'response_mask' in data else None
-        local_sample.values = data['values'][index].numpy() if 'values' in data else None
+        local_sample.values = data['values'][index].float().numpy() if 'values' in data else None
         local_sample.raw_prompt_ids = data['raw_prompt_ids'][index] if 'raw_prompt_ids' in data else None
-        local_sample.advantages = data['advantages'][index].numpy() if 'advantages' in data else None
+        local_sample.advantages = data['advantages'][index].float().numpy() if 'advantages' in data else None
         local_sample.raw_prompt = data['raw_prompt'][index] if 'raw_prompt' in data else None
-        local_sample.returns = data['returns'][index].numpy() if 'returns' in data else None
-        local_sample.token_level_rewards = data['token_level_rewards'][index].numpy() if 'token_level_rewards' in data else None
-        local_sample.token_level_scores = data['token_level_scores'][index].numpy() if 'token_level_scores' in data else None
-        local_sample.old_log_probs = data['old_log_probs'][index].numpy() if 'old_log_probs' in data else None
-        local_sample.ref_log_prob = data['ref_log_prob'][index].numpy() if 'ref_log_prob' in data else None
+        local_sample.returns = data['returns'][index].float().numpy() if 'returns' in data else None
+        local_sample.token_level_rewards = data['token_level_rewards'][index].float().numpy() if 'token_level_rewards' in data else None
+        local_sample.token_level_scores = data['token_level_scores'][index].float().numpy() if 'token_level_scores' in data else None
+        local_sample.old_log_probs = data['old_log_probs'][index].float().numpy() if 'old_log_probs' in data else None
+        local_sample.ref_log_prob = data['ref_log_prob'][index].float().numpy() if 'ref_log_prob' in data else None
 
 
         if 'multi_modal_inputs' in data:

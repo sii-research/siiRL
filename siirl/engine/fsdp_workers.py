@@ -36,7 +36,6 @@ from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData
 import siirl.utils.model_utils.torch_functional as F
 from siirl import DataProto
-from siirl.data_coordinator import MetaInfo, SampleManager
 from typing import Any, Dict, List, Optional, Union, Set
 from siirl.models.loader import load_tokenizer
 from siirl.models.transformers.monkey_patch import apply_monkey_patch
