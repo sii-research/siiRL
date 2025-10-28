@@ -68,7 +68,7 @@ async def producer_task_detailed_profile(
         end_put = time.perf_counter()
         ray_put_timings.append(end_put - start_put)
         
-        sample_info = SampleInfo(uid=uuid.uuid4().int)
+        sample_info = SampleInfo(uid=str(uuid.uuid4()))
         
         # 2. Profile `coordinator.put.remote` (RPC Overhead + Remote Execution)
         start_coord = time.perf_counter()
