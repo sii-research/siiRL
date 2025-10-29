@@ -672,9 +672,19 @@ class ActorRolloutRefWorker(Worker):
                 total_input_tokens = output["total_input_tokens"] if "total_input_tokens" in output else 0
                 total_output_tokens = output["total_output_tokens"] if "total_output_tokens" in output else 0
                 delta_time = timer.last
-                estimated_flops, promised_flops = self.flops_counter.estimate_flops([total_input_tokens, total_output_tokens], delta_time)
+
+                # Calculate correct batch_seqlens for MFU computation
+                # Get batch size from prompts
+                batch_size = prompts["input_ids"].shape[0] if "input_ids" in prompts else 1
+                # Calculate average sequence length per sample (prompt + response)
+                avg_seq_len = (total_input_tokens + total_output_tokens) / batch_size if batch_size > 0 else 0
+                # Create batch_seqlens list with each sample's average length
+                batch_seqlens = [int(avg_seq_len)] * batch_size
+
+                estimated_flops, promised_flops = self.flops_counter.estimate_flops(batch_seqlens, delta_time)
                 metrics = {}
-                metrics["perf/mfu/rollout"] = estimated_flops / promised_flops / self.config.rollout.tensor_model_parallel_size
+                # MFU should not be divided by TP size - it's already per-GPU
+                metrics["perf/mfu/rollout"] = estimated_flops / promised_flops
                 metrics["perf/delta_time/rollout"] = delta_time
                 output["metrics"] = NonTensorData(metrics, batch_size=None)
             log_gpu_memory_usage("After rollout generation", logger=logger)
