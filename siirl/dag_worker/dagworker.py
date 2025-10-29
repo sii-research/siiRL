@@ -280,7 +280,7 @@ class DAGWorker(Worker):
                     # --- 3. Get Input Data ---
                     if cur_node.node_id != entry_node_id:
                         with timer(self.enable_perf, "get_data_from_buffer", timing_raw):
-                            batch = self.get_data_from_buffers(key=cur_node.node_id, dest_dp_rank=cur_dp_rank, dest_dp_size=cur_dp_size, timing_raw=timing_raw)
+                            batch = self.get_data_from_buffers(key=cur_node.node_id, timing_raw=timing_raw)
                             if batch is None:
                                 logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
                                 return None 
@@ -345,7 +345,7 @@ class DAGWorker(Worker):
                                     #     self.multi_agent_put_log(key=next_node.node_id, data=node_output.batch, next_dp_size = next_dp_size, agent_group = next_node.agent_group, timing_raw = timing_raw)
                                     # else:
                                     # enforce_buffer = (self._multi_agent) and (cur_node.node_role == NodeRole.ADVANTAGE)
-                                    self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch, source_dp_rank=cur_dp_rank, source_dp_size=cur_dp_size, dest_dp_size=next_dp_size, timing_raw=timing_raw)
+                                    self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch,  source_dp_size=cur_dp_size, dest_dp_size=next_dp_size, timing_raw=timing_raw)
                         # elif self._multi_agent:
                         #     # last_node add prefix for metrics
                         #     node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node)
@@ -1006,8 +1006,7 @@ class DAGWorker(Worker):
     def put_data_to_buffers(
         self, key: str,
         data: TensorDict,
-        source_dp_rank: int,
-        source_dp_size: int,
+        source_dp_size:int,
         dest_dp_size: int,
         timing_raw: Dict[str, float]
     ):
@@ -1040,7 +1039,7 @@ class DAGWorker(Worker):
                             prompt_length=getattr(sample, 'prompt_length', 0),
                             response_length=getattr(sample, 'response_length', 0),
                             uid=getattr(sample, 'uid', uuid.uuid4().int),
-                            dict_info={'key': key, 'source_dp_rank': source_dp_rank} # Tag with source DP rank for partitioning
+                            dict_info={'key': key} # Tag the sample with the key
                         )
                         sample_ref = ray.put(sample)
                         put_futures.append(self.data_coordinator.put.remote(sample_info, sample_ref))
@@ -1056,8 +1055,6 @@ class DAGWorker(Worker):
     def get_data_from_buffers(
         self,
         key: str,
-        dest_dp_rank: int,
-        dest_dp_size: int,
         timing_raw: Dict[str, float]
     ) -> Optional[DataProto]:
         """
@@ -1071,19 +1068,7 @@ class DAGWorker(Worker):
                     logger.debug(f"Rank {self._rank}: Found data for key '{key}' in local cache. Bypassing Ray.")
                     return self.internal_data_cache.pop(key)
             def key_filter(sample_info: SampleInfo) -> bool:
-                info = sample_info.dict_info
-                # First, ensure the primary key (node_id) matches.
-                if info.get('key') != key:
-                    return False
-
-                # Then, apply partitioning logic for data distribution.
-                # Each destination worker pulls from a specific subset of source workers.
-                source_rank = info.get('source_dp_rank')
-                if source_rank is None:
-                    logger.warning(f"Rank {self._rank}: SampleInfo is missing 'source_dp_rank'. Skipping sample.")
-                    return False
-
-                return (source_rank % dest_dp_size) == dest_dp_rank
+                return sample_info.dict_info.get('key') == key
 
             try:
                 loop = asyncio.get_event_loop()
@@ -1092,8 +1077,8 @@ class DAGWorker(Worker):
                 asyncio.set_event_loop(loop)
 
             with timer(self.enable_perf, f"get_samples_from_coordinator_{key}", timing_raw):
-                # Use the get_all_by_filter method to ensure all data for the key is retrieved.
-                sample_refs = loop.run_until_complete(self.data_coordinator.get_all_by_filter.remote(key_filter))
+                # Use the new get_all_by_filter method
+                sample_refs = loop.run_until_complete(self.data_coordinator.get_batch.remote(self.config.data.train_batch_size))
 
             if not sample_refs:
                 logger.warning(f"Rank {self._rank}: Found no samples in DataCoordinator for key '{key}'.")
