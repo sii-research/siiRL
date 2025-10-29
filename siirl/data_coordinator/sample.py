@@ -32,7 +32,7 @@ class Sample(BaseModel):
     )
     attention_mask: Optional[np.ndarray] = Field(default=None)
     position_ids: Optional[np.ndarray] = Field(default=None)
-    acc: float = Field(default=0.0)
+    acc: float = Field(default=None)
     token_level_rewards: Optional[np.ndarray] = Field(default=None)
     token_level_scores: Optional[np.ndarray] = Field(default=None)
     values: Optional[np.ndarray] = Field(default=None)
@@ -67,26 +67,26 @@ class Sample(BaseModel):
         metadata={"help": "used in multi-agent"}
     )
     traj_len: int = Field(
-        default=0,
+        default=None,
         metadata={"help": "used in multi-agent"}
     )
     traj_step: int = Field(
-        default=0,
+        default=None,
         metadata={"help": "used in multi-agent"}
     )
     seq_final_reward: float = Field(
-        default=0.0,
+        default=None,
         metadata={"help": "used in dapo"}
     )
     seq_reward: float = Field(
-        default=0.0,
+        default=None,
         metadata={"help": "used in dapo"}
     )
     multi_modal_inputs: Optional[Dict[str, Any]] = Field(default=None)
     uid: Optional[str] = Field(default=None)
 
     temperature: float = Field(
-        default=1.0,
+        default=None,
         metadata={"help": "temperature"}
     )
 
@@ -128,16 +128,16 @@ def Dict2Samples(data:TensorDict)-> List[SampleManager]:
         local_sample.prompts = data['prompts'][index].numpy() if 'prompts' in data else None
         local_sample.responses = data['responses'][index].numpy() if 'responses' in data else None
         local_sample.response_mask = data['response_mask'][index].numpy() if 'response_mask' in data else None
-        local_sample.values = data['values'][index].float().numpy() if 'values' in data else None
+        local_sample.values = data['values'][index].numpy() if 'values' in data else None
         local_sample.raw_prompt_ids = data['raw_prompt_ids'][index] if 'raw_prompt_ids' in data else None
-        local_sample.advantages = data['advantages'][index].float().numpy() if 'advantages' in data else None
+        local_sample.advantages = data['advantages'][index].numpy() if 'advantages' in data else None
         local_sample.raw_prompt = data['raw_prompt'][index] if 'raw_prompt' in data else None
-        local_sample.returns = data['returns'][index].float().numpy() if 'returns' in data else None
-        local_sample.token_level_rewards = data['token_level_rewards'][index].float().numpy() if 'token_level_rewards' in data else None
-        local_sample.token_level_scores = data['token_level_scores'][index].float().numpy() if 'token_level_scores' in data else None
-        local_sample.old_log_probs = data['old_log_probs'][index].float().numpy() if 'old_log_probs' in data else None
-        local_sample.ref_log_prob = data['ref_log_prob'][index].float().numpy() if 'ref_log_prob' in data else None
-
+        local_sample.returns = data['returns'][index].numpy() if 'returns' in data else None
+        local_sample.token_level_rewards = data['token_level_rewards'][index].numpy() if 'token_level_rewards' in data else None
+        local_sample.token_level_scores = data['token_level_scores'][index].numpy() if 'token_level_scores' in data else None
+        local_sample.old_log_probs = data['old_log_probs'][index].numpy() if 'old_log_probs' in data else None
+        local_sample.ref_log_prob = data['ref_log_prob'][index].numpy() if 'ref_log_prob' in data else None
+        local_sample.extra_info = data['extra_info'][index] if 'extra_info' in data else None
 
         if 'multi_modal_inputs' in data:
             local_sample.multi_modal_inputs = data["multi_modal_inputs"][index]
@@ -169,7 +169,7 @@ def Samples2Dict(samples: List[Sample]) -> TensorDict:
     aggregated: Dict[str, List[Any]] = {}
     for sample in samples:
         if sample is None:
-            raise ValueError("SampleManager 中的 sample 不能为 None")
+            raise ValueError("Sample Should not be None")
         for field in sample_fields:
             val = getattr(sample, field)
             if val is not None:
@@ -187,6 +187,8 @@ def Samples2Dict(samples: List[Sample]) -> TensorDict:
     for key, values in aggregated.items():
         if isinstance(values, list):
             first_val = values[0]
+            
+            # if internal val is not ""/ {} ...
             if isinstance(first_val, np.ndarray):
                 tensordict_data[key] = np.stack(values, axis=0) if first_val.ndim >= 1 else np.concatenate(values, axis=0)
                 default_type = fields[key].annotation
@@ -198,12 +200,14 @@ def Samples2Dict(samples: List[Sample]) -> TensorDict:
                 elif default_type is np.ndarray:
                     tensordict_data[key] = torch.tensor(tensordict_data[key])
             elif isinstance(first_val, str):
-                tensordict_data[key] = values
+                if first_val:
+                    tensordict_data[key] = values
             else:
-                tensordict_data[key] = NonTensorData(
-                    data=values,
-                    batch_size=batch_size
-                )
+                if first_val:
+                    tensordict_data[key] = NonTensorData(
+                        data=values,
+                        batch_size=batch_size
+                    )
 
         else:
             tensordict_data[key] = NonTensorData(

@@ -1018,16 +1018,17 @@ class DAGWorker(Worker):
         try:
             logger.debug(f"Rank {self._rank}: Starting put_data_to_buffers for key '{key}'")
 
-            samples = Dict2Samples(data)
-            if not samples:
-                logger.warning(f"Rank {self._rank}: DataProto for key '{key}' converted to 0 samples. Nothing to put.")
-                return
+
             if source_dp_size == dest_dp_size:
                 with timer(self.enable_perf, f"put_intern_data_{key}", timing_raw):
                     logger.debug(f"Rank {self._rank}: DP size match ({source_dp_size}). Storing data for key '{key}' in local cache.")
                     self.internal_data_cache[key] = data
                     logger.debug(f"Rank {self._rank}: Successfully stored data for key '{key}' in local cache.")
             else:
+                samples = Dict2Samples(data)
+                if not samples:
+                    logger.warning(f"Rank {self._rank}: DataProto for key '{key}' converted to 0 samples. Nothing to put.")
+                    return
                 loop = asyncio.get_event_loop()
                 put_futures = []
 
