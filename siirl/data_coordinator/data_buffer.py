@@ -42,6 +42,10 @@ class DataBuffer:
         """Receives and holds the ObjectRef of a sample."""
         self._ref_store.append(sample_ref)
 
+    def put_refs(self, sample_refs: List[ray.ObjectRef]):
+        """Receives and holds a list of ObjectRefs."""
+        self._ref_store.extend(sample_refs)
+
     def get_ref_count(self) -> int:
         """Returns the current number of held references."""
         return len(self._ref_store)
@@ -127,6 +131,31 @@ class DataCoordinator:
             # More complex logic can be implemented here, such as inserting into a
             # priority queue based on priority
             self._sample_queue.append((sample_info, sample_ref))
+
+    async def put_batch(self, sample_infos: List[SampleInfo], sample_refs: List[ray.ObjectRef]):
+        """
+        Called by a worker to register a batch of new sample references and their metadata.
+        This method routes the ObjectRefs to DataBuffers on their local nodes.
+        """
+        if not sample_refs:
+            return
+
+        caller_node_id = ray.get_runtime_context().get_node_id()
+
+        for i in range(len(sample_infos)):
+            if sample_infos[i].node_id is None:
+                sample_infos[i].node_id = caller_node_id
+        
+        local_buffers = self._buffer_map.get(caller_node_id)
+        if local_buffers:
+            buffer_to_use = local_buffers[self._put_counter % len(local_buffers)]
+            buffer_to_use.put_refs.remote(sample_refs)
+            self._put_counter += 1
+        else:
+            loguru.logger.warning(f"No DataBuffer found for node {caller_node_id}. The sample reference will not be held, which may lead to premature garbage collection.")
+
+        async with self.lock:
+            self._sample_queue.extend(zip(sample_infos, sample_refs))
 
     async def get_batch(self, batch_size: int, filter_plugin: Optional[Callable[[SampleInfo], bool]] = None) -> List[ray.ObjectRef]:
         """
