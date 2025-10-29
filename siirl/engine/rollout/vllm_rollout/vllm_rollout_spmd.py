@@ -62,7 +62,6 @@ from vllm.lora.request import LoRARequest
 from vllm.worker.worker_base import WorkerWrapperBase
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 
-from siirl.data_coordinator import SampleManager, Sample, MetaInfo
 from siirl.utils.debug import GPUMemoryLogger
 from siirl.utils.model_utils.torch_functional import get_response_mask, pad_2d_list_to_length
 from siirl.params import RolloutArguments

@@ -92,7 +92,7 @@ class OptimizerArguments:
     lr: float = field(default=1e-6, metadata={"help": "Learning rate"})
     lr_warmup_steps_ratio: float = field(default=0.0, metadata={"help": "Warmup steps ratio"})
     min_lr: float = field(default=0.0, metadata={"help": "Min learning rate"})
-    min_lr_ratio: Optional[float] = field(default=None, metadata={"help": "Min learning rate ratio"})
+    min_lr_ratio: Optional[float] = field(default=0.0, metadata={"help": "Min learning rate ratio"})
     warmup_style: str = field(default="constant", metadata={"help": "Warmup strategy"})
     lr_warmup_init: float = field(default=0.0, metadata={"help": "Learning rate warmup init"})
     lr_decay_steps: Optional[int] = field(default=None, metadata={"help": "Learning rate decay steps"})
@@ -101,7 +101,7 @@ class OptimizerArguments:
     lr_wsd_decay_style: str = field(default="exponential", metadata={"help": "Learning rate warmup decay style"})
     lr_wsd_decay_steps: Optional[int] = field(default=None, metadata={"help": "Learning rate warmup decay steps"})
     use_checkpoint_opt_param_scheduler: bool = field(default=False, metadata={"help": "Whether to use checkpoint opt param scheduler"})
-    total_training_steps: int = field(default=0, metadata={"help": "Total training steps"})
+    total_training_steps: int = field(default=-1, metadata={"help": "Total training steps"})
     betas: tuple[float, float] = field(default=(0.9, 0.999), metadata={"help": "Beta params Of Optimizer"})
     weight_decay: float = field(default=1e-2, metadata={"help": "Weight decay params of Optimizer"})
     lr_warmup_steps: int = field(
@@ -265,7 +265,7 @@ class ActorArguments:
     clip_ratio_low: float = field(default=0.2, metadata={"help": "Min value for clip ratio"})
     clip_ratio_high: float = field(default=0.2, metadata={"help": "Max value for clip ratio"})
     clip_ratio_c: float = field(default=3.0, metadata={"help": "lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729"})
-    entropy_coeff: float = field(default=0.001, metadata={"help": "Entropy coefficient"})
+    entropy_coeff: float = field(default=0, metadata={"help": "Entropy coefficient"})
     use_kl_loss: bool = field(default=False, metadata={"help": "Enable KL loss"})
     kl_loss_coef: float = field(default=0.001, metadata={"help": "KL loss coefficient"})
     kl_loss_type: str = field(default="low_var_kl", metadata={"help": "KL loss type"})
@@ -485,7 +485,7 @@ class CriticArguments:
     load_weight: bool = field(default=True)
     rollout_n: int = field(default=1, metadata={"help": "rollout n"})
     checkpoint: CheckpointArguments = field(default_factory=CheckpointArguments, metadata={"help": "Checkpoint configuration"})
-    ppo_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU"})
+    ppo_max_token_len_per_gpu: int = field(default=32768, metadata={"help": "Max tokens per GPU"})
     loss_agg_mode: str = field(default="token-mean", metadata={"help": "token-mean, seq-mean-token-sum, seq-mean-token-mean"})
     profile: dict[str, Any] = field(default_factory=dict, metadata={"help": "Critic Profile settings"})
     data_loader_seed: Optional[int] = field(default=None, metadata={"help": "Data loader seed"})
@@ -545,7 +545,7 @@ class KLCtrlArguments:
     type: str = field(default="fixed", metadata={"help": "Type of KL Ctrl, fixed or adaptive"})
     kl_coef: float = field(default=0.001, metadata={"help": "Coef of KL"})
     target_kl: Optional[float] = field(default=0.1, metadata={"help": "Target KL value"})
-    horizon: Optional[float] = field(default=0, metadata={"help": "Horizon of KL"})
+    horizon: Optional[float] = field(default=1000, metadata={"help": "Horizon of KL"})
 
 
 @dataclass
