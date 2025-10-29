@@ -188,7 +188,6 @@ TRAINING_CMD=(
     actor_rollout_ref.ref.megatron.param_offload=True
     actor_rollout_ref.ref.megatron.use_dist_checkpointing=False
     # Algorithm configuration
-    algorithm.algorithm_name=dapo
     algorithm.weight_factor_in_cpgd='STD_weight'
     algorithm.use_kl_in_reward=\$USE_KL_IN_REWARD
     algorithm.kl_ctrl.kl_coef=\$KL_COEF
