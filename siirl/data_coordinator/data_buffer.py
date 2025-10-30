@@ -17,10 +17,9 @@ from typing import Dict, List, Optional, Tuple, Callable, Any
 
 import ray
 import loguru
-from ray.util.placement_group import placement_group
-from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 import time
 from collections import deque
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from siirl.data_coordinator.sample import SampleInfo
 
 
@@ -91,25 +90,34 @@ class DataCoordinator:
         for node_id, buffers in self._buffer_map.items():
             loguru.logger.info(f"Registered {len(buffers)} DataBuffers for node {node_id}.")
 
-    async def put(self, sample_info: SampleInfo, sample_ref: Any):
+    async def put(self, sample_info: SampleInfo, sample_ref: Any, caller_node_id: Optional[str] = None):
         """
         Called by a RolloutWorker to register a new sample reference and its metadata.
         This method automatically routes the ObjectRef to a DataBuffer on its local
         node to be held.
+        
+        Args:
+            sample_info: Metadata about the sample
+            sample_ref: Ray ObjectRef or the actual sample data
+            caller_node_id: The node ID of the caller. If None, will try to get it from
+                          the runtime context (but this won't work correctly for remote calls)
         """
         # Due to Ray's small object optimization, an ObjectRef passed by the client
         # might be automatically resolved to its actual value. Here, we ensure that
         # we are always handling an ObjectRef.
         if not isinstance(sample_ref, ray.ObjectRef):
-            #loguru.logger.warning(
-            #    f"Coordinator.put received a value of type {type(sample_ref)} "
-            #    "instead of an ObjectRef. This might be due to Ray's small object "
-            #    "optimization. Automatically calling ray.put() to store a reference."
-            #)
             sample_ref = ray.put(sample_ref)
 
         # 1. Get the node ID of the caller
-        caller_node_id = ray.get_runtime_context().get_node_id()
+        # Note: When called remotely, ray.get_runtime_context().get_node_id() returns
+        # the node ID of the DataCoordinator actor, not the caller. So we require the
+        # caller to pass their node_id explicitly.
+        if caller_node_id is None:
+            caller_node_id = ray.get_runtime_context().get_node_id()
+            loguru.logger.warning(
+                "DataCoordinator.put() called without caller_node_id. "
+                f"Using DataCoordinator's node_id {caller_node_id[:16]}... which may be incorrect."
+            )
 
         # 2. Inject the node ID into SampleInfo for subsequent filtering
         #    Only inject if node_id has not been manually set, to facilitate testing.
@@ -132,15 +140,30 @@ class DataCoordinator:
             # priority queue based on priority
             self._sample_queue.append((sample_info, sample_ref))
 
-    async def put_batch(self, sample_infos: List[SampleInfo], sample_refs: List[ray.ObjectRef]):
+    async def put_batch(self, sample_infos: List[SampleInfo], sample_refs: List[ray.ObjectRef], caller_node_id: Optional[str] = None):
         """
         Called by a worker to register a batch of new sample references and their metadata.
         This method routes the ObjectRefs to DataBuffers on their local nodes.
+        
+        Args:
+            sample_infos: List of metadata for each sample
+            sample_refs: List of Ray ObjectRefs
+            caller_node_id: The node ID of the caller. If None, will try to get it from
+                          the runtime context (but this won't work correctly for remote calls)
         """
         if not sample_refs:
             return
 
-        caller_node_id = ray.get_runtime_context().get_node_id()
+        # Get the node ID of the caller
+        # Note: When called remotely, ray.get_runtime_context().get_node_id() returns
+        # the node ID of the DataCoordinator actor, not the caller. So we require the
+        # caller to pass their node_id explicitly.
+        if caller_node_id is None:
+            caller_node_id = ray.get_runtime_context().get_node_id()
+            loguru.logger.warning(
+                "DataCoordinator.put_batch() called without caller_node_id. "
+                f"Using DataCoordinator's node_id {caller_node_id[:16]}... which may be incorrect."
+            )
 
         for i in range(len(sample_infos)):
             if sample_infos[i].node_id is None:
@@ -223,6 +246,24 @@ class DataCoordinator:
         """Returns the number of samples in the current queue."""
         async with self.lock:
             return len(self._sample_queue)
+    
+    async def peek_source_dp_size(self, filter_plugin: Callable[[SampleInfo], bool]) -> Optional[int]:
+        """
+        Peek at the source_dp_size of matching samples without consuming them.
+        
+        Args:
+            filter_plugin: Filter function to find matching samples
+            
+        Returns:
+            The source_dp_size if found, None otherwise
+        """
+        async with self.lock:
+            for sample_info, _ in self._sample_queue:
+                if filter_plugin(sample_info):
+                    source_dp_size = sample_info.dict_info.get('source_dp_size')
+                    if source_dp_size is not None:
+                        return source_dp_size
+            return None
 
     def __repr__(self) -> str:
         return f"<DataCoordinator(total_samples={len(self._sample_queue)})>"
@@ -275,35 +316,53 @@ def init_data_coordinator(num_buffers: int, force_local: bool = False) -> ray.ac
         start_time = time.time()
         
         loguru.logger.debug(f"Waiting for at least {num_buffers} nodes to be available for DataBuffers (timeout: {wait_timeout}s).")
+        alive_nodes = []
         while time.time() - start_time < wait_timeout:
-            num_available_nodes = len([node for node in ray.nodes() if node.get("Alive", False)])
-            if num_available_nodes >= num_buffers:
-                loguru.logger.success(f"Found {num_available_nodes} nodes. Proceeding to create placement group for {num_buffers} DataBuffers.")
+            alive_nodes = [node for node in ray.nodes() if node.get("Alive", False)]
+            if len(alive_nodes) >= num_buffers:
+                loguru.logger.success(f"Found {len(alive_nodes)} nodes. Proceeding to create {num_buffers} DataBuffers.")
                 break
-            loguru.logger.warning(f"Waiting for more nodes... Available: {num_available_nodes}/{num_buffers}. Retrying in {poll_interval}s.")
+            loguru.logger.warning(f"Waiting for more nodes... Available: {len(alive_nodes)}/{num_buffers}. Retrying in {poll_interval}s.")
             time.sleep(poll_interval)
         else: # This else belongs to the while loop, it executes if the loop finishes without break
-            num_available_nodes = len([node for node in ray.nodes() if node.get("Alive", False)])
-            raise TimeoutError(f"Timed out after {wait_timeout}s. Cannot create {num_buffers} buffers with 'STRICT_SPREAD' strategy on {num_available_nodes} available nodes.")
+            alive_nodes = [node for node in ray.nodes() if node.get("Alive", False)]
+            raise TimeoutError(f"Timed out after {wait_timeout}s. Cannot create {num_buffers} buffers on {len(alive_nodes)} available nodes.")
 
-        # 3. Use a Placement Group to ensure DataBuffers are spread across different nodes
-        bundles = [{"CPU": 1} for _ in range(num_buffers)]
-        pg = placement_group(bundles, strategy="STRICT_SPREAD")
-        loguru.logger.debug(f"Waiting for placement group for {num_buffers} DataBuffers to be ready...")
-        ray.get(pg.ready())
-        loguru.logger.debug("Placement group is ready.")
-
-        scheduling_strategy = PlacementGroupSchedulingStrategy(placement_group=pg)
-        data_buffers = [DataBuffer.options(scheduling_strategy=scheduling_strategy).remote(buffer_id=i) for i in range(num_buffers)]
-        
-        # Get the node ID for each buffer
-        buffer_nodes = ray.get([b.get_node_id.remote() for b in data_buffers])
-        # Group buffers on the same node
+        # 3. Explicitly create one DataBuffer per node to ensure proper distribution
+        # Use NodeAffinitySchedulingStrategy to pin each buffer to a specific node
+        data_buffers = []
         buffer_info: Dict[str, List[ray.actor.ActorHandle]] = {}
+        
+        for i in range(num_buffers):
+            # Select a node in round-robin fashion
+            target_node = alive_nodes[i % len(alive_nodes)]
+            node_id = target_node.get("NodeID")
+            
+            # Create buffer with explicit node affinity scheduling
+            scheduling_strategy = NodeAffinitySchedulingStrategy(
+                node_id=node_id,
+                soft=False  # Hard constraint: must be on this node
+            )
+            buffer = DataBuffer.options(
+                scheduling_strategy=scheduling_strategy
+            ).remote(buffer_id=i)
+            data_buffers.append(buffer)
+            
+            loguru.logger.debug(f"Created DataBuffer {i} targeting node {node_id[:8]}...")
+        
+        # Get the actual node ID for each buffer to verify placement
+        buffer_nodes = ray.get([b.get_node_id.remote() for b in data_buffers])
+        
+        # Group buffers by their actual node
         for node_id, buffer in zip(buffer_nodes, data_buffers):
             if node_id not in buffer_info:
                 buffer_info[node_id] = []
             buffer_info[node_id].append(buffer)
+        
+        # Log the distribution
+        loguru.logger.info(f"DataBuffer distribution across {len(buffer_info)} nodes:")
+        for node_id, buffers in buffer_info.items():
+            loguru.logger.info(f"  Node {node_id[:16]}...: {len(buffers)} buffer(s)")
     
     # 4. Register all DataBuffers with the Coordinator
     # Use ray.get to wait for registration to complete, ensuring the map is
