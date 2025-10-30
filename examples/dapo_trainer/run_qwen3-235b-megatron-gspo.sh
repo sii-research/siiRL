@@ -94,7 +94,7 @@ export MASTER_ADDR=${MASTER_ADDR:-localhost}
 
 # --- Output Paths and Experiment Naming ---
 export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${DATASET}_hybrid_${NNODES}nodes
-export PROJECT_NAME=siirl_zp_${DATASET}_${MODEL_NAME}
+export PROJECT_NAME=siirl_${DATASET}_${MODEL_NAME}
 export EXPERIMENT_NAME=siirl_moe_megatron_${MODEL_NAME}_${DATASET}_experiment
 export TENSORBOARD_DIR=${BASE_TENSORBOARD_PATH}/${MODEL_NAME}_${DATASET}_hybrid_tensorboard/dlc_${NNODES}_$timestamp
 export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${DATASET}_hybrid_${NNODES}_$timestamp
