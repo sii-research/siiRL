@@ -20,7 +20,7 @@ import ray
 from loguru import logger
 from omegaconf import DictConfig
 
-from siirl.scheduler.enums import AdvantageEstimator, AlgorithmType
+from siirl.scheduler.enums import AdvantageEstimator, WorkflowType
 from siirl.scheduler.graph_updater import display_node_config, update_task_graph_node_configs
 from siirl.scheduler.launch import RayTrainer
 from siirl.scheduler.process_group_manager import ProcessGroupManager, log_process_group_manager_details
@@ -29,8 +29,6 @@ from siirl.utils.logger.logging_utils import set_basic_config
 from siirl.utils.params import SiiRLArguments, log_dict_formatted, parse_config
 from siirl.workers.dag import DAGConfigLoader
 from siirl.workers.databuffer import init_data_buffer
-
-
 
 # --- Constants ---
 RAY_RUNTIME_ENV_VARS = {
@@ -46,34 +44,40 @@ MAIN_RUNNER_CPU_RESERVATION = 5
 
 def determine_workflow_config(self, siirl_args: SiiRLArguments) -> str:
     current_dir = os.path.dirname(os.path.abspath(__file__))
+    workflow = siirl_args.algorithm.workflow_type
 
-    if siirl_args.algorithm.adv_estimator == AdvantageEstimator.GAE:
-        return os.path.join(current_dir, "config/workflow_ppo.yaml")
-    elif siirl_args.algorithm.adv_estimator in [
-        AdvantageEstimator.GRPO,
-        AdvantageEstimator.GRPO_PASSK,
-        AdvantageEstimator.REINFORCE_PLUS_PLUS,
-        AdvantageEstimator.REMAX,
-        AdvantageEstimator.RLOO,
-        AdvantageEstimator.OPO,
-        AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE,
-        AdvantageEstimator.CPGD,
-    ]:
-        if siirl_args.algorithm.algorithm_name == AlgorithmType.DAPO.value:
-            return os.path.join(current_dir, "config/workflow_dapo.yaml")
-        return os.path.join(current_dir, "config/workflow_grpo.yaml")
+    if workflow == WorkflowType.DAPO:
+        return os.path.join(current_dir, "config/workflow_dapo.yaml")
+    # A new algorithm 'xapo' could be added here easily:
+    # elif workflow == "xapo":
+    #     return os.path.join(current_dir, "config/workflow_xapo.yaml")
+
+    elif workflow == WorkflowType.DEFAULT:
+        if siirl_args.algorithm.adv_estimator == AdvantageEstimator.GAE:
+            return os.path.join(current_dir, "config/workflow_ppo.yaml")
+        else:  # For GRPO, GSPO, etc.
+            return os.path.join(current_dir, "config/workflow_grpo.yaml")
+
     else:
-        raise NotImplementedError
+        raise ValueError(f"Unknown workflow_type: '{workflow}'")
 
 
 def get_databuffer_shard_number(siirl_args: SiiRLArguments) -> int:
-    assert siirl_args.data.train_batch_size % siirl_args.trainer.nnodes == 0, f"Config Error: train_batch_size ({siirl_args.data.train_batch_size}) must be divisible by nnodes ({siirl_args.trainer.nnodes}). Please adjust your configuration."
+    assert siirl_args.data.train_batch_size % siirl_args.trainer.nnodes == 0, (
+        f"Config Error: train_batch_size ({siirl_args.data.train_batch_size}) must be divisible by nnodes ("
+        f"{siirl_args.trainer.nnodes}). Please adjust your configuration."
+    )
 
     batch_size_per_node = siirl_args.data.train_batch_size // siirl_args.trainer.nnodes
     intermediate_value = batch_size_per_node * siirl_args.actor_rollout_ref.rollout.n
     SHARDING_FACTOR = 8
-    assert intermediate_value % SHARDING_FACTOR == 0, f"Config Error: The result of '(train_batch_size / nnodes) * rollout_n' ({intermediate_value}) must be divisible by {SHARDING_FACTOR}. Please adjust your configuration."
-    databuffer_number = ((siirl_args.data.train_batch_size // siirl_args.trainer.nnodes) * siirl_args.actor_rollout_ref.rollout.n) // 8
+    assert intermediate_value % SHARDING_FACTOR == 0, (
+        f"Config Error: The result of '(train_batch_size / nnodes) * rollout_n' ({intermediate_value}) must be "
+        f"divisible by {SHARDING_FACTOR}. Please adjust your configuration."
+    )
+    databuffer_number = (
+        (siirl_args.data.train_batch_size // siirl_args.trainer.nnodes) * siirl_args.actor_rollout_ref.rollout.n
+    ) // 8
     databuffer_number = min(databuffer_number, siirl_args.trainer.nnodes)
     return databuffer_number
 
@@ -111,7 +115,10 @@ class MainRunner:
         if siirl_args.dag.workflow_path is None:
             # If no workerflow path is provided, determine the default workflow config
             workflow_path = determine_workflow_config(self, siirl_args)
-            logger.info(f"No workerflow path provided. Using {workflow_path} determined by adv_estimator: {siirl_args.algorithm.adv_estimator}")
+            logger.info(
+                f"No workerflow path provided. Using {workflow_path} determined by adv_estimator: "
+                f"{siirl_args.algorithm.adv_estimator}"
+            )
         else:
             workflow_path = siirl_args.dag.workflow_path
         logger.info(f"Loading workerflow from: {siirl_args.dag.workflow_path}")

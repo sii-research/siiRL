@@ -22,7 +22,12 @@ from siirl.workers.dag_worker.data_structures import NodeOutput
 from siirl.workers.databuffer import DataProto
 
 
-def dynamic_sampling(siirl_args: SiiRLArguments, batch: DataProto, node_config: Dict[str, Any], **kwargs: Any) -> NodeOutput:
+def dynamic_sampling(
+    siirl_args: SiiRLArguments,
+    batch: DataProto,
+    node_config: Dict[str, Any],
+    **kwargs: Any,
+) -> NodeOutput:
     """
     Performs dynamic sampling by filtering trajectory groups based on metric variance.
 
@@ -60,7 +65,10 @@ def dynamic_sampling(siirl_args: SiiRLArguments, batch: DataProto, node_config: 
             batch.non_tensor_batch["seq_reward"] = batch.batch["token_level_scores"].sum(dim=-1).cpu().numpy()
         else:
             # If the metric cannot be found or computed, it's a configuration error.
-            raise KeyError(f"Metric '{metric_name}' for group filtering not found in batch and could not be computed. Available non-tensor keys: {list(batch.non_tensor_batch.keys())}")
+            raise KeyError(
+                f"Metric '{metric_name}' for group filtering not found in batch and could not be computed. "
+                f"Available non-tensor keys: {list(batch.non_tensor_batch.keys())}"
+            )
 
     # Group trajectories by UID and collect their corresponding metric values.
     prompt_uid_to_metric_vals = defaultdict(list)
@@ -71,11 +79,15 @@ def dynamic_sampling(siirl_args: SiiRLArguments, batch: DataProto, node_config: 
         prompt_uid_to_metric_vals[uids[i]].append(metric_values[i])
 
     # Calculate the standard deviation of the metric for each group of trajectories.
-    prompt_uid_to_metric_std = {prompt_uid: np.std(metric_vals) for prompt_uid, metric_vals in prompt_uid_to_metric_vals.items()}
+    prompt_uid_to_metric_std = {
+        prompt_uid: np.std(metric_vals) for prompt_uid, metric_vals in prompt_uid_to_metric_vals.items()
+    }
 
     # Decide which prompts (UIDs) to keep. A group is kept if its metric values
     # show variance (std > 0) or if it's a single-sample group (which cannot have variance).
-    kept_prompt_uids = {uid for uid, std in prompt_uid_to_metric_std.items() if std > 0 or len(prompt_uid_to_metric_vals[uid]) == 1}
+    kept_prompt_uids = {
+        uid for uid, std in prompt_uid_to_metric_std.items() if std > 0 or len(prompt_uid_to_metric_vals[uid]) == 1
+    }
 
     # Find the indices of all trajectories that belong to the kept groups.
     # This ensures that all trajectories for a kept UID are preserved together.
@@ -91,6 +103,12 @@ def dynamic_sampling(siirl_args: SiiRLArguments, batch: DataProto, node_config: 
     # Calculate and return metrics about the filtering process for logging and analysis.
     final_traj_count = len(filtered_batch.batch) if filtered_batch.batch is not None else 0
     kept_ratio = final_traj_count / initial_traj_count if initial_traj_count > 0 else 1.0
-    metrics = {"dapo_sampling/kept_trajectories_ratio": kept_ratio, "dapo_sampling/initial_trajectories": initial_traj_count, "dapo_sampling/final_trajectories": final_traj_count, "dapo_sampling/kept_groups": len(kept_prompt_uids), "dapo_sampling/total_groups": len(prompt_uid_to_metric_vals)}
+    metrics = {
+        "dapo_sampling/kept_trajectories_ratio": kept_ratio,
+        "dapo_sampling/initial_trajectories": initial_traj_count,
+        "dapo_sampling/final_trajectories": final_traj_count,
+        "dapo_sampling/kept_groups": len(kept_prompt_uids),
+        "dapo_sampling/total_groups": len(prompt_uid_to_metric_vals),
+    }
 
     return NodeOutput(batch=filtered_batch, metrics=metrics)
