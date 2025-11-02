@@ -1119,10 +1119,12 @@ class DAGWorker(Worker):
                 adjusted_batch_size = int(self.config.data.train_batch_size * source_dp_size / cur_dp_size)
                 
                 # Use filter_plugin to get only samples with matching key
+                # Use balance_partitions to optimize sample distribution by length
                 sample_refs = loop.run_until_complete(
                     self.data_coordinator.get_batch.remote(
                         adjusted_batch_size,
-                        filter_plugin=key_filter
+                        filter_plugin=key_filter,
+                        balance_partitions=cur_dp_size
                     )
                 )
 

@@ -14,6 +14,7 @@
 
 import asyncio
 from typing import Dict, List, Optional, Tuple, Callable, Any
+import heapq
 
 import ray
 import loguru
@@ -21,6 +22,73 @@ import time
 from collections import deque
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from siirl.data_coordinator.sample import SampleInfo
+
+
+def get_seqlen_balanced_partitions_constrained_lpt(seqlen_list: List[int], k_partitions: int) -> List[List[int]]:
+    """Partitions items into k subsets of equal item count with balanced sums.
+
+    This function implements a constrained version of the LPT (Longest
+    Processing Time) heuristic. It strictly adheres to the constraint that each
+    partition must have a nearly equal number of items, and then uses the LPT
+    principle to balance the sum of sequence lengths within that constraint.
+    This is the recommended approach when a fixed number of items per worker
+    is a hard requirement.
+
+    Args:
+        seqlen_list: A list of integers representing the "size" of each item.
+        k_partitions: The desired number of partitions.
+
+    Returns:
+        A list of lists, where each inner list contains the original indices
+        of the items assigned to that partition. Each list will have a size of
+        len(seqlen_list) // k or len(seqlen_list) // k + 1.
+    """
+    if k_partitions <= 0:
+        raise ValueError("Number of partitions (k_partitions) must be positive.")
+    num_items = len(seqlen_list)
+    
+    # Ensure the data size is perfectly divisible.
+    # If this fails, it indicates an unexpected issue in the data pipeline.
+    if num_items % k_partitions != 0:
+        loguru.logger.warning(
+            f"Data size ({num_items}) is not evenly divisible by the number of partitions ({k_partitions}). "
+            f"This may lead to uneven partition sizes."
+        )
+    
+    # 1. Sort items by length in descending order, preserving original indices.
+    indexed_lengths = sorted(enumerate(seqlen_list), key=lambda x: x[1], reverse=True)
+    
+    # 2. Determine the target number of items for each partition.
+    base_size = num_items // k_partitions
+    rem = num_items % k_partitions
+    partition_target_sizes = [base_size + 1] * rem + [base_size] * (k_partitions - rem)
+    
+    # 3. Initialize partitions and a min-heap to track partition sums.
+    #    The heap stores tuples of (current_sum, partition_index).
+    partitions = [[] for _ in range(k_partitions)]
+    partition_heap = [(0, i) for i in range(k_partitions)]
+    heapq.heapify(partition_heap)
+    
+    # 4. Iterate through sorted items and assign each to a non-full partition
+    #    with the smallest current sum.
+    for original_idx, length in indexed_lengths:
+        # Find the smallest, non-full partition.
+        # Pop from the heap until we find a partition that is not yet full.
+        while True:
+            smallest_sum, smallest_idx = heapq.heappop(partition_heap)
+            
+            # Check if the selected partition is already full.
+            if len(partitions[smallest_idx]) < partition_target_sizes[smallest_idx]:
+                # This partition is not full, so we can assign the item.
+                partitions[smallest_idx].append(original_idx)
+                new_sum = smallest_sum + length
+                
+                # If the partition is still not full after adding, push it back.
+                if len(partitions[smallest_idx]) < partition_target_sizes[smallest_idx]:
+                    heapq.heappush(partition_heap, (new_sum, smallest_idx))
+                break
+    
+    return partitions
 
 
 @ray.remote
@@ -180,10 +248,28 @@ class DataCoordinator:
         async with self.lock:
             self._sample_queue.extend(zip(sample_infos, sample_refs))
 
-    async def get_batch(self, batch_size: int, filter_plugin: Optional[Callable[[SampleInfo], bool]] = None) -> List[ray.ObjectRef]:
-        """
-        Called by a Trainer to get a batch of sample ObjectRefs.
-        Supports an optional filter plugin to implement custom sampling logic.
+    async def get_batch(
+        self, 
+        batch_size: int, 
+        filter_plugin: Optional[Callable[[SampleInfo], bool]] = None,
+        balance_partitions: Optional[int] = None
+    ) -> List[ray.ObjectRef]:
+        """Called by a Trainer to get a batch of sample ObjectRefs.
+        
+        Supports an optional filter plugin to implement custom sampling logic, and an
+        optional length balancing feature.
+        
+        Args:
+            batch_size: The requested batch size.
+            filter_plugin: An optional filter function for custom sampling logic.
+            balance_partitions: If specified, the returned samples will be optimized
+                              for even distribution among the given number of workers,
+                              balancing the sum of sequence lengths for each worker.
+                              Defaults to None (no length balancing).
+        
+        Returns:
+            A list of sample ObjectRefs. If length balancing is enabled, the order
+            of samples will be optimized.
         """
         async with self.lock:
             # No filter plugin, use efficient FIFO
@@ -193,10 +279,17 @@ class DataCoordinator:
                     return []
                 
                 # Efficient O(batch_size) implementation using deque's O(1) popleft
-                batch_refs = []
+                batch_items = []
                 for _ in range(batch_size):
-                    _, sample_ref = self._sample_queue.popleft()
-                    batch_refs.append(sample_ref)
+                    item = self._sample_queue.popleft()
+                    batch_items.append(item)
+                
+                # Apply length balancing if requested
+                if balance_partitions and balance_partitions > 1:
+                    batch_refs = self._apply_length_balancing(batch_items, balance_partitions)
+                else:
+                    batch_refs = [item[1] for item in batch_items]
+                
                 return batch_refs
 
             # With filter plugin, use O(N) filtering and reconstruction
@@ -211,14 +304,65 @@ class DataCoordinator:
                 
                 # 3. Extract a batch from the filtered list (FIFO)
                 batch_items_to_return = potential_items[:batch_size]
-                batch_refs = [item[1] for item in batch_items_to_return]
 
                 # 4. Efficiently remove the selected items from the original queue
                 # Use ObjectRef (guaranteed unique and hashable) to identify items for removal
                 refs_to_remove = {item[1] for item in batch_items_to_return}
                 self._sample_queue = deque(item for item in self._sample_queue if item[1] not in refs_to_remove)
                 
+                # Apply length balancing if requested
+                if balance_partitions and balance_partitions > 1:
+                    batch_refs = self._apply_length_balancing(batch_items_to_return, balance_partitions)
+                else:
+                    batch_refs = [item[1] for item in batch_items_to_return]
+                
                 return batch_refs
+    
+    def _apply_length_balancing(
+        self, 
+        batch_items: List[Tuple[SampleInfo, ray.ObjectRef]], 
+        k_partitions: int
+    ) -> List[ray.ObjectRef]:
+        """Applies the length balancing algorithm to reorder samples.
+        
+        Uses the LPT (Longest Processing Time) algorithm to reorder samples so that
+        if they are evenly distributed among k_partitions workers, the sum of
+        sample lengths for each worker is as balanced as possible.
+        
+        Args:
+            batch_items: A list of (SampleInfo, ObjectRef) tuples.
+            k_partitions: The number of partitions (typically the DP size).
+            
+        Returns:
+            A reordered list of ObjectRefs.
+        """
+        # Extract the length of each sample.
+        # Use sum_tokens as the length metric (includes prompt + response).
+        seqlen_list = [item[0].sum_tokens for item in batch_items]
+        
+        try:
+            # Use the LPT algorithm to calculate the optimal partitions.
+            partitions = get_seqlen_balanced_partitions_constrained_lpt(seqlen_list, k_partitions)
+            
+            # Reorder the samples based on the partitioning result.
+            # Concatenate the partitions in order: [all samples from partition_0, all from partition_1, ...]
+            reordered_refs = []
+            for partition in partitions:
+                for original_idx in partition:
+                    reordered_refs.append(batch_items[original_idx][1])
+            
+            loguru.logger.debug(
+                f"Applied length balancing: {len(batch_items)} samples reordered into {k_partitions} partitions"
+            )
+            
+            return reordered_refs
+            
+        except Exception as e:
+            loguru.logger.warning(
+                f"Failed to apply length balancing: {e}. Falling back to original order."
+            )
+            # If length balancing fails, return the original order.
+            return [item[1] for item in batch_items]
 
     async def get_all_by_filter(self, filter_plugin: Callable[[SampleInfo], bool]) -> List[ray.ObjectRef]:
         """
