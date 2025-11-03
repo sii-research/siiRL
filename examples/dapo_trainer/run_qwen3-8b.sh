@@ -5,15 +5,15 @@
 # ===================================================================================
 
 # --- Experiment and Model Definition ---
-export DATASET=dapo-math-17k
+export DATASET=DAPO-Math-17k
 export ALG=grpo  # DAPO uses GRPO (Group Relative Policy Optimization) as the base algorithm
-export MODEL_NAME=qwen2.5-7b
+export MODEL_NAME=qwen3-8b
 
 # --- Path Definitions ---
 export HOME={your_home_path}
-export TRAIN_DATA_PATH=$HOME/data/datasets/DAPO-Math-17k/dapo-math-17k.parquet
+export TRAIN_DATA_PATH=$HOME/data/datasets/$DATASET/dapo-math-17k.parquet
 export TEST_DATA_PATH=$HOME/data/datasets/$DATASET/test.parquet
-export MODEL_PATH=$HOME/data/models/Qwen2.5-7B-Instruct
+export MODEL_PATH=$HOME/data/models/Qwen3-8B
 
 # Base output paths
 export BASE_CKPT_PATH=ckpts
@@ -26,7 +26,7 @@ export INFER_MICRO_BATCH_SIZE=8
 export TRAIN_MICRO_BATCH_SIZE=8
 export OFFLOAD=False
 export MAX_PROMPT_LENGTH=2048
-export MAX_RESPONSE_LENGTH=4096
+export MAX_RESPONSE_LENGTH=8192
 export ROLLOUT_GPU_MEMORY_UTILIZATION=0.7
 export ROLLOUT_TP=2
 export ROLLOUT_N=8

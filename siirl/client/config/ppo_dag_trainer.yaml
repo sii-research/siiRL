@@ -391,7 +391,7 @@ algorithm:
   lam: 1.0
   adv_estimator: gae
   norm_adv_by_std_in_grpo: True
-  algorithm_name: ppo
+  workflow_type: default
   weight_factor_in_cpgd: STD_weight # for CPGD, ["STD_weight", "clip_filter_like_weight", "naive"]
   use_kl_in_reward: False
   share_reward_in_agent: True
