@@ -1032,7 +1032,7 @@ class DAGWorker(Worker):
                 with timer(self.enable_perf, f"put_samples_to_coordinator_{key}", timing_raw):
                     sample_infos = [
                         SampleInfo(
-                            sum_tokens=getattr(sample, 'sum_tokens', len(sample.input_ids)),
+                            sum_tokens=getattr(sample, 'sum_tokens', int(sample.attention_mask.sum())),
                             prompt_length=getattr(sample, 'prompt_length', 0),
                             response_length=getattr(sample, 'response_length', 0),
                             uid=getattr(sample, 'uid', uuid.uuid4().int),
