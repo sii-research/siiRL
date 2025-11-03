@@ -280,7 +280,7 @@ class DAGWorker(Worker):
                     # --- 3. Get Input Data ---
                     if cur_node.node_id != entry_node_id:
                         with timer(self.enable_perf, "get_data_from_buffer", timing_raw):
-                            batch = self.get_data_from_buffers(key=cur_node.node_id, timing_raw=timing_raw)
+                            batch = self.get_data_from_buffers(key=cur_node.node_id, cur_dp_size=cur_dp_size, cur_dp_rank=cur_dp_rank, timing_raw=timing_raw)
                             if batch is None:
                                 logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
                                 return None 
@@ -1028,25 +1028,42 @@ class DAGWorker(Worker):
                 if not samples:
                     logger.warning(f"Rank {self._rank}: DataProto for key '{key}' converted to 0 samples. Nothing to put.")
                     return
-                loop = asyncio.get_event_loop()
-                put_futures = []
 
                 with timer(self.enable_perf, f"put_samples_to_coordinator_{key}", timing_raw):
-                    for sample in samples:
-                        # may need modify
-                        sample_info = SampleInfo(
-                            sum_tokens=getattr(sample, 'sum_tokens', len(sample.input_ids)),
+                    sample_infos = [
+                        SampleInfo(
+                            sum_tokens=getattr(sample, 'sum_tokens', int(sample.attention_mask.sum())),
                             prompt_length=getattr(sample, 'prompt_length', 0),
                             response_length=getattr(sample, 'response_length', 0),
                             uid=getattr(sample, 'uid', uuid.uuid4().int),
-                            dict_info={'key': key} # Tag the sample with the key
-                        )
-                        sample_ref = ray.put(sample)
-                        put_futures.append(self.data_coordinator.put.remote(sample_info, sample_ref))
-
-                    if put_futures:
-                        loop.run_until_complete(asyncio.gather(*put_futures))
-                        logger.debug(f"Rank {self._rank}: Successfully put {len(samples)} samples for key '{key}' into DataCoordinator.")
+                            dict_info={
+                                'key': key,
+                                'source_dp_size': source_dp_size  # Store source DP size
+                            }
+                        ) for sample in samples
+                    ]
+                    
+                    # Although ray.put is called multiple times, it is more efficient than remote actor calls.
+                    # This is the main source of the remaining overhead, but it is necessary
+                    # to maintain sample-level traceability in the DataCoordinator.
+                    with timer(self.enable_perf, f"ray_put_samples_{key}", timing_raw):
+                        sample_refs = [ray.put(sample) for sample in samples]
+                    
+                    try:
+                        loop = asyncio.get_event_loop()
+                    except RuntimeError:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                    
+                    # Get the current worker's node ID to pass to the DataCoordinator
+                    # This is necessary because when the DataCoordinator receives a remote call,
+                    # ray.get_runtime_context().get_node_id() returns the DataCoordinator's node_id,
+                    # not the caller's node_id
+                    caller_node_id = ray.get_runtime_context().get_node_id()
+                    
+                    put_future = self.data_coordinator.put_batch.remote(sample_infos, sample_refs, caller_node_id)
+                    loop.run_until_complete(put_future)
+                    logger.debug(f"Rank {self._rank}: Successfully put {len(samples)} samples for key '{key}' into DataCoordinator from node {caller_node_id[:16]}...")
 
         except Exception as e:
             logger.error(f"Rank {self._rank}: Unexpected error in put_data_to_buffers for key '{key}': {e}", exc_info=True)
@@ -1055,11 +1072,19 @@ class DAGWorker(Worker):
     def get_data_from_buffers(
         self,
         key: str,
+        cur_dp_size: int,
+        cur_dp_rank: int,
         timing_raw: Dict[str, float]
     ) -> Optional[DataProto]:
         """
         Gets data from the DataCoordinator by filtering for a specific key,
         then collates the resulting Samples back into a single DataProto.
+        
+        Args:
+            key: The key to filter samples
+            cur_dp_size: Current node's DP size
+            cur_dp_rank: Current worker's DP rank
+            timing_raw: Timing dict for performance tracking
         """
         try:
             logger.debug(f"Rank {self._rank}: Fetching data from DataCoordinator for key '{key}'.")
@@ -1077,8 +1102,37 @@ class DAGWorker(Worker):
                 asyncio.set_event_loop(loop)
 
             with timer(self.enable_perf, f"get_samples_from_coordinator_{key}", timing_raw):
-                # Use the new get_all_by_filter method
-                sample_refs = loop.run_until_complete(self.data_coordinator.get_batch.remote(self.config.data.train_batch_size))
+                # First, peek at source_dp_size to determine appropriate batch size
+                source_dp_size_info = loop.run_until_complete(
+                    self.data_coordinator.peek_source_dp_size.remote(key_filter)
+                )
+                
+                if source_dp_size_info is None:
+                    logger.warning(f"Rank {self._rank}: No samples found for key '{key}' in DataCoordinator")
+                    return None
+                
+                source_dp_size = source_dp_size_info
+                
+                try:
+                    rollout_n = self.config.actor_rollout_ref.rollout.n if hasattr(self.config, 'actor_rollout_ref') else 1
+                except (AttributeError, KeyError):
+                    rollout_n = 1
+                
+                if rollout_n is None or rollout_n < 1:
+                    rollout_n = 1
+                
+                adjusted_batch_size = int(self.config.data.train_batch_size * rollout_n / cur_dp_size)
+                
+                
+                # Use filter_plugin to get only samples with matching key
+                # Use balance_partitions to optimize sample distribution by length
+                sample_refs = loop.run_until_complete(
+                    self.data_coordinator.get_batch.remote(
+                        adjusted_batch_size,
+                        filter_plugin=key_filter,
+                        balance_partitions=cur_dp_size
+                    )
+                )
 
             if not sample_refs:
                 logger.warning(f"Rank {self._rank}: Found no samples in DataCoordinator for key '{key}'.")
