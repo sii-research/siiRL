@@ -1113,10 +1113,16 @@ class DAGWorker(Worker):
                 
                 source_dp_size = source_dp_size_info
                 
-                # Adjust batch size based on DP size ratio
-                # If source_dp_size < cur_dp_size, each dest worker gets fewer samples
-                # If source_dp_size > cur_dp_size, each dest worker gets more samples
-                adjusted_batch_size = int(self.config.data.train_batch_size * source_dp_size / cur_dp_size)
+                try:
+                    rollout_n = self.config.actor_rollout_ref.rollout.n if hasattr(self.config, 'actor_rollout_ref') else 1
+                except (AttributeError, KeyError):
+                    rollout_n = 1
+                
+                if rollout_n is None or rollout_n < 1:
+                    rollout_n = 1
+                
+                adjusted_batch_size = int(self.config.data.train_batch_size * rollout_n / cur_dp_size)
+                
                 
                 # Use filter_plugin to get only samples with matching key
                 # Use balance_partitions to optimize sample distribution by length
