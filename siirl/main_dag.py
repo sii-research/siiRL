@@ -26,7 +26,7 @@ from siirl.params import SiiRLArguments, log_dict_formatted, parse_config
 from siirl.execution.dag import TaskGraph
 from siirl.execution.dag.builtin_pipelines import grpo_pipeline, ppo_pipeline, dapo_pipeline
 from siirl.data_coordinator.data_buffer import init_data_coordinator
-
+from siirl.execution.metric_worker.metric_worker import MetricWorker
 
 
 # --- Constants ---
@@ -184,6 +184,9 @@ class MainRunner:
         for group_name in inference_groups:
             inference_process_group.append(process_group_manager.process_group_spec[group_name])
         os.environ["DGA_PROCESS_GROUP"] = str(inference_process_group)
+        
+        # 5. Create Metric Worker
+        metric_worker_handle = MetricWorker.remote()
         # 6. Initialize the main trainer
         logger.info("Initializing RayTrainer...")
         trainer = RayTrainer(
@@ -192,6 +195,7 @@ class MainRunner:
             rank_taskgraph_mapping=rank_taskgraph_mapping,
             unique_graphs_map=unique_graphs_map,
             data_coordinator_handle=data_coordinator_handle,
+            metric_worker_handle=metric_worker_handle,
             device_name=siirl_args.trainer.device,
         )
 

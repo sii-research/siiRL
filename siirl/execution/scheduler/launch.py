@@ -39,7 +39,7 @@ class RayTrainer:
     4.  Starting the training process and monitoring its execution until completion or failure.
     """
 
-    def __init__(self, config: SiiRLArguments, process_group_manager: ProcessGroupManager, rank_taskgraph_mapping: Dict[int, "TaskGraph"], unique_graphs_map: Dict[str, "TaskGraph"], data_coordinator_handle: "ray.actor.ActorHandle", device_name="cuda"):
+    def __init__(self, config: SiiRLArguments, process_group_manager: ProcessGroupManager, rank_taskgraph_mapping: Dict[int, "TaskGraph"], unique_graphs_map: Dict[str, "TaskGraph"], data_coordinator_handle: "ray.actor.ActorHandle", metric_worker_handle: "ray.actor.ActorHandle", device_name="cuda"):
         """
         Initializes the RayTrainer.
 
@@ -49,12 +49,14 @@ class RayTrainer:
             rank_taskgraph_mapping: A mapping from a global rank to its assigned TaskGraph.
             unique_graphs_map: A mapping of unique graph IDs to their TaskGraph objects.
             data_coordinator_handle: The Ray actor handle for the central DataCoordinator.
+            metric_worker_handle: The Ray actor handle for the Central Metric Worker.
         """
         # Store essential configuration and management objects.
         self.base_config = config
         self.process_group_manager = process_group_manager
         self.rank_taskgraph_mapping = rank_taskgraph_mapping
         self.data_coordinator_handle = data_coordinator_handle
+        self.metric_worker_handle = metric_worker_handle
         self.unique_graphs_map = unique_graphs_map
 
         # Calculate the total number of GPUs available for the training job.
@@ -318,6 +320,7 @@ class RayTrainer:
             process_manager=self.process_group_manager,
             rank_taskgraph_mapping=self.rank_taskgraph_mapping,
             data_coordinator_handle=self.data_coordinator_handle,
+            metric_worker_handle=self.metric_worker_handle,
             device_name=self.device_name,
             **ray_actor_manager_kwargs,
         )

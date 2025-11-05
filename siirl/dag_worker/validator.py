@@ -16,6 +16,7 @@ import time
 import asyncio
 import numpy as np
 import torch.distributed as dist
+from ray.actor import ActorHandle
 from collections import defaultdict
 from typing import Dict, List, Callable, Any, Optional
 from loguru import logger
@@ -63,6 +64,7 @@ class Validator:
         first_rollout_node: Node,
         get_node_dp_info_fn: Callable,
         enable_perf: bool = False,
+        metric_worker: ActorHandle = None
     ):
         """
         Initialize the Validator with explicit dependencies.
@@ -109,6 +111,7 @@ class Validator:
 
         # Validation timing tracking
         self.val_timedict = defaultdict(float)
+        self.metric_worker = metric_worker
 
     def validate(self, global_step: int) -> Dict[str, float]:
         """
@@ -141,7 +144,8 @@ class Validator:
             if self.rank == 0:
                 logger.warning("num_val_batches is 0. Skipping validation.")
             return {}
-
+        reward_extra_infos_dict: dict[str, list] = defaultdict(list)
+        sample_turns = []
         for i in range(self.dataloader.num_val_batches):
             if self.rank == 0:
                 logger.debug(f"Processing validation batch {i + 1}/{self.dataloader.num_val_batches}")
@@ -153,31 +157,27 @@ class Validator:
                 dist.barrier(self.gather_group)
 
             with timer(self.enable_perf, "score_and_package", self.val_timedict):
-                scored_results = self._score_and_package_results(generated_proto)
+                scored_results, reward_extra_infos_dict = self._score_and_package_results(generated_proto, reward_extra_infos_dict)
                 all_scored_results.extend(scored_results)
-
+                if "__num_turns__" in generated_proto:
+                    sample_turns.append(test_batch["__num_turns__"])
+                    
+            
         dump_validation_generations(self.config, global_step, self.rank, all_scored_results)
         dist.barrier(self.gather_group)
 
-        _, _, tp_rank, _, pp_rank, _ = self.get_node_dp_info_fn(self.first_rollout_node)
+        dp_size, _, tp_rank, _, pp_rank, _ = self.get_node_dp_info_fn(self.first_rollout_node)
+        
         # Gather all payloads to rank 0
         with timer(self.enable_perf, "gather_payloads", self.val_timedict):
-            payloads_for_metrics = []
             if tp_rank == 0 and pp_rank == 0:
                 # Only the master rank of the TP group (tp_rank=0) and first PP stage (pp_rank=0) prepares the payload.
-                payloads_for_metrics = [
-                    ValidationPayload(r.input_text, r.score, r.data_source, r.extra_rewards) for r in all_scored_results
-                ]
-            gathered_payloads_on_rank0 = [None] * self.world_size if self.rank == 0 else None
-            dist.gather_object(payloads_for_metrics, gathered_payloads_on_rank0, dst=0, group=self.gather_group)
+                data_source = [r.data_source for r in all_scored_results]
+                input_text = [r.input_text for r in all_scored_results]
+                self.metric_worker.process_local_validation_metrics(data_source, input_text, reward_extra_infos_dict, sample_turns, dp_size)
 
-        # Rank 0 performs the final aggregation and logging
-        if self.rank == 0:
-            flat_payload_list = [p for sublist in gathered_payloads_on_rank0 if sublist for p in sublist]
-            final_metrics = self._aggregate_and_log_validation_metrics(flat_payload_list)
         dist.barrier(self.gather_group)
-
-        return final_metrics if self.rank == 0 else {}
+        return 
 
     def _generate_for_validation(self, batch: TensorDict) -> TensorDict:
         """
@@ -221,7 +221,7 @@ class Validator:
             return output
         return batch
 
-    def _score_and_package_results(self, generated_proto: TensorDict) -> List[ValidationResult]:
+    def _score_and_package_results(self, generated_proto: TensorDict, reward_extra_infos_dict:dict) -> List[ValidationResult]:
         """
         Scores generated sequences and packages them into ValidationResult objects.
 
@@ -271,7 +271,11 @@ class Validator:
                 continue
             extra_rewards = {k: v[i] for k, v in reward_result.get("reward_extra_info", {}).items()}
             packaged_results.append(ValidationResult(input_texts[i], output_texts[i], scores[i].item(), data_sources[i], reward_result["reward_tensor"][i], extra_rewards))
-        return packaged_results
+        reward_extra_infos_dict['reward'].extend(scores.tolist())
+        if "reward_extra_info" in reward_result:
+            for key, lst in reward_result["reward_extra_info"].items():
+                    reward_extra_infos_dict[key].extend(lst)
+        return packaged_results, reward_extra_infos_dict
 
     def _aggregate_and_log_validation_metrics(self, all_payloads: List[ValidationPayload]) -> Dict[str, float]:
         """

@@ -40,7 +40,7 @@ from siirl.dag_worker.dag_utils import (
 )
 from siirl.utils.extras.device import get_device_name, get_device_id
 from siirl.utils.metrics.metric_utils import compute_throughout_metrics, compute_timing_metrics
-
+from loguru import logger
 
 class MetricsCollector:
     """

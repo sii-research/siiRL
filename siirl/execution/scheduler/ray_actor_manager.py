@@ -83,6 +83,7 @@ class RayActorManager(WorkerGroup):
         process_manager: ProcessGroupManager,
         rank_taskgraph_mapping: Dict[int, "TaskGraph"],
         data_coordinator_handle: ActorHandle,
+        metric_worker_handle: ActorHandle,
         bin_pack: bool = True,
         name_prefix: Optional[str] = None,
         ray_wait_register_center_timeout: int = 300,
@@ -98,6 +99,7 @@ class RayActorManager(WorkerGroup):
             process_manager: Manager for the distributed process group.
             rank_taskgraph_mapping: Mapping of worker ranks to their task graphs.
             data_coordinator_handle: Handle to the central DataCoordinator actor.
+            metric_worker_handle: The Ray actor handle for the Central Metric Worker.
             bin_pack: If True, use strict packing strategy for placement groups.
             name_prefix: A custom prefix for actor names. A random one is
                          generated if None.
@@ -119,6 +121,7 @@ class RayActorManager(WorkerGroup):
         self.process_manager = process_manager
         self.rank_taskgraph_mapping = rank_taskgraph_mapping
         self.data_coordinator_handle = data_coordinator_handle
+        self.metric_worker_handle = metric_worker_handle
         self.device_name = device_name
 
         # Prepare the Ray actor class with its initial arguments.
@@ -128,6 +131,7 @@ class RayActorManager(WorkerGroup):
             process_group_manager=self.process_manager,
             taskgraph_mapping=self.rank_taskgraph_mapping,
             data_coordinator=self.data_coordinator_handle,
+            metric_worker=self.metric_worker_handle,
             device_name=self.device_name,
         )
 

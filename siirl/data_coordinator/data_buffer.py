@@ -148,7 +148,7 @@ class DataCoordinator:
         self._put_counter = 0  # Used for round-robin buffer selection
         self.lock = asyncio.Lock()
         loguru.logger.info("Global DataCoordinator initialized.")
-
+        self._cache = []
     def register_buffers(self, buffer_info: Dict[str, List[ray.actor.ActorHandle]]):
         """
         Called by the initialization logic to register all DataBuffers and their
@@ -273,50 +273,51 @@ class DataCoordinator:
         """
         async with self.lock:
             # No filter plugin, use efficient FIFO
+            if len(self._cache) > 0:
+                res = self._cache.pop()
+                return res
             if not filter_plugin:
                 if len(self._sample_queue) < batch_size:
                     loguru.logger.warning(f"Coordinator queue size ({len(self._sample_queue)}) is less than requested batch size ({batch_size}). Returning empty list.")
                     return []
-                
-                # Efficient O(batch_size) implementation using deque's O(1) popleft
+        
                 batch_items = []
-                for _ in range(batch_size):
+                # Efficient O(batch_size) implementation using deque's O(1) popleft
+                while self._sample_queue:
                     item = self._sample_queue.popleft()
                     batch_items.append(item)
-                
                 # Apply length balancing if requested
                 if balance_partitions and balance_partitions > 1:
                     batch_refs = self._apply_length_balancing(batch_items, balance_partitions)
                 else:
                     batch_refs = [item[1] for item in batch_items]
-                
-                return batch_refs
-
+                self._cache = batch_refs
+                get_refs = self._cache[:batch_size]
+                self._cache = self._cache[batch_size:] if len(self._cache) >= batch_size else None
+                return get_refs
             # With filter plugin, use O(N) filtering and reconstruction
             else:
-                # 1. The filtering process does not consume elements from the queue
-                potential_items = [item for item in self._sample_queue if filter_plugin(item[0])]
                 
+                # 1. The filtering process does not consume elements from the queue
+                potential_items = []
+                while self._sample_queue:
+                    item = self._sample_queue.popleft()
+                    potential_items.append(item)
                 # 2. Check if there are enough samples
-                if len(potential_items) < batch_size:
+                if len(potential_items) < batch_size :
                     loguru.logger.warning(f"After filtering, coordinator has {len(potential_items)} samples, which is less than requested batch size ({batch_size}). Returning empty list.")
                     return []
-                
-                # 3. Extract a batch from the filtered list (FIFO)
-                batch_items_to_return = potential_items[:batch_size]
-
-                # 4. Efficiently remove the selected items from the original queue
-                # Use ObjectRef (guaranteed unique and hashable) to identify items for removal
-                refs_to_remove = {item[1] for item in batch_items_to_return}
-                self._sample_queue = deque(item for item in self._sample_queue if item[1] not in refs_to_remove)
-                
                 # Apply length balancing if requested
                 if balance_partitions and balance_partitions > 1:
-                    batch_refs = self._apply_length_balancing(batch_items_to_return, balance_partitions)
+                    batch_refs = self._apply_length_balancing(potential_items, balance_partitions)
                 else:
-                    batch_refs = [item[1] for item in batch_items_to_return]
+                    batch_refs = [item[1] for item in potential_items]
+                for dp_rank in range(balance_partitions):
+                    self._cache.append(batch_refs[dp_rank * batch_size: (dp_rank + 1) * batch_size])
+                res = self._cache.pop()
                 
-                return batch_refs
+                return res
+
     
     def _apply_length_balancing(
         self, 

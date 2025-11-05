@@ -26,7 +26,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type
 from torch.distributed import ProcessGroup
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData
-
+import time
+from siirl.execution.metric_worker.metric_worker import MetricClient
 from siirl.models.loader import TokenizerModule, load_tokenizer
 from siirl.params import SiiRLArguments
 from siirl.engine.base_worker import Worker
@@ -86,6 +87,7 @@ class DAGWorker(Worker):
         process_group_manager: ProcessGroupManager,
         taskgraph_mapping: Dict[int, TaskGraph],
         data_coordinator: "ray.actor.ActorHandle",
+        metric_worker: "ray.actor.ActorHandle",
         device_name="cuda",
     ):
         super().__init__()
@@ -109,6 +111,7 @@ class DAGWorker(Worker):
         self._rank: int = -1
         self.taskgraph: Optional[TaskGraph] = None
         self.internal_data_cache: Dict[str, Any] = {}
+        self.sample_ref_cache: list = []
         self.agent_critic_worker: Any
         # Finish flag
         self.taskgraph_execute_finished = False
@@ -124,6 +127,9 @@ class DAGWorker(Worker):
 
         # multi agent
         self._multi_agent = False
+        
+        # metirc_worker
+        self.metric_worker = MetricClient(metric_worker=metric_worker)
         try:
             self._initialize_worker()
         except (ValueError, TypeError, KeyError, AttributeError, NotImplementedError) as e:
@@ -143,8 +149,11 @@ class DAGWorker(Worker):
         logger.success(f"Rank {self._rank}: All components initialized. Starting training loop from step {self.global_steps + 1}.")
 
         if self.config.trainer.val_before_train:
-            val_metrics = self.validator.validate(global_step=self.global_steps)
-            if self._rank == 0 and val_metrics and self.logger:
+            self.validator.validate(global_step=self.global_steps)
+            self.metric_worker.wait_submit()
+            dist.barrier(self._gather_group)
+            if self._rank == 0 and self.logger:
+                val_metrics = self.metric_worker.wait_final_res() 
                 logger.info(f"Initial validation metrics:\n{pformat(val_metrics)}")
                 self.logger.log(data=val_metrics, step=self.global_steps)
 
@@ -206,30 +215,30 @@ class DAGWorker(Worker):
 
                 self.global_steps += 1
 
-                if ordered_metrics is not None:
-                    is_last_step = self.global_steps >= self.total_training_steps
+                is_last_step = self.global_steps >= self.total_training_steps
 
-                    if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
-                        self.checkpoint_manager.save_checkpoint(self.global_steps)
+                if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
+                    self.checkpoint_manager.save_checkpoint(self.global_steps)
 
-                    metrics_dict = dict(ordered_metrics)
-                    if self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
-                        val_metrics = self.validator.validate(global_step=self.global_steps)
-                        if self._rank == 0 and val_metrics:
-                            metrics_dict.update(val_metrics)
-                        if is_last_step:
-                            last_val_metrics = val_metrics
-
-                    if self.enable_perf:
-                        aggregate_and_write_performance_metrics(self._gather_group, self._rank, self.global_steps, self.config, metrics_dict)
-
-                    ordered_metric_dict = format_metrics_by_group(metrics_dict, DAGConstants.METRIC_GROUP_ORDER)
-                    log_core_performance_metrics(self._rank, self.enable_perf, ordered_metric_dict, self.global_steps)
+                if self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):
+                    self.validator.validate(global_step=self.global_steps)
+                    self.metric_worker.wait_submit()
+                    dist.barrier(self._gather_group)
                     if self._rank == 0:
-                        if self.logger:
-                            self.logger.log(data=ordered_metric_dict, step=self.global_steps)
-                        else:
-                            log_metrics_to_console(self._rank, ordered_metric_dict, self.global_steps)
+                        val_metric = self.metric_worker.wait_final_res()
+                        ordered_metrics.update(val_metric)
+                        if is_last_step:
+                            last_val_metrics = val_metric
+
+                if self.enable_perf:
+                    aggregate_and_write_performance_metrics(self._gather_group, self._rank, self.global_steps, self.config, ordered_metrics)
+                ordered_metric_dict = format_metrics_by_group(ordered_metrics, DAGConstants.METRIC_GROUP_ORDER)
+                log_core_performance_metrics(self._rank, self.enable_perf, ordered_metric_dict, self.global_steps)
+                if self._rank == 0:
+                    if self.logger:
+                        self.logger.log(data=ordered_metric_dict, step=self.global_steps)
+                    else:
+                        log_metrics_to_console(self._rank, ordered_metric_dict, self.global_steps)
 
                 if self.progress_bar and not (epoch == start_epoch and batch_idx < batches_to_skip):
                     self.progress_bar.update(1)
@@ -246,6 +255,9 @@ class DAGWorker(Worker):
         # Reset the distributed (Ray) buffers for all keys that were used in this step.
         with timer(self.enable_perf, "reset_data_buffer", timing_raw):
             self.reset_data_buffer(list(visited_nodes))
+            for ref in self.sample_ref_cache:
+                ray.internal.free(ref)
+            self.sample_ref_cache = []
         # Clear the local, in-process cache for the next step.
         with timer(self.enable_perf, "reset_intern_data_buffer", timing_raw):
             self.internal_data_cache.clear()
@@ -312,9 +324,15 @@ class DAGWorker(Worker):
                                 else:
                                     node_output = NodeOutput(batch=batch)
                             else:
+                                # import time
+                                # start = time.perf_counter()
                                 node_output = cur_node.run(batch=batch,
                                                            config=self.config,
                                                            **node_kwargs)
+                                # end = time.perf_counter()
+                                # print(f"[hujr] rank_{torch.distributed.get_rank()} rollout time {(end - start):.3f}")
+                                # torch.distributed.barrier()
+                                # assert False
                         else:
                             logger.warning(f"Node {cur_node.node_id} has no executable. Passing data through.")
                             node_output = NodeOutput(batch=batch)
@@ -339,6 +357,8 @@ class DAGWorker(Worker):
 
                     # --- 5. Process Output & Get next node ---
                     with timer(self.enable_perf, "graph_output_handling", timing_raw):
+                        if node_output.metrics and cur_tp_rank == 0 and cur_pp_rank == 0:
+                            self.metric_worker.submit_metirc(node_output.metrics, cur_dp_size)
                         if self._rank == 0 and node_output.metrics:
                             # if self._multi_agent:
                             #     node_output.metrics = add_prefix_to_metrics(node_output.metrics, cur_node)
@@ -373,14 +393,20 @@ class DAGWorker(Worker):
             # --- 6. Final Metrics Collection ---
             self._cleanup_step_buffers(visited_nodes, timing_raw)
 
-        if self._multi_agent:
-            ordered_metrics = self.metrics_collector.collect_multi_agent_final_metrics(batch, ordered_metrics, timing_raw)
-        else:
-            final_metrics = self.metrics_collector.collect_final_metrics(batch, timing_raw)
-            if final_metrics:
-                ordered_metrics.extend(sorted(final_metrics.items()))
+        ordered_metrics = {}
+        if cur_tp_rank == 0 and cur_pp_rank == 0:
+            self.metric_worker.compute_local_data_metric(batch, cur_dp_size)
+            self.metric_worker.compute_local_throughout_metrics(batch, timing_raw, 1, cur_dp_size)
+            if self._rank == 0:
+                # only use rank0 time metrics
+                self.metric_worker.compute_local_timing_metrics(batch, timing_raw, 1)  
+        self.metric_worker.wait_submit()
+        dist.barrier(self._gather_group)
+        if self._rank == 0:
+            metrics = self.metric_worker.wait_final_res()
+            ordered_metrics = dict(sorted(metrics.items()))
+            ordered_metrics.update({"training/global_step": self.global_steps + 1, "training/epoch": epoch + 1})
 
-        ordered_metrics.extend([("training/global_step", self.global_steps + 1), ("training/epoch", epoch + 1)])
         return ordered_metrics
 
 # ==========================================================================================
@@ -393,7 +419,7 @@ class DAGWorker(Worker):
         gen_output = agent_group[NodeRole.ROLLOUT].generate_sequences(batch)
         if "response_mask" not in batch:
             gen_output["response_mask"] = compute_response_mask(gen_output)
-        return NodeOutput(batch=gen_output, metrics=gen_output.pop("metrics", {})[0].data)
+        return NodeOutput(batch=gen_output, metrics=gen_output["metrics"])
 
     @DistProfiler.annotate(role="generate")
     def generate_async_mode(self, batch: TensorDict) -> NodeOutput:
@@ -808,12 +834,11 @@ class DAGWorker(Worker):
         if "entropys" in processed_data:
             entropy = agg_loss(processed_data["entropys"], processed_data["response_mask"].to("cpu"), config.actor_rollout_ref.actor.loss_agg_mode)
             local_metrics["actor/entropy_loss"] = entropy.item()
-        metrics = reduce_and_broadcast_metrics(local_metrics, process_group)
 
         processed_data.pop("metrics", None)
         processed_data.pop("entropys", None)
 
-        return NodeOutput(batch=processed_data, metrics=metrics)
+        return NodeOutput(batch=processed_data, metrics=local_metrics)
 
     @DistProfiler.annotate(role="compute_ref_log_prob")
     def compute_ref_log_prob(self, config, batch: TensorDict, **kwargs) -> NodeOutput:
@@ -905,8 +930,7 @@ class DAGWorker(Worker):
         agent_group = kwargs.pop("agent_group")
         process_group = kwargs.pop("process_group")
         processed_data = agent_group[NodeRole.CRITIC].update_critic(batch)
-        metrics = reduce_and_broadcast_metrics(processed_data["metrics"], process_group)
-        return NodeOutput(batch=processed_data, metrics=metrics)
+        return NodeOutput(batch=processed_data, metrics=processed_data["metrics"])
 
     @DistProfiler.annotate(role="train_actor")
     def train_actor(self, config, batch: TensorDict, **kwargs) -> NodeOutput:
@@ -918,8 +942,7 @@ class DAGWorker(Worker):
             return NodeOutput(batch=batch)  # Skip actor update during critic warmup
         batch["multi_turn"] = NonTensorData(self.config.actor_rollout_ref.rollout.multi_turn.enable)
         processed_data = agent_group[NodeRole.ACTOR].update_actor(batch)
-        metrics = reduce_and_broadcast_metrics(processed_data["metrics"], process_group)
-        return NodeOutput(batch=processed_data, metrics=metrics)
+        return NodeOutput(batch=processed_data, metrics=processed_data["metrics"])
 
 
 # ==========================================================================================
@@ -1285,25 +1308,26 @@ class DAGWorker(Worker):
             first_rollout_node=self.first_rollout_node,
             get_node_dp_info_fn=self._get_node_dp_info,
             enable_perf=self.enable_perf,
+            metric_worker=self.metric_worker
         )
         logger.success("Validator initialized.")
 
     def _init_metrics_collector(self):
         """Initializes metrics collector for training metrics aggregation."""
         logger.info("Initializing metrics collector...")
-        from siirl.dag_worker.metrics_collector import MetricsCollector
-
-        self.metrics_collector = MetricsCollector(
-            rank=self._rank,
-            world_size=self.world_size,
-            gather_group=self._gather_group,
-            taskgraph=self.taskgraph,
-            first_rollout_node=self.first_rollout_node,
-            get_node_dp_info_fn=self._get_node_dp_info,
-            multi_agent=self._multi_agent,
-            enable_perf=self.enable_perf,
-        )
-        logger.success("Metrics collector initialized.")
+        # from siirl.dag_worker.metrics_collector import MetricsCollector
+        # self.metric_worker.init()
+        # self.metrics_collector = MetricsCollector(
+        #     rank=self._rank,
+        #     world_size=self.world_size,
+        #     gather_group=self._gather_group,
+        #     taskgraph=self.taskgraph,
+        #     first_rollout_node=self.first_rollout_node,
+        #     get_node_dp_info_fn=self._get_node_dp_info,
+        #     multi_agent=self._multi_agent,
+        #     enable_perf=self.enable_perf,
+        # )
+        # logger.success("Metrics collector initialized.")
 
     def _init_checkpoint_manager(self):
         """Initializes checkpoint manager for saving/loading training state."""
@@ -1392,7 +1416,7 @@ class DAGWorker(Worker):
                     # to maintain sample-level traceability in the DataCoordinator.
                     with timer(self.enable_perf, f"ray_put_samples_{key}", timing_raw):
                         sample_refs = [ray.put(sample) for sample in samples]
-                    
+                    self.sample_ref_cache.extend(sample_refs)
                     try:
                         loop = asyncio.get_event_loop()
                     except RuntimeError:
@@ -1445,17 +1469,6 @@ class DAGWorker(Worker):
                 asyncio.set_event_loop(loop)
 
             with timer(self.enable_perf, f"get_samples_from_coordinator_{key}", timing_raw):
-                # First, peek at source_dp_size to determine appropriate batch size
-                source_dp_size_info = loop.run_until_complete(
-                    self.data_coordinator.peek_source_dp_size.remote(key_filter)
-                )
-                
-                if source_dp_size_info is None:
-                    logger.warning(f"Rank {self._rank}: ❌ No samples found for key '{key}' in DataCoordinator (peek returned None)")
-                    return None
-                
-                source_dp_size = source_dp_size_info
-                
                 try:
                     rollout_n = self.config.actor_rollout_ref.rollout.n if hasattr(self.config, 'actor_rollout_ref') else 1
                 except (AttributeError, KeyError):
@@ -1468,7 +1481,7 @@ class DAGWorker(Worker):
                 
                 logger.info(
                     f"Rank {self._rank}: Requesting from DataCoordinator: "
-                    f"key='{key}', source_dp={source_dp_size}, cur_dp={cur_dp_size}, "
+                    f"key='{key}', cur_dp={cur_dp_size}, "
                     f"adjusted_batch_size={adjusted_batch_size} (train_bs={self.config.data.train_batch_size} * rollout_n={rollout_n} / cur_dp={cur_dp_size})"
                 )
                 
