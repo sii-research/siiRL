@@ -1,4 +1,4 @@
-# Copyright 2024 PRIME team and/or its affiliates
+# Copyright 2025, Shanghai Innovation Institute. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .batch import BatchRewardManager
-from .dapo import DAPORewardManager
-from .naive import NaiveRewardManager
-from .prime import PrimeRewardManager
-from .parallel import ParallelRewardManager
-from .embodied import EmbodiedRewardManager
+"""Embodied AI environment adapters."""
 
-__all__ = ["BatchRewardManager", "DAPORewardManager", "NaiveRewardManager", "PrimeRewardManager", "ParallelRewardManager", "EmbodiedRewardManager"]
+from .base import BaseVLAEnvironment as BaseEmbodiedEnvironment
+from .venv import SubprocVectorEnv
+from .adapters.libero import LIBEROAdapter
+
+__all__ = [
+    "BaseEmbodiedEnvironment",
+    "LIBEROAdapter",
+    "SubprocVectorEnv",
+]

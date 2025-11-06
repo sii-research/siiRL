@@ -1,4 +1,4 @@
-# Copyright 2024 PRIME team and/or its affiliates
+# Copyright 2025, Shanghai Innovation Institute. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,11 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .batch import BatchRewardManager
-from .dapo import DAPORewardManager
-from .naive import NaiveRewardManager
-from .prime import PrimeRewardManager
-from .parallel import ParallelRewardManager
-from .embodied import EmbodiedRewardManager
+from .sampling import embodied_local_rank_sampling
 
-__all__ = ["BatchRewardManager", "DAPORewardManager", "NaiveRewardManager", "PrimeRewardManager", "ParallelRewardManager", "EmbodiedRewardManager"]
+__all__ = ["embodied_local_rank_sampling"]
+

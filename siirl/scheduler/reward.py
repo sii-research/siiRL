@@ -30,12 +30,14 @@ from loguru import logger
 from siirl import DataProto
 from siirl.utils.params import SiiRLArguments
 from siirl.utils.reward_score import default_compute_score
+from siirl.utils.reward_score.embodied import compute_embodied_reward
 from siirl.workers.reward_manager import (
     DAPORewardManager,
     BatchRewardManager,
     NaiveRewardManager,
     PrimeRewardManager,
-    ParallelRewardManager
+    ParallelRewardManager,
+    EmbodiedRewardManager
 )
 
 Tokenizer = Any
@@ -125,13 +127,25 @@ def create_reward_manager(
     Raises:
         NotImplementedError: If the specified `reward_manager_name` is unknown.
     """
+    
     # Map manager names to their respective classes for clean, extensible selection.
     manager_map = {
         "naive": NaiveRewardManager,
         "prime": PrimeRewardManager,
         "batch": BatchRewardManager,
         "dapo": DAPORewardManager,
-        "parallel": ParallelRewardManager
+        "parallel": ParallelRewardManager,
+        "embodied": EmbodiedRewardManager
+    }
+
+    # Map each manager to its default compute_score function
+    default_compute_score_map = {
+        "naive": default_compute_score,
+        "prime": default_compute_score,
+        "batch": default_compute_score,
+        "dapo": default_compute_score,
+        "parallel": default_compute_score,
+        "embodied": compute_embodied_reward,  # Embodied uses specialized function
     }
     reward_manager_name = config.reward_model.reward_manager
     reward_manager_cls = manager_map.get(reward_manager_name)
@@ -160,7 +174,10 @@ def create_reward_manager(
             )
         else:
             # Fallback to the default scoring function.
-            compute_score_fn = default_compute_score
+            compute_score_fn = default_compute_score_map.get(
+                reward_manager_name,
+                default_compute_score  # Fallback for any unmapped managers
+            )
 
     return reward_manager_cls(
         tokenizer=tokenizer,

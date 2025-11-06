@@ -15,6 +15,7 @@
 
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Literal, Optional
+from .embodied_args import EmbodiedArguments, EmbodiedSamplingConfig
 
 
 @dataclass
@@ -222,6 +223,7 @@ class ModelArguments(ProcessorArguments):
     )
     use_shm: bool = field(default=False)
     enable_activation_offload: bool = field(default=False, metadata={"help": "enable activation offload"})
+    model_type: str = field(default="llm", metadata={"help": "model type"})
 
     def __post_init__(self):
         if self.path is None:
@@ -518,6 +520,7 @@ class ActorRolloutRefArguments:
     actor: ActorArguments = field(default_factory=ActorArguments, metadata={"help": "Actor configuration"})
     ref: RefArguments = field(default_factory=RefArguments, metadata={"help": "Reference model settings"})
     rollout: RolloutArguments = field(default_factory=RolloutArguments, metadata={"help": "Rollout parameters"})
+    embodied: EmbodiedArguments = field(default_factory=EmbodiedArguments, metadata={"help": "Embodied AI settings"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -665,6 +668,9 @@ class AlgorithmArguments:
     )
     use_pf_ppo: bool = field(default=False, metadata={"help": "Whether to enable preference feedback PPO."})
     pf_ppo: dict[str, Any] = field(default_factory=dict, metadata={"help": " Preference feedback PPO settings."})
+    embodied_sampling: EmbodiedSamplingConfig = field(
+        default_factory=EmbodiedSamplingConfig, metadata={"help": "Embodied dynamic sampling configuration"}
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

@@ -36,7 +36,6 @@ from torch.distributed.device_mesh import DeviceMesh
 import siirl.utils.model_utils.torch_functional as F
 from siirl import DataProto
 from siirl.models.loader import load_tokenizer
-from siirl.models.transformers.monkey_patch import apply_monkey_patch
 from siirl.workers.base_worker import Worker
 from siirl.scheduler.enums import Role
 from siirl.utils.model_utils.activation_offload import enable_activation_offloading
@@ -247,7 +246,7 @@ class ActorRolloutRefWorker(Worker):
         from torch import optim
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-        from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq
+        from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq, AutoImageProcessor, AutoProcessor
 
         from siirl.utils.model_utils.model import get_generation_config, print_model_size, update_model_config
         from siirl.utils.model_utils.torch_dtypes import PrecisionType
@@ -256,6 +255,38 @@ class ActorRolloutRefWorker(Worker):
 
         log_gpu_memory_usage(f"Before init {role} from HF AutoModel", logger=logger)
         local_path = model_path
+
+        if self.config.model.model_type == "embodied":
+            if self.config.embodied.vla_type == "openvla-oft":
+                from siirl.models.embodied.openvla_oft.configuration_prismatic import OpenVLAConfig
+                from siirl.models.embodied.openvla_oft.modeling_prismatic import OpenVLAForActionPrediction
+                from siirl.models.embodied.openvla_oft.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
+                
+                AutoConfig.register("openvla", OpenVLAConfig)
+                AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
+                AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
+                AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
+                if self.rank == 0:
+                    from siirl.utils.embodied.openvla_utils import update_auto_map , check_model_logic_mismatch
+                    update_auto_map(local_path)
+                    check_model_logic_mismatch(local_path)
+                torch.distributed.barrier()
+            elif self.config.embodied.vla_type == "openvla":
+                from siirl.models.embodied.openvla.configuration_prismatic import OpenVLAConfig
+                from siirl.models.embodied.openvla.modeling_prismatic import OpenVLAForActionPrediction
+                from siirl.models.embodied.openvla.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
+                
+                AutoConfig.register("openvla", OpenVLAConfig)
+                AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
+                AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
+                AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
+                if self.rank == 0:
+                    from siirl.utils.embodied.openvla_utils import update_auto_map , check_model_logic_mismatch
+                    update_auto_map(local_path)
+                    check_model_logic_mismatch(local_path)
+                torch.distributed.barrier()
+            else:
+                raise ValueError(f"Invalid vla type: {self.config.embodied.vla_type}")
 
         torch_dtype = fsdp_config.model_dtype
         if torch_dtype is None:
@@ -298,30 +329,74 @@ class ActorRolloutRefWorker(Worker):
             else:
                 actor_module_class = AutoModelForCausalLM
 
-            actor_module = actor_module_class.from_pretrained(
-                pretrained_model_name_or_path=local_path,
-                torch_dtype=torch_dtype,
-                config=actor_model_config,
-                trust_remote_code=trust_remote_code,
+            is_embodied_model = (
+                type(actor_model_config) in AutoModelForVision2Seq._model_mapping.keys()
+                and hasattr(self.config, 'embodied')
+                and self.config.embodied.embodied_type in ["openvla", "openvla-oft"]
             )
-
-            if type(actor_model_config).__name__ in "configuration_internvl_chat.InternVLChatConfig":
-                from siirl.models.transformers.internvl import IMG_CONTEXT_TOKEN
-
-                actor_module.img_context_token_id = self.tokenizer.convert_tokens_to_ids(IMG_CONTEXT_TOKEN)
+            
+            if is_embodied_model and self.config.embodied.embodied_type == "openvla-oft":
+                # OpenVLA-OFT: No flash_attention_2, requires additional setup
+                logger.info("Loading OpenVLA-OFT model (without flash_attention_2)")
+                actor_module = actor_module_class.from_pretrained(
+                    pretrained_model_name_or_path=local_path,
+                    torch_dtype=torch_dtype,
+                    config=actor_model_config,
+                    trust_remote_code=trust_remote_code,
+                )
+                
+                # Set the number of images in input for multi-camera support
+                if hasattr(actor_module, 'vision_backbone'):
+                    num_images = getattr(self.config.embodied, 'num_images_in_input', 1)
+                    actor_module.vision_backbone.set_num_images_in_input(num_images)
+                    logger.info(f"Set vision_backbone.num_images_in_input = {num_images}")
+                
+                # Load dataset statistics for action normalization
+                dataset_statistics_path = os.path.join(local_path, "dataset_statistics.json")
+                if os.path.isfile(dataset_statistics_path):
+                    with open(dataset_statistics_path, "r") as f:
+                        norm_stats = json.load(f)
+                    actor_module.norm_stats = norm_stats
+                    logger.info(f"Loaded dataset_statistics.json with {len(norm_stats)} task(s)")
+                else:
+                    logger.warning(
+                        "WARNING: No dataset_statistics.json file found for OpenVLA-OFT checkpoint.\n"
+                        "You can ignore this if loading the base VLA checkpoint (not fine-tuned).\n"
+                        "Otherwise, you may encounter errors when calling predict_action() due to missing unnorm_key."
+                    )
+                    
+            elif is_embodied_model and self.config.embodied.vla_type == "openvla":
+                # OpenVLA: Use flash_attention_2 for efficiency
+                logger.info("Loading OpenVLA model (with flash_attention_2)")
+                actor_module = actor_module_class.from_pretrained(
+                    pretrained_model_name_or_path=local_path,
+                    torch_dtype=torch_dtype,
+                    attn_implementation="flash_attention_2",
+                    config=actor_model_config,
+                    trust_remote_code=trust_remote_code,
+                )
+            else:
+                # Default loading for non-VLA models
+                actor_module = actor_module_class.from_pretrained(
+                    pretrained_model_name_or_path=local_path,
+                    torch_dtype=torch_dtype,
+                    config=actor_model_config,
+                    trust_remote_code=trust_remote_code,
+                )
 
             # Apply Liger kernel to the model if use_liger is set to True
             if use_liger:
                 from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
-
                 _apply_liger_kernel_to_instance(model=actor_module)
-
-            apply_monkey_patch(
-                model=actor_module,
-                use_remove_padding=use_remove_padding,
-                ulysses_sp_size=self.ulysses_sequence_parallel_size,
-                use_fused_kernels=use_fused_kernels,
-            )
+            
+            if not is_embodied_model:
+                from siirl.models.transformers.monkey_patch import apply_monkey_patch
+                apply_monkey_patch(
+                    model=actor_module,
+                    use_remove_padding=use_remove_padding,
+                    ulysses_sp_size=self.ulysses_sequence_parallel_size,
+                    use_fused_kernels=use_fused_kernels,
+                )
 
             # some parameters may not in torch_dtype. TODO(zhangchi.usc1992) remove this after we switch to fsdp2
             actor_module.to(torch_dtype)
@@ -334,6 +409,7 @@ class ActorRolloutRefWorker(Worker):
                 # Convert config to regular Python types before creating PEFT model
                 lora_config = {"task_type": TaskType.CAUSAL_LM, "r": self.config.model.lora_rank, "lora_alpha": self.config.model.lora_alpha, "target_modules": convert_to_regular_types(self.config.model.target_modules), "bias": "none"}
                 actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
+                
         torch.distributed.barrier()
 
         if self.rank == 0:
@@ -356,7 +432,7 @@ class ActorRolloutRefWorker(Worker):
 
         auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.wrap_policy, is_lora=self.config.model.lora_rank > 0)
 
-        if self._is_rollout and self.config.rollout.name == "hf":
+        if self._is_rollout and self.config.rollout.name == "hf" and not is_embodied_model:
             # TODO(zhangchi.usc1992, shengguangming) fix me. Current, auto_wrap_policy causes HFRollout to hang in Gemma
             auto_wrap_policy = None
 
@@ -459,11 +535,16 @@ class ActorRolloutRefWorker(Worker):
         # TODO(sgm): support FSDP hybrid shard for larger model
         rollout_name = self.config.rollout.name
         if rollout_name == "hf":
-            from siirl.workers.rollout import HFRollout
-            from siirl.workers.sharding_manager.base import BaseShardingManager
+            if self.config.model.model_type == "embodied":
+                from siirl.workers.rollout.embodied_rollout import EmbodiedHFRollout
+                rollout = EmbodiedHFRollout(module=self.actor_module_fsdp, config=self.config.rollout)
+                rollout_sharding_manager = BaseShardingManager()
+            else: 
+                from siirl.workers.rollout import HFRollout
+                from siirl.workers.sharding_manager.base import BaseShardingManager
 
-            rollout = HFRollout(module=self.actor_module_fsdp, config=self.config.rollout)
-            rollout_sharding_manager = BaseShardingManager()
+                rollout = HFRollout(module=self.actor_module_fsdp, config=self.config.rollout)
+                rollout_sharding_manager = BaseShardingManager()
             # TODO: a sharding manager that do nothing?
 
         elif rollout_name == "vllm":

@@ -46,12 +46,19 @@ def determine_workflow_config(self, siirl_args: SiiRLArguments) -> str:
     current_dir = os.path.dirname(os.path.abspath(__file__))
     workflow = siirl_args.algorithm.workflow_type
 
-    if workflow == WorkflowType.DAPO:
+    if workflow == WorkflowType.EMBODIED:
+        # Embodied AI workflows
+        if siirl_args.algorithm.adv_estimator == AdvantageEstimator.GAE:
+            return os.path.join(current_dir, "config/workflow_embodied_ppo.yaml")
+        elif siirl_args.algorithm.adv_estimator == AdvantageEstimator.GRPO:
+            return os.path.join(current_dir, "config/workflow_embodied_grpo.yaml")
+        else:
+            raise ValueError(
+                f"Unsupported adv_estimator '{siirl_args.algorithm.adv_estimator}' for Embodied AI. "
+                f"Use 'gae' for PPO or 'grpo' for GRPO."
+            )
+    elif workflow == WorkflowType.DAPO:
         return os.path.join(current_dir, "config/workflow_dapo.yaml")
-    # A new algorithm 'xapo' could be added here easily:
-    # elif workflow == "xapo":
-    #     return os.path.join(current_dir, "config/workflow_xapo.yaml")
-
     elif workflow == WorkflowType.DEFAULT:
         if siirl_args.algorithm.adv_estimator == AdvantageEstimator.GAE:
             return os.path.join(current_dir, "config/workflow_ppo.yaml")
@@ -60,6 +67,59 @@ def determine_workflow_config(self, siirl_args: SiiRLArguments) -> str:
 
     else:
         raise ValueError(f"Unknown workflow_type: '{workflow}'")
+
+
+def setup_embodied_task_manifest(siirl_args: SiiRLArguments) -> SiiRLArguments:
+    """
+    Generate task manifests for embodied AI training runs.
+    
+    For VLA/Embodied runs, this function generates fresh task manifests and updates
+    the configuration to point to the generated files. The `data.train_files` config
+    is used as the *output path* for these manifests.
+    
+    Args:
+        siirl_args: A SiiRLArguments object containing all parsed configurations.
+    
+    Returns:
+        The modified SiiRLArguments object with updated train_files and val_files.
+    
+    Raises:
+        ValueError: If embodied training is detected but data.train_files is not specified.
+    """
+    # Detect embodied run by checking if embodied.env is configured
+    if (
+        hasattr(siirl_args.actor_rollout_ref, 'embodied')
+        and siirl_args.actor_rollout_ref.embodied
+    ):
+        embodied_env_args = siirl_args.actor_rollout_ref.embodied.env
+
+        # For embodied training, `data.train_files` must be specified to indicate the output path.
+        if not siirl_args.data.train_files:
+            raise ValueError(
+                "For embodied training, `data.train_files` must be specified in the config. "
+                "It is used as the output path for the generated task manifest."
+            )
+
+        logger.info("Embodied AI run detected. Generating task manifest...")
+        from siirl.dataloader.embodied_preprocess import prepare_libero_train_valid_datasets
+
+        # The output directory is the parent directory of the first train file path.
+        output_dir = os.path.dirname(siirl_args.data.train_files[0])
+
+        # Generate the train and validation manifests.
+        # The function will create `train.parquet` and `validate.parquet` inside output_dir.
+        train_file_path, valid_file_path = prepare_libero_train_valid_datasets(
+            task_suite_name=embodied_env_args.env_name,
+            num_trials_per_task=embodied_env_args.num_trials_per_task,
+            dataset_dir=output_dir,
+        )
+
+        # After generation, update the config to point to the exact generated files.
+        siirl_args.data.train_files = [str(train_file_path)]
+        siirl_args.data.val_files = [str(valid_file_path)]
+        logger.success(f"Task manifests generated and configured at: {output_dir}")
+    
+    return siirl_args
 
 
 def get_databuffer_shard_number(siirl_args: SiiRLArguments) -> int:
@@ -105,6 +165,9 @@ class MainRunner:
 
         logger.info("MainRunner started. Beginning workflow setup...")
         start_time = time.time()
+
+        # Setup embodied task manifest if needed
+        siirl_args = setup_embodied_task_manifest(siirl_args)
 
         # 1. Init DataBuffer
         logger.info(f"Init DataBuffer with sharding number: {siirl_args.trainer.nnodes}")
