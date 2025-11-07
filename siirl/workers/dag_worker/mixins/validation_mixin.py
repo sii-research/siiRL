@@ -498,7 +498,7 @@ class ValidationMixin:
             }
         
         # 3. Get data sources (task suite name)
-        task_suite_name = getattr(self.config.data, 'task_suite_name', 'unknown')
+        task_suite_name = getattr(self.config.actor_rollout_ref.embodied.env, 'env_name', 'unknown_task')
         data_sources = generated_proto.non_tensor_batch.get("data_source", [task_suite_name] * reward_tensor.shape[0])
         
         # 4. Get input identifiers (for debugging/logging)

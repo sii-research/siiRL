@@ -131,7 +131,12 @@ class DataRebalanceMixin:
             cache_size = len(set(self.sampling_leftover_cache.non_tensor_batch["uid"]))
 
         # 1. Gather the state (local data counts) from all master ranks.
-        my_state = {"dp_rank": context["my_dp_rank"], "count": local_new_count + cache_size}
+        my_state = {
+            "dp_rank": context["my_dp_rank"], 
+            "count": local_new_count + cache_size,
+            "new_count": local_new_count,
+            "cache_count": cache_size
+        }
         global_state_list = [None] * num_masters
         dist.all_gather_object(global_state_list, my_state, group=self.data_rebalance_masters_group)
         global_state = sorted(global_state_list, key=lambda x: x["dp_rank"])
@@ -146,14 +151,52 @@ class DataRebalanceMixin:
             f"Target: {target_batch_size}."
         )
 
+        # Print detailed data statistics in table format (only on global rank 0 to avoid duplicate logs)
+        if self._rank == 0:
+            total_new = sum(s["new_count"] for s in global_state)
+            total_cached = sum(s["cache_count"] for s in global_state)
+            table_rows = "\n".join([
+                f"  {s['dp_rank']:<6} {s['new_count']:<15} {s['cache_count']:<10} {s['count']:<10}"
+                for s in global_state
+            ])
+            logger.info(
+                f"Rank {self._rank} (Master): Post-Sampling Data Statistics:\n"
+                f"  {'Rank':<6} {'New Samples':<15} {'Cached':<10} {'Total':<10}\n"
+                f"  {'-' * 45}\n"
+                f"{table_rows}\n"
+                f"  {'-' * 45}\n"
+                f"  {'Total':<6} {total_new:<15} {total_cached:<10} {total_prompts:<10}\n"
+                f"  Target Batch Size: {target_batch_size}\n"
+                f"  Gap: {target_batch_size - total_prompts if total_prompts < target_batch_size else 0}"
+            )
+
         cache_was_used = cache_size > 0
         if total_prompts < target_batch_size:
             # Decision: Not enough data, cache everything for the next iteration.
             decision = {"action": "cache", "status": "INSUFFICIENT_DATA", "cache_was_used": cache_was_used}
             logger.info(f"Rank {self._rank} (Master): Data insufficient. Decision: Cache.")
+            # Print detailed shortage information (only on global rank 0)
+            if self._rank == 0:
+                shortage = target_batch_size - total_prompts
+                logger.info(
+                    f"Rank {self._rank} (Master): ⚠️  INSUFFICIENT DATA - Need to continue rollout sampling\n"
+                    f"  Current Total: {total_prompts} UIDs\n"
+                    f"  Target Batch:  {target_batch_size} UIDs\n"
+                    f"  Shortage:      {shortage} UIDs ({shortage * 100.0 / target_batch_size:.1f}%)\n"
+                    f"  Decision:      Cache current data and continue sampling"
+                )
             return decision
         else:
             # Decision: Data is sufficient. Create plan and delegate to executor.
+            # Print detailed surplus information (only on global rank 0)
+            if self._rank == 0:
+                surplus = total_prompts - target_batch_size
+                logger.info(
+                    f"Rank {self._rank} (Master): ✅ SUFFICIENT DATA - Proceeding to rebalance and train\n"
+                    f"  Current Total: {total_prompts} UIDs\n"
+                    f"  Target Batch:  {target_batch_size} UIDs\n"
+                    f"  Surplus:       {surplus} UIDs"
+                )
             plan, targets = self._create_migration_plan(global_counts, target_batch_size, num_masters)
             return self._execute_master_rebalance(batch, cache_was_used, plan, targets, context)
 
@@ -341,6 +384,14 @@ class DataRebalanceMixin:
             # Get the shards that were received by the master and synced to this peer
             received_shards = decision.get("incremental_data", [])
 
+            
+            if received_shards and local_batch_to_keep and hasattr(local_batch_to_keep, 'batch') and local_batch_to_keep.batch is not None:
+                target_device = local_batch_to_keep.batch.device
+                received_shards = [
+                    shard.to(target_device) if hasattr(shard, 'to') else shard
+                    for shard in received_shards
+                ]
+
             final_batch = (
                 DataProto.concat([local_batch_to_keep] + received_shards) if received_shards else local_batch_to_keep
             )
@@ -499,11 +550,16 @@ class DataRebalanceMixin:
         for req in requests:
             req.wait()
 
-        # 4. Deserialize received data
+        # 4. Deserialize received data and ensure consistent device
         received_shards = []
         for rank, buf in received_buffers.items():
             try:
-                received_shards.append(pickle.loads(buf.cpu().numpy().tobytes()))
+                shard = pickle.loads(buf.cpu().numpy().tobytes())
+                # Move to the correct device immediately after deserialization to avoid device mismatch
+                # in subsequent concat operations (fixes VLA embodied rebalance issue)
+                if hasattr(shard, 'to') and hasattr(shard, 'batch') and shard.batch is not None:
+                    shard = shard.to(device)
+                received_shards.append(shard)
             except Exception as e:
                 logger.error(
                     f"Rank {self._rank}: Failed to deserialize P2P data from rank {rank}. Skipping shard. Error: {e}"
