@@ -197,6 +197,7 @@ class InitializationMixin:
     def _create_data_rebalance_masters_group(self):
         """
         Creates a dedicated process group containing only master ranks (tp_rank=0).
+        For pure DP (tp_size=1), all ranks are masters, so we use the global group.
         This group is used for post-sampling rebalancing logic to prevent deadlocks.
         """
         logger.info(f"Rank {self._rank}: Attempting to create dedicated process group for post-sampling masters...")
@@ -210,21 +211,33 @@ class InitializationMixin:
                 return
 
             first_rollout_node = rollout_nodes[0]
-            tp_size = first_rollout_node.config[DAGConstants.INTERN_CONFIG].rollout.tensor_model_parallel_size
+            
+            # CRITICAL FIX: Use _get_parallelism_config() to get the correct tp_size
+            # This ensures HF rollout gets tp_size=1, vLLM/SGLang get their configured tp_size
+            tp_size, pp_size = self._get_parallelism_config(first_rollout_node)
+            
+            logger.info(f"Rank {self._rank}: Creating data_rebalance_masters_group with tp_size={tp_size}, pp_size={pp_size}")
 
-            # The group is only necessary for distributed training with tensor parallelism.
-            if self.world_size > 1 and tp_size > 1:
-                all_ranks = list(range(self.world_size))
-                master_ranks = [rank for rank in all_ranks if (rank % tp_size) == 0]
-                self.data_rebalance_masters_group = dist.new_group(ranks=master_ranks)
-                logger.success(
-                    f"Rank {self._rank}: Successfully created 'data_rebalance_masters_group' with ranks: {master_ranks}"
-                )
+            if self.world_size > 1:
+                if tp_size > 1:
+                    # Multiple TP groups: create a group containing only master ranks (tp_rank=0)
+                    all_ranks = list(range(self.world_size))
+                    master_ranks = [rank for rank in all_ranks if (rank % tp_size) == 0]
+                    self.data_rebalance_masters_group = dist.new_group(ranks=master_ranks)
+                    logger.success(
+                        f"Rank {self._rank}: Created 'data_rebalance_masters_group' with master ranks: {master_ranks} (tp_size={tp_size})"
+                    )
+                else:
+                    # Pure DP (tp_size=1): all ranks are masters, use the node's process group
+                    node_pg = self._get_node_process_group(first_rollout_node)
+                    self.data_rebalance_masters_group = node_pg
+                    logger.success(
+                        f"Rank {self._rank}: Pure DP mode (tp_size=1). Using node process group for rebalancing "
+                        f"(all {self.world_size} ranks participate as masters)."
+                    )
             else:
-                logger.info(
-                    f"Rank {self._rank}: No need to create 'data_rebalance_masters_group' ("
-                    f"world_size={self.world_size}, tp_size={tp_size})."
-                )
+                # Single rank: no need for a group
+                logger.info(f"Rank {self._rank}: Single rank mode. No data_rebalance_masters_group needed.")
                 self.data_rebalance_masters_group = None
 
         except (AttributeError, KeyError) as e:
@@ -615,7 +628,16 @@ class InitializationMixin:
 
                 # TODO(Ping Zhang): support PP for rollout nodes, which will be used for very large models
                 # that need multi-server inference.
-                tp_size = intern_config.rollout.tensor_model_parallel_size
+                
+                # HF rollout doesn't support tensor parallelism, so tp_size should be 1
+                # Only vLLM and SGLang rollout backends support TP
+                rollout_backend = intern_config.rollout.name if hasattr(intern_config.rollout, 'name') else None
+                if rollout_backend == "hf":
+                    # HF rollout uses FSDP which is pure DP, no TP
+                    tp_size = 1
+                else:
+                    # vLLM, SGLang, or other backends that support TP
+                    tp_size = intern_config.rollout.tensor_model_parallel_size
                 pp_size = 1
 
             elif reference_node.node_type == NodeType.MODEL_TRAIN:

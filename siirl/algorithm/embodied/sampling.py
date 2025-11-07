@@ -268,5 +268,14 @@ def embodied_local_rank_sampling(
         # If filtering is disabled, the processed batch is the original batch.
         processed_batch = batch
 
+    # Step 4: Ensure all tensors are on CPU before data rebalance
+    # This fixes device mismatch issues where some tensors (task_id, trial_id) are on CUDA
+    # while others (responses, etc.) are on CPU
+    if processed_batch.batch is not None:
+        for key, tensor in processed_batch.batch.items():
+            if isinstance(tensor, torch.Tensor) and tensor.device.type != 'cpu':
+                processed_batch.batch[key] = tensor.cpu()
+                logger.debug(f"Moved {key} from {tensor.device} to CPU for data rebalance")
+
     return NodeOutput(batch=processed_batch, metrics=sample_metrics)
 

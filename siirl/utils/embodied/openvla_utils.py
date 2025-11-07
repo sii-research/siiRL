@@ -13,6 +13,7 @@ import json_numpy
 import numpy as np
 import tensorflow as tf
 import torch
+from loguru import logger
 from PIL import Image
 from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
 
@@ -30,6 +31,8 @@ def update_auto_map(pretrained_checkpoint: str) -> None:
     This loads the config.json file inside the checkpoint directory and overwrites
     the AutoConfig and AutoModelForVision2Seq fields to use OpenVLA-specific classes.
 
+    Uses file locking and atomic write to ensure thread-safety and prevent corruption.
+
     Args:
         pretrained_checkpoint: Path to the checkpoint directory
     """
@@ -38,32 +41,88 @@ def update_auto_map(pretrained_checkpoint: str) -> None:
 
     config_path = os.path.join(pretrained_checkpoint, "config.json")
     if not os.path.exists(config_path):
-        print(f"Warning: No config.json found at {config_path}")
+        logger.warning(f"No config.json found at {config_path}")
         return
 
-    # Create timestamped backup
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = os.path.join(pretrained_checkpoint, f"config.json.back.{timestamp}")
-    shutil.copy2(config_path, backup_path)
-    print(f"Created backup of original config at: {os.path.abspath(backup_path)}")
+    import fcntl
+    import tempfile
+    
+    lock_path = os.path.join(pretrained_checkpoint, ".config.json.lock")
+    max_retries = 5
+    retry_delay = 1.0
+    
+    for attempt in range(max_retries):
+        try:
+            # Acquire file lock for safe concurrent access
+            with open(lock_path, 'w') as lock_file:
+                # Wait up to 30 seconds for the lock
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                
+                try:
+                    # Re-check if config already has correct auto_map (another process may have updated it)
+                    with open(config_path, "r") as f:
+                        config = json.load(f)
+                    
+                    expected_auto_map = {
+                        "AutoConfig": "configuration_prismatic.OpenVLAConfig",
+                        "AutoModelForVision2Seq": "modeling_prismatic.OpenVLAForActionPrediction",
+                    }
+                    
+                    # If already correctly configured, skip update
+                    if config.get("auto_map") == expected_auto_map:
+                        logger.info(f"config.json already has correct auto_map, skipping update")
+                        return
+                    
+                    # Create timestamped backup (only if we need to update)
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                    backup_path = os.path.join(pretrained_checkpoint, f"config.json.back.{timestamp}")
+                    shutil.copy2(config_path, backup_path)
+                    logger.info(f"Created backup of original config at: {os.path.abspath(backup_path)}")
 
-    # Read and update the config
-    with open(config_path, "r") as f:
-        config = json.load(f)
+                    # Update the config
+                    config["auto_map"] = expected_auto_map
 
-    config["auto_map"] = {
-        "AutoConfig": "configuration_prismatic.OpenVLAConfig",
-        "AutoModelForVision2Seq": "modeling_prismatic.OpenVLAForActionPrediction",
-    }
-
-    # Write back the updated config
-    with open(config_path, "w") as f:
-        json.dump(config, f, indent=2)
-
-    print(f"Updated config.json at: {os.path.abspath(config_path)}")
-    print("Changes made:")
-    print('  - Set AutoConfig to "configuration_prismatic.OpenVLAConfig"')
-    print('  - Set AutoModelForVision2Seq to "modeling_prismatic.OpenVLAForActionPrediction"')
+                    # Atomic write: write to temp file, then rename
+                    # This ensures readers never see a partial/corrupted file
+                    fd, temp_path = tempfile.mkstemp(
+                        dir=pretrained_checkpoint, 
+                        prefix=".config.json.tmp.",
+                        suffix=".json"
+                    )
+                    try:
+                        with os.fdopen(fd, 'w') as f:
+                            json.dump(config, f, indent=2)
+                            f.flush()
+                            os.fsync(f.fileno())  # Ensure data is written to disk
+                        
+                        # Atomic rename - this is atomic on POSIX systems
+                        os.replace(temp_path, config_path)
+                        
+                        logger.info(f"Updated config.json at: {os.path.abspath(config_path)}")
+                        logger.info("Changes made:")
+                        logger.info('  - Set AutoConfig to "configuration_prismatic.OpenVLAConfig"')
+                        logger.info('  - Set AutoModelForVision2Seq to "modeling_prismatic.OpenVLAForActionPrediction"')
+                        return
+                    except Exception as e:
+                        # Clean up temp file if something went wrong
+                        if os.path.exists(temp_path):
+                            os.unlink(temp_path)
+                        raise
+                finally:
+                    # Release lock
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                    
+        except (json.JSONDecodeError, IOError) as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"Attempt {attempt + 1}/{max_retries} failed: {e}. Retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                retry_delay *= 1.5  # Exponential backoff
+            else:
+                logger.error(f"Failed to update config.json after {max_retries} attempts: {e}")
+                raise
+        except Exception as e:
+            logger.error(f"Unexpected error updating config.json: {e}")
+            raise
 
 
 def check_identical_files(path1: Union[str, Path], path2: Union[str, Path]) -> bool:
@@ -103,7 +162,7 @@ def _handle_file_sync(curr_filepath: str, checkpoint_filepath: str, file_type: s
         match = check_identical_files(curr_filepath, checkpoint_filepath)
 
         if not match:
-            print(
+            logger.info(
                 "\n------------------------------------------------------------------------------------------------\n"
                 f"Found mismatch between:\n"
                 f"Current:   {curr_filepath}\n"
@@ -114,19 +173,19 @@ def _handle_file_sync(curr_filepath: str, checkpoint_filepath: str, file_type: s
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_path = f"{checkpoint_filepath}.back.{timestamp}"
             shutil.copy2(checkpoint_filepath, backup_path)
-            print(f"Created backup of original checkpoint file at: {os.path.abspath(backup_path)}")
+            logger.info(f"Created backup of original checkpoint file at: {os.path.abspath(backup_path)}")
 
             # Copy current version to checkpoint directory
             shutil.copy2(curr_filepath, checkpoint_filepath)
-            print(f"Copied current version to checkpoint at: {os.path.abspath(checkpoint_filepath)}")
-            print(
+            logger.info(f"Copied current version to checkpoint at: {os.path.abspath(checkpoint_filepath)}")
+            logger.info(
                 f"Changes complete. The checkpoint will now use the current version of {file_type}"
                 "\n------------------------------------------------------------------------------------------------\n"
             )
     else:
         # If file doesn't exist in checkpoint directory, copy it
         shutil.copy2(curr_filepath, checkpoint_filepath)
-        print(
+        logger.info(
             "\n------------------------------------------------------------------------------------------------\n"
             f"No {file_type} found in checkpoint directory.\n"
             f"Copied current version from: {curr_filepath}\n"
@@ -161,7 +220,7 @@ def check_model_logic_mismatch(pretrained_checkpoint: str) -> None:
     # Check and handle each file
     for filename, curr_filepath in curr_files.items():
         if curr_filepath is None:
-            print(f"WARNING: `{filename}` is not found anywhere in the current directory.")
+            logger.warning(f"`{filename}` is not found anywhere in the current directory.")
             continue
 
         checkpoint_filepath = os.path.join(pretrained_checkpoint, filename)

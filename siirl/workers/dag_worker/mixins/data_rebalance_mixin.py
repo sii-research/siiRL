@@ -384,14 +384,6 @@ class DataRebalanceMixin:
             # Get the shards that were received by the master and synced to this peer
             received_shards = decision.get("incremental_data", [])
 
-            
-            if received_shards and local_batch_to_keep and hasattr(local_batch_to_keep, 'batch') and local_batch_to_keep.batch is not None:
-                target_device = local_batch_to_keep.batch.device
-                received_shards = [
-                    shard.to(target_device) if hasattr(shard, 'to') else shard
-                    for shard in received_shards
-                ]
-
             final_batch = (
                 DataProto.concat([local_batch_to_keep] + received_shards) if received_shards else local_batch_to_keep
             )
@@ -550,15 +542,11 @@ class DataRebalanceMixin:
         for req in requests:
             req.wait()
 
-        # 4. Deserialize received data and ensure consistent device
+        # 4. Deserialize received data
         received_shards = []
         for rank, buf in received_buffers.items():
             try:
                 shard = pickle.loads(buf.cpu().numpy().tobytes())
-                # Move to the correct device immediately after deserialization to avoid device mismatch
-                # in subsequent concat operations (fixes VLA embodied rebalance issue)
-                if hasattr(shard, 'to') and hasattr(shard, 'batch') and shard.batch is not None:
-                    shard = shard.to(device)
                 received_shards.append(shard)
             except Exception as e:
                 logger.error(

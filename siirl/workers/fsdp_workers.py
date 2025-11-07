@@ -363,9 +363,15 @@ class ActorRolloutRefWorker(Worker):
                 AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
                 AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
                 if self.rank == 0:
-                    from siirl.utils.embodied.openvla_utils import update_auto_map , check_model_logic_mismatch
-                    update_auto_map(local_path)
-                    check_model_logic_mismatch(local_path)
+                    try:
+                        from siirl.utils.embodied.openvla_utils import update_auto_map, check_model_logic_mismatch
+                        logger.info(f"[rank-{self.rank}] Updating auto_map for OpenVLA-OFT at {local_path}")
+                        update_auto_map(local_path)
+                        check_model_logic_mismatch(local_path)
+                        logger.info(f"[rank-{self.rank}] Successfully updated auto_map for OpenVLA-OFT")
+                    except Exception as e:
+                        logger.error(f"[rank-{self.rank}] Failed to update auto_map for OpenVLA-OFT: {e}")
+                        raise
                 torch.distributed.barrier()
             elif self.config.embodied.embodied_type == "openvla":
                 from siirl.models.embodied.openvla.configuration_prismatic import OpenVLAConfig
@@ -377,9 +383,15 @@ class ActorRolloutRefWorker(Worker):
                 AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
                 AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
                 if self.rank == 0:
-                    from siirl.utils.embodied.openvla_utils import update_auto_map , check_model_logic_mismatch
-                    update_auto_map(local_path)
-                    check_model_logic_mismatch(local_path)
+                    try:
+                        from siirl.utils.embodied.openvla_utils import update_auto_map, check_model_logic_mismatch
+                        logger.info(f"[rank-{self.rank}] Updating auto_map for OpenVLA at {local_path}")
+                        update_auto_map(local_path)
+                        check_model_logic_mismatch(local_path)
+                        logger.info(f"[rank-{self.rank}] Successfully updated auto_map for OpenVLA")
+                    except Exception as e:
+                        logger.error(f"[rank-{self.rank}] Failed to update auto_map for OpenVLA: {e}")
+                        raise
                 torch.distributed.barrier()
             else:
                 raise ValueError(f"Invalid vla type: {self.config.embodied.embodied_type}")
@@ -782,12 +794,20 @@ class ActorRolloutRefWorker(Worker):
         AutoProcessor.register(config_mod.OpenVLAConfig, processor_mod.PrismaticProcessor)
         AutoModelForVision2Seq.register(config_mod.OpenVLAConfig, model_mod.OpenVLAForActionPrediction)
         
-        # Update automap on rank 0
+        # Update automap on rank 0 (with file locking for safety)
+        # Note: update_auto_map now includes retry logic and atomic writes
         if self.rank == 0:
-            from siirl.utils.embodied.openvla_utils import update_auto_map, check_model_logic_mismatch
-            update_auto_map(model_path)
-            check_model_logic_mismatch(model_path)
+            try:
+                from siirl.utils.embodied.openvla_utils import update_auto_map, check_model_logic_mismatch
+                logger.info(f"[rank-{self.rank}] Updating auto_map for {model_path}")
+                update_auto_map(model_path)
+                check_model_logic_mismatch(model_path)
+                logger.info(f"[rank-{self.rank}] Successfully updated auto_map")
+            except Exception as e:
+                logger.error(f"[rank-{self.rank}] Failed to update auto_map: {e}")
+                raise
         
+        # Synchronize all ranks before proceeding
         torch.distributed.barrier()
 
     def _setup_openvla_oft_model(self, model: torch.nn.Module, model_path: str):
