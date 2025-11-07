@@ -110,6 +110,11 @@ class EmbodiedArguments:
     temperature: float = field(
         default=1.6, metadata={"help": "Sampling temperature for action generation"}
     )
+
+    n_gpus_per_node: int = field(
+        default=8,
+        metadata={"help": "Number of GPUs per node"}
+    )
     
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

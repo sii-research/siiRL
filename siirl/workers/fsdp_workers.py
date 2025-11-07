@@ -613,8 +613,8 @@ class ActorRolloutRefWorker(Worker):
         use_fused_kernels = self.config.model.use_fused_kernels
         use_shm = self.config.model.use_shm
 
-        # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
-        # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
+        tokenizer_module = load_tokenizer(model_args=self.config.model)
+        self.tokenizer, self.processor = tokenizer_module["tokenizer"], tokenizer_module["processor"]
 
         if self._is_actor:
             optim_config = self.config.actor.optim
@@ -639,9 +639,6 @@ class ActorRolloutRefWorker(Worker):
                 role=Role.Actor,
                 enable_activation_offload=self.config.model.enable_activation_offload,
             )
-
-            tokenizer_module = load_tokenizer(model_args=self.config.model)
-            self.tokenizer, self.processor = tokenizer_module["tokenizer"], tokenizer_module["processor"]
 
             # get the original unwrapped module
             if fsdp_version(self.actor_module_fsdp) == 1:

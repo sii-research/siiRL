@@ -150,7 +150,7 @@ class EmbodiedHFRollout(BaseRollout):
 
         self._rank = torch.distributed.get_rank(
         ) if torch.distributed.is_initialized() else 0
-        self._num_gpus_per_node = config.n_gpus_per_node
+        self._num_gpus_per_node = self.config.embodied.n_gpus_per_node
 
         self.embedding_model = VideoEmbeddingModel(
             model_path=config.embodied.video_embedding_model_path,
