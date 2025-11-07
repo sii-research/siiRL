@@ -490,11 +490,12 @@ class ValidationMixin:
             verifier_score, reward_metrics, format_metrics, reward_format_metrics = self.val_reward_fn.verify(generated_proto)
             reward_tensor = torch.tensor(verifier_score, dtype=torch.float32).unsqueeze(-1)
             
-            # Store all metrics for later aggregation
-            all_metrics = {}
-            all_metrics.update({f'reward/{k}': v for k, v in reward_metrics.items()})
-            all_metrics.update({f'format/{k}': v for k, v in format_metrics.items()})
-            all_metrics.update({f'reward_format/{k}': v for k, v in reward_format_metrics.items()})
+            # Store batch-level metrics (without prefix, will be added during aggregation)
+            batch_metrics = {
+                'reward_metrics': reward_metrics,
+                'format_metrics': format_metrics,
+                'reward_format_metrics': reward_format_metrics,
+            }
         
         # 3. Get data sources (task suite name)
         task_suite_name = getattr(self.config.data, 'task_suite_name', 'unknown')
@@ -517,15 +518,14 @@ class ValidationMixin:
         scores = reward_tensor.sum(-1).cpu()
         
         # 6. Package payloads (lightweight, no full reward tensor)
+        # Only the first sample in each batch carries the batch_metrics to avoid duplication
         packaged_payloads = []
         for i in range(len(scores)):
-            # Note: all_metrics are batch-level aggregates, we store them for each sample
-            # The actual per-sample aggregation happens in _aggregate_embodied_results
             payload = ValidationPayload(
                 input_text=input_texts[i],
                 score=scores[i].item(),
                 data_source=data_sources[i],
-                extra_rewards=all_metrics  # Batch-level metrics
+                extra_rewards=batch_metrics if i == 0 else {}  # Only first sample carries batch metrics
             )
             packaged_payloads.append(payload)
         
@@ -579,7 +579,7 @@ class ValidationMixin:
         Aggregation strategy:
         1. Group rewards by data_source
         2. Compute mean reward per data_source and overall
-        3. Add batch-level metrics from val_reward_fn.verify() (reward_metrics, format_metrics, reward_format_metrics)
+        3. Collect and average batch-level metrics from all batches
         
         Args:
             all_payloads: All ValidationPayload objects from all ranks
@@ -588,9 +588,9 @@ class ValidationMixin:
             Dict[str, float]: Final metrics with structure:
                 - embodied/test_score/{data_source}: Mean reward per data source
                 - embodied/test_score/all: Overall mean reward
-                - embodied/reward/{metric_name}: Batch-level reward metrics
-                - embodied/format/{metric_name}: Batch-level format metrics
-                - embodied/reward_format/{metric_name}: Batch-level combined metrics
+                - embodied/reward/{metric_name}: Averaged reward metrics across all batches
+                - embodied/format/{metric_name}: Averaged format metrics across all batches
+                - embodied/reward_format/{metric_name}: Averaged combined metrics across all batches
         """
         # 1. Group rewards by data_source
         data_source_rewards = {}
@@ -609,13 +609,48 @@ class ValidationMixin:
         all_rewards = [p.score for p in all_payloads]
         metric_dict['embodied/test_score/all'] = np.mean(all_rewards)
         
-        # 4. Add batch-level metrics from val_reward_fn.verify()
-        # Note: Since all payloads store the same batch-level metrics, we take from the first payload
-        if all_payloads and all_payloads[0].extra_rewards:
-            # All payloads have the same extra_rewards (batch-level), so we take the first one
-            # and prefix with 'embodied/'
-            for metric_name, metric_value in all_payloads[0].extra_rewards.items():
-                # metric_name already has prefix like 'reward/acc', 'format/format_acc', etc.
-                metric_dict[f'embodied/{metric_name}'] = metric_value
+        # 4. Collect and average batch-level metrics from all batches
+        batch_metrics_list = []
+        for payload in all_payloads:
+            if payload.extra_rewards and 'reward_metrics' in payload.extra_rewards:
+                batch_metrics_list.append(payload.extra_rewards)
+        
+        if batch_metrics_list:
+            num_batches = len(batch_metrics_list)
+            logger.info(f"[_aggregate_embodied_results] Collected metrics from {num_batches} batches")
+            
+            # 4.1 Collect all reward_metrics (including 'all' and per-task metrics)
+            aggregated_reward_metrics = {}
+            for batch_metrics in batch_metrics_list:
+                for key, value in batch_metrics['reward_metrics'].items():
+                    if key not in aggregated_reward_metrics:
+                        aggregated_reward_metrics[key] = []
+                    aggregated_reward_metrics[key].append(value)
+            
+            # 4.2 Collect all format_metrics
+            aggregated_format_metrics = {}
+            for batch_metrics in batch_metrics_list:
+                for key, value in batch_metrics['format_metrics'].items():
+                    if key not in aggregated_format_metrics:
+                        aggregated_format_metrics[key] = []
+                    aggregated_format_metrics[key].append(value)
+            
+            # 4.3 Collect all reward_format_metrics
+            aggregated_reward_format_metrics = {}
+            for batch_metrics in batch_metrics_list:
+                for key, value in batch_metrics['reward_format_metrics'].items():
+                    if key not in aggregated_reward_format_metrics:
+                        aggregated_reward_format_metrics[key] = []
+                    aggregated_reward_format_metrics[key].append(value)
+            
+            # 5. Compute average values and add to metric_dict
+            for key, values in aggregated_reward_metrics.items():
+                metric_dict[f'embodied/reward/{key}'] = np.mean(values)
+            
+            for key, values in aggregated_format_metrics.items():
+                metric_dict[f'embodied/format/{key}'] = np.mean(values)
+            
+            for key, values in aggregated_reward_format_metrics.items():
+                metric_dict[f'embodied/reward_format/{key}'] = np.mean(values)
         
         return metric_dict
