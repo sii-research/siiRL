@@ -187,7 +187,7 @@ class InitializationMixin:
         self._resolve_taskgraph_process_groups()
 
         # try create post sampling process_groups for dapo
-        if self.config.algorithm.workflow_type == WorkflowType.DAPO:
+        if self.config.algorithm.workflow_type in [WorkflowType.DAPO, WorkflowType.EMBODIED]:
             self._create_data_rebalance_masters_group()
 
         # Ensure all ranks have finished group creation before proceeding.

@@ -139,8 +139,9 @@ class NodeExecutorsMixin:
         batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))])
         
         # Union the generated data with the original batch
-        # Note: For embodied, we don't need to repeat the batch since rollout already handles n_samples
-        batch = batch.union(gen_output)
+        # Note: Although rollout expands n_samples internally, we still need to repeat the original batch
+        # to match the expanded gen_output batch size before union
+        batch = batch.repeat(self.config.actor_rollout_ref.rollout.n, interleave=True).union(gen_output)
         
         # Compute response mask if not already present
         if "response_mask" not in batch.batch:

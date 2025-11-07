@@ -154,7 +154,8 @@ def _filter_batch(batch: DataProto, n_samples: int, siirl_args: SiiRLArguments) 
     # Expand the prompt-level mask to the sample-level to match the batch dimension
     final_mask = combined_mask.repeat_interleave(n_samples)
 
-    filtered_batch = batch.slice(final_mask)
+    # Use select_idxs instead of slice for boolean mask filtering
+    filtered_batch = batch.select_idxs(final_mask)
     logger.info(f"Filtered batch size: {len(filtered_batch)} (from original: {len(batch)})")
 
     return filtered_batch
