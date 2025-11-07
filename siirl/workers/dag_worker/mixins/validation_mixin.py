@@ -485,11 +485,6 @@ class ValidationMixin:
         Returns:
             List[ValidationPayload]: Lightweight payloads for gathering
         """
-        # 1. Check if async rollout is available
-        if self.rollout_mode == 'async' and self._async_rollout_manager is None:
-            return []
-        
-        # 2. Compute rewards using val_reward_fn.verify()
         if self.val_reward_fn:
             # verl pattern: verify returns (scores, reward_metrics, format_metrics, reward_format_metrics)
             verifier_score, reward_metrics, format_metrics, reward_format_metrics = self.val_reward_fn.verify(generated_proto)
@@ -500,14 +495,6 @@ class ValidationMixin:
             all_metrics.update({f'reward/{k}': v for k, v in reward_metrics.items()})
             all_metrics.update({f'format/{k}': v for k, v in format_metrics.items()})
             all_metrics.update({f'reward_format/{k}': v for k, v in reward_format_metrics.items()})
-        else:
-            # Fallback: use 'complete' field as reward
-            if "complete" in generated_proto.batch:
-                reward_tensor = generated_proto.batch["complete"].float().unsqueeze(-1)
-            else:
-                logger.warning("[Embodied Validation] No val_reward_fn and no 'complete' field. Using zero rewards.")
-                reward_tensor = torch.zeros(generated_proto.batch.batch_size[0], 1)
-            all_metrics = {}
         
         # 3. Get data sources (task suite name)
         task_suite_name = getattr(self.config.data, 'task_suite_name', 'unknown')

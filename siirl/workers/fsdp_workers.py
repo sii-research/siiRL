@@ -247,6 +247,98 @@ class ActorRolloutRefWorker(Worker):
         role: Role = Role.Actor,
         enable_activation_offload: bool = False,
     ):
+        """
+        Build model and optimizer (Refactored version).
+        
+        This method orchestrates the model building process through 4 main steps:
+            1. Prepare and load model from pretrained checkpoint
+            2. Apply model modifications (LoRA, gradient checkpointing, etc.)
+            3. Wrap model with FSDP
+            4. Create optimizer and learning rate scheduler (Actor only)
+        
+        Args:
+            model_path: Path to model checkpoint
+            fsdp_config: FSDP configuration
+            optim_config: Optimizer configuration (optional)
+            override_model_config: Config overrides
+            use_remove_padding: Whether to use remove padding
+            use_fused_kernels: Whether to use fused kernels
+            enable_gradient_checkpointing: Whether to enable gradient checkpointing
+            trust_remote_code: Whether to trust remote code
+            use_liger: Whether to apply Liger kernel
+            role: Role (Actor or RefPolicy)
+            enable_activation_offload: Whether to enable activation offload
+        
+        Returns:
+            Tuple of (model_fsdp, optimizer, lr_scheduler, model_config)
+        """
+        from siirl.utils.model_utils.model import print_model_size
+        
+        assert role in [Role.Actor, Role.RefPolicy]
+        
+        log_gpu_memory_usage(f"Before init {role} from HF AutoModel", logger=logger)
+        
+        # Step 1: Prepare and load model
+        actor_module, actor_model_config, torch_dtype = self._prepare_and_load_model(
+            model_path=model_path,
+            fsdp_config=fsdp_config,
+            override_model_config=override_model_config,
+            trust_remote_code=trust_remote_code,
+            role=role,
+        )
+        
+        # Step 2: Apply model modifications
+        actor_module = self._apply_model_modifications(
+            model=actor_module,
+            use_liger=use_liger,
+            use_remove_padding=use_remove_padding,
+            use_fused_kernels=use_fused_kernels,
+            enable_gradient_checkpointing=enable_gradient_checkpointing,
+            torch_dtype=torch_dtype,
+        )
+        
+        torch.distributed.barrier()
+        if self.rank == 0:
+            print_model_size(actor_module)
+        log_gpu_memory_usage(f"After init {role} from HF AutoModel", logger=logger)
+        
+        # Step 3: Wrap model with FSDP
+        actor_module_fsdp = self._setup_fsdp_wrapper(
+            model=actor_module,
+            fsdp_config=fsdp_config,
+            role=role,
+            enable_activation_offload=enable_activation_offload,
+            enable_gradient_checkpointing=enable_gradient_checkpointing,
+        )
+        
+        log_gpu_memory_usage(f"After {role} FSDP init", logger=logger)
+        
+        # Step 4: Create optimizer and scheduler
+        actor_optimizer, actor_lr_scheduler = self._create_optimizer_and_scheduler(
+            model=actor_module_fsdp,
+            optim_config=optim_config,
+            role=role,
+        )
+        
+        return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config
+
+    # ==================================================================================
+    # Legacy implementation (kept for rollback, remove after verification)
+    # ==================================================================================
+    def _build_model_optimizer_legacy(
+        self,
+        model_path: str,
+        fsdp_config: FSDPArguments,
+        optim_config: Optional[OptimizerArguments],
+        override_model_config: DictConfig,
+        use_remove_padding: bool = False,
+        use_fused_kernels: bool = False,
+        enable_gradient_checkpointing: bool = False,
+        trust_remote_code: bool = False,
+        use_liger: bool = False,
+        role: Role = Role.Actor,
+        enable_activation_offload: bool = False,
+    ):
         from torch import optim
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -534,6 +626,459 @@ class ActorRolloutRefWorker(Worker):
             actor_lr_scheduler = None
 
         return actor_module_fsdp, actor_optimizer, actor_lr_scheduler, actor_model_config
+
+    def _prepare_and_load_model(
+        self,
+        model_path: str,
+        fsdp_config: FSDPArguments,
+        override_model_config: DictConfig,
+        trust_remote_code: bool,
+        role: Role,
+    ):
+        """
+        Prepare configuration and load model from pretrained checkpoint.
+        
+        Steps:
+            1. Register embodied model classes if needed
+            2. Determine torch dtype
+            3. Load and configure model config
+            4. Load model from pretrained
+            5. Apply model-specific setup (e.g., OpenVLA-OFT)
+        
+        Args:
+            model_path: Path to model checkpoint
+            fsdp_config: FSDP configuration
+            override_model_config: Config overrides
+            trust_remote_code: Whether to trust remote code
+            role: Role (Actor or RefPolicy)
+        
+        Returns:
+            Tuple of (model, model_config, torch_dtype)
+        """
+        from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq
+        from siirl.utils.model_utils.model import get_generation_config, update_model_config
+        from siirl.utils.model_utils.torch_dtypes import PrecisionType
+        
+        is_embodied = self.config.model.model_type == "embodied"
+        
+        # Register embodied model classes
+        if is_embodied:
+            self._register_embodied_model(model_path, trust_remote_code)
+        
+        # Determine torch dtype
+        if fsdp_config.model_dtype is None:
+            torch_dtype = torch.float32 if self._is_actor else torch.bfloat16
+        else:
+            torch_dtype = PrecisionType.to_dtype(fsdp_config.model_dtype)
+        
+        # Load model config with appropriate attention implementation
+        embodied_type = getattr(self.config.embodied, 'embodied_type', None) if is_embodied else None
+        use_flash_attn = not (is_embodied and embodied_type == "openvla-oft")
+        
+        config_kwargs = {"trust_remote_code": trust_remote_code}
+        if use_flash_attn:
+            config_kwargs["attn_implementation"] = "flash_attention_2"
+        
+        model_config = AutoConfig.from_pretrained(model_path, **config_kwargs)
+        
+        # Initialize flops counter for reference policy
+        if self._is_ref:
+            self.flops_counter = FlopsCounter(model_config, forward_only=True)
+        
+        # Apply model-specific patches
+        if getattr(model_config, "model_type", None) == "kimi_vl":
+            model_config.text_config.topk_method = "greedy"
+        
+        # Load and update generation config
+        self.generation_config = get_generation_config(model_path, trust_remote_code)
+        
+        override_kwargs = {
+            "bos_token_id": self.tokenizer.bos_token_id,
+            "eos_token_id": self.tokenizer.eos_token_id,
+            "pad_token_id": self.tokenizer.pad_token_id,
+        }
+        override_kwargs.update(override_model_config)
+        update_model_config(model_config, override_config_kwargs=override_kwargs)
+        
+        # Load model with appropriate context manager
+        init_context = get_init_weight_context_manager(
+            use_meta_tensor=not model_config.tie_word_embeddings,
+            mesh=self.device_mesh
+        )
+        
+        with init_context(), warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            
+            # Determine model class
+            model_class = self._get_model_class(model_config, is_embodied)
+            
+            # Load model based on type
+            if is_embodied and embodied_type == "openvla-oft":
+                logger.info("Loading OpenVLA-OFT model (without flash_attention_2)")
+                model = model_class.from_pretrained(
+                    model_path,
+                    torch_dtype=torch_dtype,
+                    config=model_config,
+                    trust_remote_code=trust_remote_code,
+                )
+                self._setup_openvla_oft_model(model, model_path)
+                
+            elif is_embodied and embodied_type == "openvla":
+                logger.info("Loading OpenVLA model (with flash_attention_2)")
+                model = model_class.from_pretrained(
+                    model_path,
+                    torch_dtype=torch_dtype,
+                    attn_implementation="flash_attention_2",
+                    config=model_config,
+                    trust_remote_code=trust_remote_code,
+                )
+            else:
+                model = model_class.from_pretrained(
+                    model_path,
+                    torch_dtype=torch_dtype,
+                    config=model_config,
+                    trust_remote_code=trust_remote_code,
+                )
+        
+        return model, model_config, torch_dtype
+
+    def _get_model_class(self, model_config, is_embodied: bool):
+        """Determine the appropriate model class based on config."""
+        from transformers import AutoModelForCausalLM, AutoModelForVision2Seq
+        
+        if type(model_config) in AutoModelForVision2Seq._model_mapping.keys() or is_embodied:
+            return AutoModelForVision2Seq
+        elif type(model_config).__name__ == "configuration_internvl_chat.InternVLChatConfig":
+            from siirl.models.transformers.internvl_chat import InternVLChatModel
+            logger.info("Using InternVLChatModel for internvl")
+            return InternVLChatModel
+        else:
+            return AutoModelForCausalLM
+
+    def _register_embodied_model(self, model_path: str, trust_remote_code: bool):
+        """Register embodied model classes to transformers registry."""
+        from transformers import AutoConfig, AutoModelForVision2Seq, AutoImageProcessor, AutoProcessor
+        
+        embodied_type = self.config.embodied.embodied_type
+        
+        if embodied_type not in ["openvla-oft", "openvla"]:
+            raise ValueError(f"Unsupported embodied type: {embodied_type}")
+        
+        # Import based on type
+        module_name = embodied_type.replace("-", "_")
+        config_module = f"siirl.models.embodied.{module_name}.configuration_prismatic"
+        model_module = f"siirl.models.embodied.{module_name}.modeling_prismatic"
+        processor_module = f"siirl.models.embodied.{module_name}.processing_prismatic"
+        
+        # Dynamic import
+        from importlib import import_module
+        config_mod = import_module(config_module)
+        model_mod = import_module(model_module)
+        processor_mod = import_module(processor_module)
+        
+        # Register classes
+        AutoConfig.register("openvla", config_mod.OpenVLAConfig)
+        AutoImageProcessor.register(config_mod.OpenVLAConfig, processor_mod.PrismaticImageProcessor)
+        AutoProcessor.register(config_mod.OpenVLAConfig, processor_mod.PrismaticProcessor)
+        AutoModelForVision2Seq.register(config_mod.OpenVLAConfig, model_mod.OpenVLAForActionPrediction)
+        
+        # Update automap on rank 0
+        if self.rank == 0:
+            from siirl.utils.embodied.openvla_utils import update_auto_map, check_model_logic_mismatch
+            update_auto_map(model_path)
+            check_model_logic_mismatch(model_path)
+        
+        torch.distributed.barrier()
+
+    def _setup_openvla_oft_model(self, model: torch.nn.Module, model_path: str):
+        """Apply OpenVLA-OFT specific configurations."""
+        import json
+        
+        # Setup multi-camera support
+        if hasattr(model, 'vision_backbone'):
+            num_images = getattr(self.config.embodied, 'num_images_in_input', 1)
+            model.vision_backbone.set_num_images_in_input(num_images)
+            logger.info(f"Set vision_backbone.num_images_in_input={num_images}")
+        
+        # Load dataset statistics for action normalization
+        stats_path = os.path.join(model_path, "dataset_statistics.json")
+        if os.path.isfile(stats_path):
+            with open(stats_path, "r") as f:
+                model.norm_stats = json.load(f)
+            logger.info(f"Loaded dataset_statistics.json with {len(model.norm_stats)} task(s)")
+        else:
+            logger.warning(
+                "No dataset_statistics.json found for OpenVLA-OFT. "
+                "This is expected for base checkpoints but may cause errors for fine-tuned models."
+            )
+
+    def _apply_model_modifications(
+        self,
+        model: torch.nn.Module,
+        use_liger: bool,
+        use_remove_padding: bool,
+        use_fused_kernels: bool,
+        enable_gradient_checkpointing: bool,
+        torch_dtype: torch.dtype,
+    ):
+        """
+        Apply various model modifications and optimizations.
+        
+        Modifications include:
+            1. Liger kernel optimization
+            2. Monkey patch (for remove padding and Ulysses SP)
+            3. Ensure correct dtype for all parameters
+            4. Gradient checkpointing
+            5. LoRA adapter
+        
+        Args:
+            model: Model to modify
+            use_liger: Whether to apply Liger kernel
+            use_remove_padding: Whether to use remove padding
+            use_fused_kernels: Whether to use fused kernels
+            enable_gradient_checkpointing: Whether to enable gradient checkpointing
+            torch_dtype: Target torch dtype
+        
+        Returns:
+            Modified model
+        """
+        is_embodied = self.config.model.model_type == "embodied"
+        
+        # Apply Liger kernel optimization
+        if use_liger:
+            from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
+            _apply_liger_kernel_to_instance(model=model)
+            logger.info("Applied Liger kernel to model")
+        
+        # Apply monkey patch for non-embodied models
+        if not is_embodied:
+            from siirl.models.transformers.monkey_patch import apply_monkey_patch
+            apply_monkey_patch(
+                model=model,
+                use_remove_padding=use_remove_padding,
+                ulysses_sp_size=self.ulysses_sequence_parallel_size,
+                use_fused_kernels=use_fused_kernels,
+            )
+        
+        # Ensure dtype consistency
+        model.to(torch_dtype)
+        
+        # Enable gradient checkpointing
+        if enable_gradient_checkpointing:
+            model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+            logger.info("Enabled gradient checkpointing")
+        
+        # Apply LoRA adapter
+        if self._is_lora:
+            logger.info("Applying LoRA to model")
+            model.enable_input_require_grads()
+            lora_config = {
+                "task_type": TaskType.CAUSAL_LM,
+                "r": self.config.model.lora_rank,
+                "lora_alpha": self.config.model.lora_alpha,
+                "target_modules": convert_to_regular_types(self.config.model.target_modules),
+                "bias": "none"
+            }
+            model = get_peft_model(model, LoraConfig(**lora_config))
+        
+        return model
+
+    def _setup_fsdp_wrapper(
+        self,
+        model: torch.nn.Module,
+        fsdp_config: FSDPArguments,
+        role: Role,
+        enable_activation_offload: bool,
+        enable_gradient_checkpointing: bool,
+    ):
+        """
+        Wrap model with FSDP (Fully Sharded Data Parallel).
+        
+        Steps:
+            1. Configure mixed precision
+            2. Get wrap policy
+            3. Wrap model based on strategy (fsdp/fsdp2)
+            4. Apply activation offload if needed
+        
+        Args:
+            model: Model to wrap
+            fsdp_config: FSDP configuration
+            role: Role (Actor or RefPolicy)
+            enable_activation_offload: Whether to enable activation offload
+            enable_gradient_checkpointing: Whether gradient checkpointing is enabled
+        
+        Returns:
+            FSDP wrapped model
+        """
+        from torch.distributed.fsdp import CPUOffload, MixedPrecision
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        from siirl.utils.model_utils.torch_dtypes import PrecisionType
+        
+        is_embodied = self.config.model.model_type == "embodied"
+        
+        # Configure mixed precision
+        mixed_precision_config = fsdp_config.mixed_precision
+        if mixed_precision_config is not None:
+            param_dtype = PrecisionType.to_dtype(mixed_precision_config.param_dtype)
+            reduce_dtype = PrecisionType.to_dtype(mixed_precision_config.reduce_dtype)
+            buffer_dtype = PrecisionType.to_dtype(mixed_precision_config.buffer_dtype)
+        else:
+            param_dtype = torch.bfloat16
+            reduce_dtype = torch.float32
+            buffer_dtype = torch.float32
+        
+        mixed_precision = MixedPrecision(
+            param_dtype=param_dtype,
+            reduce_dtype=reduce_dtype,
+            buffer_dtype=buffer_dtype
+        )
+        
+        # Get wrap policy
+        auto_wrap_policy = get_fsdp_wrap_policy(
+            module=model,
+            config=fsdp_config.wrap_policy,
+            is_lora=self.config.model.lora_rank > 0
+        )
+        
+        # Special case: HFRollout with Gemma
+        if self._is_rollout and self.config.rollout.name == "hf" and not is_embodied:
+            auto_wrap_policy = None
+        
+        if self.rank == 0:
+            logger.info(f"wrap_policy: {auto_wrap_policy}")
+        
+        # Prepare FSDP mesh and strategy
+        fsdp_mesh = self.device_mesh
+        sharding_strategy = get_sharding_strategy(fsdp_mesh)
+        fsdp_strategy = self.config.actor.strategy
+        
+        # Wrap model based on FSDP strategy
+        if fsdp_strategy == "fsdp":
+            # FSDP v1
+            cpu_offload = None if role == Role.Actor else CPUOffload(offload_params=True)
+            model_fsdp = FSDP(
+                model,
+                cpu_offload=cpu_offload,
+                param_init_fn=init_fn,
+                use_orig_params=False,
+                auto_wrap_policy=auto_wrap_policy,
+                device_id=get_device_id(),
+                sharding_strategy=sharding_strategy,
+                mixed_precision=mixed_precision,
+                sync_module_states=True,
+                device_mesh=self.device_mesh,
+                forward_prefetch=False,
+            )
+        elif fsdp_strategy == "fsdp2":
+            # FSDP v2
+            assert CPUOffloadPolicy is not None, \
+                "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
+            
+            mp_policy = MixedPrecisionPolicy(
+                param_dtype=param_dtype,
+                reduce_dtype=reduce_dtype,
+                cast_forward_inputs=True
+            )
+            
+            if role == Role.Actor and fsdp_config.offload_policy:
+                cpu_offload = CPUOffloadPolicy(pin_memory=True)
+                self._is_offload_param = False
+                self._is_offload_optimizer = False
+            else:
+                cpu_offload = None if role == Role.Actor else CPUOffloadPolicy(pin_memory=True)
+            
+            fsdp_kwargs = {
+                "mesh": fsdp_mesh,
+                "mp_policy": mp_policy,
+                "offload_policy": cpu_offload,
+                "reshard_after_forward": fsdp_config.reshard_after_forward,
+            }
+            full_state = model.state_dict()
+            apply_fsdp2(model, fsdp_kwargs, fsdp_config)
+            fsdp2_load_full_state_dict(model, full_state, fsdp_mesh, cpu_offload)
+            model_fsdp = model
+        else:
+            raise NotImplementedError(f"FSDP strategy '{fsdp_strategy}' not implemented")
+        
+        # Apply activation offload
+        if enable_activation_offload:
+            enable_activation_offloading(
+                model_fsdp, fsdp_strategy, enable_gradient_checkpointing
+            )
+        
+        return model_fsdp
+
+    def _create_optimizer_and_scheduler(
+        self,
+        model: torch.nn.Module,
+        optim_config: Optional[OptimizerArguments],
+        role: Role,
+    ):
+        """
+        Create optimizer and learning rate scheduler.
+        
+        Only creates when role is Actor and optim_config is provided.
+        
+        Args:
+            model: Model to create optimizer for
+            optim_config: Optimizer configuration
+            role: Role (Actor or RefPolicy)
+        
+        Returns:
+            Tuple of (optimizer, lr_scheduler), returns (None, None) if not needed
+        """
+        if role != Role.Actor or optim_config is None:
+            return None, None
+        
+        from torch import optim
+        from siirl.utils.model_utils.torch_functional import (
+            get_constant_schedule_with_warmup,
+            get_cosine_schedule_with_warmup
+        )
+        
+        # Create optimizer
+        optimizer = optim.AdamW(
+            model.parameters(),
+            lr=optim_config.lr,
+            betas=optim_config.betas,
+            weight_decay=optim_config.weight_decay,
+        )
+        
+        # Calculate warmup steps
+        total_steps = optim_config.total_training_steps
+        num_warmup_steps = int(optim_config.lr_warmup_steps)
+        if num_warmup_steps < 0:
+            num_warmup_steps_ratio = optim_config.lr_warmup_steps_ratio
+            num_warmup_steps = int(num_warmup_steps_ratio * total_steps)
+        
+        if self.rank == 0:
+            logger.info(f"Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}")
+        
+        # Create learning rate scheduler
+        warmup_style = optim_config.warmup_style
+        if warmup_style == "constant":
+            lr_scheduler = get_constant_schedule_with_warmup(
+                optimizer=optimizer,
+                num_warmup_steps=num_warmup_steps
+            )
+        elif warmup_style == "cosine":
+            min_lr_ratio = optim_config.min_lr_ratio if optim_config.min_lr_ratio else 0.0
+            num_cycles = optim_config.num_cycles
+            lr_scheduler = get_cosine_schedule_with_warmup(
+                optimizer=optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=total_steps,
+                min_lr_ratio=min_lr_ratio,
+                num_cycles=num_cycles
+            )
+        else:
+            raise NotImplementedError(f"Warmup style '{warmup_style}' is not supported")
+        
+        log_gpu_memory_usage(f"After {role} optimizer init", logger=logger)
+        
+        return optimizer, lr_scheduler
 
     def _build_rollout(self, trust_remote_code=False):
         from siirl.utils.model_utils.model import get_generation_config
