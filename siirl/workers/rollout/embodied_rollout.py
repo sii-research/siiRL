@@ -21,7 +21,7 @@ from collections import defaultdict
 from datetime import datetime
 
 import numpy as np
-from siiRL.siirl.utils.params import ActorRolloutRefArguments
+from siirl.utils.params import ActorRolloutRefArguments
 import tensorflow as tf
 import torch
 import torch.distributed
@@ -33,8 +33,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from transformers import AutoProcessor, GenerationConfig
 
-from siirl.dataloader import DataProto
-from siirl import DataProto
+from siirl.workers.databuffer.protocol import DataProto
 from siirl.utils.model_utils.torch_functional import get_eos_mask
 import siirl.utils.model_utils.torch_functional as siirl_F
 from siirl.workers.rollout.base import BaseRollout
@@ -139,7 +138,7 @@ class EmbodiedHFRollout(BaseRollout):
     def __init__(self, module: nn.Module, config: ActorRolloutRefArguments):
         super().__init__()
         self.config = config
-        self.module = module
+        self.model = module
         self.max_steps = {
             "libero_spatial": 512,
             "libero_object": 512,
@@ -154,13 +153,13 @@ class EmbodiedHFRollout(BaseRollout):
         self._num_gpus_per_node = config.n_gpus_per_node
 
         self.embedding_model = VideoEmbeddingModel(
-            model_path=config.embedding_model_path,
-            img_size=config.embedding_img_size,
-            enable_fp16=config.embedding_enable_fp16
+            model_path=config.embodied.video_embedding_model_path,
+            img_size=config.embodied.embedding_img_size,
+            enable_fp16=config.embodied.embedding_enable_fp16
         )
 
         self.enable_perf = os.environ.get("SIIRL_ENABLE_PERF", "0") == "1"
-        self.embedding_model_offload = config.embedding_model_offload
+        self.embedding_model_offload = config.embodied.embedding_model_offload
 
         # Initialize LIBEROAdapter
         self.num_workers = self.config.embodied.env.num_envs
@@ -197,9 +196,9 @@ class EmbodiedHFRollout(BaseRollout):
                     tf.config.experimental.set_memory_growth(gpu, True)
 
         if self.config.embodied.embodied_type in ["openvla-oft"]:
-            if self.config.embodied.unnorm_key not in self.module.norm_stats and f"{self.config.embodied.unnorm_key}_no_noops" in self.module.norm_stats:
+            if self.config.embodied.unnorm_key not in self.model.norm_stats and f"{self.config.embodied.unnorm_key}_no_noops" in self.model.norm_stats:
                 self.config.embodied.unnorm_key = f"{self.config.embodied.unnorm_key}_no_noops"
-            assert self.config.embodied.unnorm_key in self.module.norm_stats, f"Action un-norm key {self.config.embodied.unnorm_key} not found in VLA `norm_stats`!"
+            assert self.config.embodied.unnorm_key in self.model.norm_stats, f"Action un-norm key {self.config.embodied.unnorm_key} not found in VLA `norm_stats`!"
 
     def generate_sequences(self, prompts):
         """
@@ -320,7 +319,7 @@ class EmbodiedHFRollout(BaseRollout):
 
     def _generate_chunk_rollout(self, prompts):
         generate_tic = time.time()
-        self.module.eval()
+        self.model.eval()
         meta_info = prompts.meta_info
         n_samples = meta_info.get('n_samples', 1)
         task_id = prompts.batch['task_id'].repeat_interleave(n_samples, dim=0)
@@ -417,7 +416,7 @@ class EmbodiedHFRollout(BaseRollout):
         
         with _timer(f"post_loop_processing", timing_dict):
             torch.cuda.empty_cache()
-            self.module.train()
+            self.model.train()
             
             batch = {
                     'responses': [],
@@ -511,13 +510,13 @@ class EmbodiedHFRollout(BaseRollout):
 
             #generation_config = GenerationConfig(temperature=temperature, top_p=top_p, top_k=top_k)
 
-            if isinstance(self.module, FSDP):
+            if isinstance(self.model, FSDP):
                 # recurse need to set to False according to https://github.com/pytorch/pytorch/issues/100069
-                param_ctx = FSDP.summon_full_params(self.module, writeback=False, recurse=False)
+                param_ctx = FSDP.summon_full_params(self.model, writeback=False, recurse=False)
             
             with param_ctx:
                 with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                    actions, response = self.module.generate_action_verl(
+                    actions, response = self.model.generate_action_verl(
                         input_ids=idx,
                         pixel_values=pixel_values,
                         attention_mask=attention_mask,
@@ -562,11 +561,11 @@ class EmbodiedHFRollout(BaseRollout):
 
             batch_size = idx.size(0)
             prompt_length = idx.size(1)
-            #self.module.eval()
+            #self.model.eval()
             param_ctx = contextlib.nullcontext()
 
             do_sample = prompts.get('do_sample', self.config.rollout.do_sample)
-            response_length =  self.module.get_action_dim(self.config.embodied.unnorm_key)
+            response_length =  self.model.get_action_dim(self.config.embodied.unnorm_key)
             top_p = prompts.get('top_p', self.config.rollout.top_p)
             top_k = prompts.get('top_k', self.config.rollout.top_k)
             if top_k is None:
@@ -576,14 +575,14 @@ class EmbodiedHFRollout(BaseRollout):
             temperature = prompts.get('temperature', self.config.rollout.temperature)
             generation_config = GenerationConfig(temperature=temperature, top_p=top_p, top_k=top_k)
 
-            if isinstance(self.module, FSDP):
+            if isinstance(self.model, FSDP):
                 # recurse need to set to False according to https://github.com/pytorch/pytorch/issues/100069
-                param_ctx = FSDP.summon_full_params(self.module, writeback=False, recurse=False)
+                param_ctx = FSDP.summon_full_params(self.model, writeback=False, recurse=False)
             
             with param_ctx:
                 with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                     
-                    output = self.module.generate(
+                    output = self.model.generate(
                         input_ids=idx,
                         pixel_values=pixel_values,
                         attention_mask=attention_mask,
@@ -620,12 +619,12 @@ class EmbodiedHFRollout(BaseRollout):
 
             # Extract predicted action tokens and translate into (normalized) continuous actions
             predicted_action_token_ids = response.detach().cpu().numpy()
-            discretized_actions = self.module.vocab_size - predicted_action_token_ids
-            discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.module.bin_centers.shape[0] - 1)
-            normalized_actions = self.module.bin_centers[discretized_actions]
+            discretized_actions = self.model.vocab_size - predicted_action_token_ids
+            discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.model.bin_centers.shape[0] - 1)
+            normalized_actions = self.model.bin_centers[discretized_actions]
 
             # Unnormalize actions
-            action_norm_stats = self.module.get_action_stats(self.config.embodied.unnorm_key)
+            action_norm_stats = self.model.get_action_stats(self.config.embodied.unnorm_key)
             mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
             action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
             actions = np.where(

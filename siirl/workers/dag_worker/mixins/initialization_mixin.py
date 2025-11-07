@@ -311,6 +311,16 @@ class InitializationMixin:
             DAGConstants.INTERN_CONFIG
         ].rollout.tensor_model_parallel_size
 
+        if self.config.actor_rollout_ref.model.model_type == "embodied":
+            if self.dataloader_tensor_model_parallel_size != 1:
+                logger.warning(
+                    f"[Embodied Dataset] Detected dataset_type='embodied' with "
+                    f"tensor_model_parallel_size={self.dataloader_tensor_model_parallel_size}. "
+                    f"Overriding to 1 for correct data partitioning (DP-only, no TP). "
+                    f"Embodied training uses FSDP FULL_SHARD."
+                )
+                self.dataloader_tensor_model_parallel_size = 1
+
         self.dataloader = DataLoaderNode(
             node_id="dataloader",
             global_config=self.config,
@@ -695,6 +705,15 @@ class InitializationMixin:
         """Configures the sharding manager to sync weights between training backend and inference backend."""
         actor_worker = worker_dict[NodeRole.ACTOR]
         rollout_worker = worker_dict[NodeRole.ROLLOUT]
+
+        from siirl.workers.rollout.embodied_rollout import EmbodiedHFRollout
+        if isinstance(getattr(rollout_worker, "rollout", None), EmbodiedHFRollout):
+            if hasattr(actor_worker, "actor_module_fsdp"):
+                rollout_worker.rollout.model = actor_worker.actor_module_fsdp
+                logger.info(f"[Embodied] Set module for EmbodiedHFRollout for agent group {agent_group}.")
+            else:
+                logger.error(f"[Embodied] Actor worker for agent group {agent_group} does not have 'actor_module_fsdp'.")
+
         rollout_pg = self.agent_group_process_group[agent_group][NodeRole.ROLLOUT]
 
         parallel_config = {
@@ -711,6 +730,13 @@ class InitializationMixin:
 
         # Use lazy import and defer execution.
         sharding_manager_map = {
+            ("fsdp", "hf"): (
+                "siirl.workers.sharding_manager.base.BaseShardingManager",
+                lambda: {
+                    # BaseShardingManager is a pass-through for FSDP+HF rollout
+                    # Actor and Rollout are in the same process, module sharing is direct
+                },
+            ),
             ("fsdp", "vllm"): (
                 "siirl.workers.sharding_manager.fsdp_vllm.MultiAgentFSDPVLLMShardingManager",
                 lambda: {

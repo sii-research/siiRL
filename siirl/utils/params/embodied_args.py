@@ -15,7 +15,7 @@
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Literal, Optional
 
-from siiRL.siirl.utils.reward_score import embodied
+from siirl.utils.reward_score import embodied
 
 
 @dataclass

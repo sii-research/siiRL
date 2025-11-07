@@ -217,8 +217,12 @@ class ActorRolloutRefWorker(Worker):
                 self.config.actor.ppo_micro_batch_size_per_gpu = self.config.actor.ppo_micro_batch_size
 
             if self.config.actor.ppo_micro_batch_size_per_gpu is not None:
-                assert self.config.actor.ppo_mini_batch_size % self.config.actor.ppo_micro_batch_size_per_gpu == 0, f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be divisible by ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
-                assert self.config.actor.ppo_mini_batch_size // self.config.actor.ppo_micro_batch_size_per_gpu > 0, f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
+                assert self.config.actor.ppo_mini_batch_size % self.config.actor.ppo_micro_batch_size_per_gpu == 0, \
+                    f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be divisible by " \
+                    f"ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
+                assert self.config.actor.ppo_mini_batch_size // self.config.actor.ppo_micro_batch_size_per_gpu > 0, \
+                    f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than " \
+                    f"ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
 
         # normalize rollout config
         if self._is_rollout and self.config.rollout.log_prob_micro_batch_size is not None:
@@ -257,7 +261,7 @@ class ActorRolloutRefWorker(Worker):
         local_path = model_path
 
         if self.config.model.model_type == "embodied":
-            if self.config.embodied.vla_type == "openvla-oft":
+            if self.config.embodied.embodied_type == "openvla-oft":
                 from siirl.models.embodied.openvla_oft.configuration_prismatic import OpenVLAConfig
                 from siirl.models.embodied.openvla_oft.modeling_prismatic import OpenVLAForActionPrediction
                 from siirl.models.embodied.openvla_oft.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
@@ -271,7 +275,7 @@ class ActorRolloutRefWorker(Worker):
                     update_auto_map(local_path)
                     check_model_logic_mismatch(local_path)
                 torch.distributed.barrier()
-            elif self.config.embodied.vla_type == "openvla":
+            elif self.config.embodied.embodied_type == "openvla":
                 from siirl.models.embodied.openvla.configuration_prismatic import OpenVLAConfig
                 from siirl.models.embodied.openvla.modeling_prismatic import OpenVLAForActionPrediction
                 from siirl.models.embodied.openvla.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
@@ -286,7 +290,7 @@ class ActorRolloutRefWorker(Worker):
                     check_model_logic_mismatch(local_path)
                 torch.distributed.barrier()
             else:
-                raise ValueError(f"Invalid vla type: {self.config.embodied.vla_type}")
+                raise ValueError(f"Invalid vla type: {self.config.embodied.embodied_type}")
 
         torch_dtype = fsdp_config.model_dtype
         if torch_dtype is None:
@@ -295,7 +299,10 @@ class ActorRolloutRefWorker(Worker):
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         # override model kwargs
-        actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code, attn_implementation="flash_attention_2")
+        if self.config.model.model_type == "embodied" and self.config.embodied.embodied_type == "openvla-oft":
+            actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+        else:
+            actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code, attn_implementation="flash_attention_2")
         if self._is_ref:
             self.flops_counter = FlopsCounter(actor_model_config, forward_only=True)
         # patch for kimi-vl
@@ -311,15 +318,16 @@ class ActorRolloutRefWorker(Worker):
         }
         override_config_kwargs.update(override_model_config)
         update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
-        if self.rank == 0:
-            logger.info(f"Model config after override: {actor_model_config}")
+        # if self.rank == 0:
+        #     logger.info(f"Model config after override: {actor_model_config}")
 
         # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang
         init_context = get_init_weight_context_manager(use_meta_tensor=not actor_model_config.tie_word_embeddings, mesh=self.device_mesh)
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            if type(actor_model_config) in AutoModelForVision2Seq._model_mapping.keys():
+            is_embodied_model = self.config.model.model_type == "embodied"
+            if type(actor_model_config) in AutoModelForVision2Seq._model_mapping.keys() or is_embodied_model:
                 actor_module_class = AutoModelForVision2Seq
             elif type(actor_model_config).__name__ in "configuration_internvl_chat.InternVLChatConfig":
                 from siirl.models.transformers.internvl_chat import InternVLChatModel
@@ -329,11 +337,7 @@ class ActorRolloutRefWorker(Worker):
             else:
                 actor_module_class = AutoModelForCausalLM
 
-            is_embodied_model = (
-                type(actor_model_config) in AutoModelForVision2Seq._model_mapping.keys()
-                and hasattr(self.config, 'embodied')
-                and self.config.embodied.embodied_type in ["openvla", "openvla-oft"]
-            )
+            
             
             if is_embodied_model and self.config.embodied.embodied_type == "openvla-oft":
                 # OpenVLA-OFT: No flash_attention_2, requires additional setup
@@ -365,7 +369,7 @@ class ActorRolloutRefWorker(Worker):
                         "Otherwise, you may encounter errors when calling predict_action() due to missing unnorm_key."
                     )
                     
-            elif is_embodied_model and self.config.embodied.vla_type == "openvla":
+            elif is_embodied_model and self.config.embodied.embodied_type == "openvla":
                 # OpenVLA: Use flash_attention_2 for efficiency
                 logger.info("Loading OpenVLA model (with flash_attention_2)")
                 actor_module = actor_module_class.from_pretrained(
@@ -407,7 +411,10 @@ class ActorRolloutRefWorker(Worker):
                 logger.info("Applying LoRA to actor module")
                 actor_module.enable_input_require_grads()
                 # Convert config to regular Python types before creating PEFT model
-                lora_config = {"task_type": TaskType.CAUSAL_LM, "r": self.config.model.lora_rank, "lora_alpha": self.config.model.lora_alpha, "target_modules": convert_to_regular_types(self.config.model.target_modules), "bias": "none"}
+                lora_config = {"task_type": TaskType.CAUSAL_LM, 
+                               "r": self.config.model.lora_rank, 
+                               "lora_alpha": self.config.model.lora_alpha, 
+                               "target_modules": convert_to_regular_types(self.config.model.target_modules), "bias": "none"}
                 actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
                 
         torch.distributed.barrier()
@@ -515,7 +522,9 @@ class ActorRolloutRefWorker(Worker):
             if warmup_style == "constant":
                 actor_lr_scheduler = get_constant_schedule_with_warmup(optimizer=actor_optimizer, num_warmup_steps=num_warmup_steps)
             elif warmup_style == "cosine":
-                actor_lr_scheduler = get_cosine_schedule_with_warmup(optimizer=actor_optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=total_steps, min_lr_ratio=min_lr_ratio, num_cycles=num_cycles)
+                actor_lr_scheduler = get_cosine_schedule_with_warmup(optimizer=actor_optimizer, num_warmup_steps=num_warmup_steps, 
+                                                                     num_training_steps=total_steps, min_lr_ratio=min_lr_ratio, 
+                                                                     num_cycles=num_cycles)
             else:
                 raise NotImplementedError(f"Warmup style {warmup_style} is not supported")
 
@@ -537,15 +546,10 @@ class ActorRolloutRefWorker(Worker):
         if rollout_name == "hf":
             if self.config.model.model_type == "embodied":
                 from siirl.workers.rollout.embodied_rollout import EmbodiedHFRollout
-                rollout = EmbodiedHFRollout(module=self.actor_module_fsdp, config=self.config.rollout)
-                rollout_sharding_manager = BaseShardingManager()
+                rollout = EmbodiedHFRollout(module=None, config=self.config)
             else: 
                 from siirl.workers.rollout import HFRollout
-                from siirl.workers.sharding_manager.base import BaseShardingManager
-
-                rollout = HFRollout(module=self.actor_module_fsdp, config=self.config.rollout)
-                rollout_sharding_manager = BaseShardingManager()
-            # TODO: a sharding manager that do nothing?
+                rollout = HFRollout(module=None, config=self.config)
 
         elif rollout_name == "vllm":
             from siirl.workers.rollout.vllm_rollout import vllm_mode, vLLMRollout
@@ -611,8 +615,6 @@ class ActorRolloutRefWorker(Worker):
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
         # TODO(zhangchi.usc1992): 1. support create from random initialized model. 2. Support init with FSDP directly
-        tokenizer_module = load_tokenizer(model_args=self.config.model)
-        self.tokenizer, self.processor = tokenizer_module["tokenizer"], tokenizer_module["processor"]
 
         if self._is_actor:
             optim_config = self.config.actor.optim
@@ -637,6 +639,9 @@ class ActorRolloutRefWorker(Worker):
                 role=Role.Actor,
                 enable_activation_offload=self.config.model.enable_activation_offload,
             )
+
+            tokenizer_module = load_tokenizer(model_args=self.config.model)
+            self.tokenizer, self.processor = tokenizer_module["tokenizer"], tokenizer_module["processor"]
 
             # get the original unwrapped module
             if fsdp_version(self.actor_module_fsdp) == 1:
@@ -979,8 +984,8 @@ class CriticWorker(Worker):
             "pad_token_id": self.tokenizer.pad_token_id,
         }
         override_config_kwargs.update(override_config)
-        if self.rank == 0:
-            logger.info(f"Critic overriding config {override_config_kwargs}")
+        # if self.rank == 0:
+        #     logger.info(f"Critic overriding config {override_config_kwargs}")
 
         torch_dtype = self.config.model.fsdp_config.model_dtype
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
