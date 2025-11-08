@@ -1168,7 +1168,7 @@ class ActorRolloutRefWorker(Worker):
         return rollout, None
 
     def init_model(self):
-        from siirl.workers.actor import DataParallelPPOActor
+        from siirl.workers.actor import DataParallelPPOActor, RobDataParallelPPOActor
 
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.external_lib)
@@ -1220,7 +1220,16 @@ class ActorRolloutRefWorker(Worker):
         if self._is_actor:
             self.config.actor.use_remove_padding = use_remove_padding
             self.config.actor.use_fused_kernels = use_fused_kernels
-            self.actor = DataParallelPPOActor(config=self.config.actor, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer)
+            
+            # Select appropriate Actor class based on model type
+            is_embodied_model = self.config.model.model_type == "embodied"
+            ActorClass = RobDataParallelPPOActor if is_embodied_model else DataParallelPPOActor
+            
+            self.actor = ActorClass(
+                config=self.config.actor,
+                actor_module=self.actor_module_fsdp,
+                actor_optimizer=self.actor_optimizer
+            )
 
         if self._is_rollout:
             from transformers import AutoConfig
@@ -1245,7 +1254,15 @@ class ActorRolloutRefWorker(Worker):
             )[0]
             self.config.ref.use_remove_padding = use_remove_padding
             self.config.ref.use_fused_kernels = use_fused_kernels
-            self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
+            
+            # Select appropriate Actor class for reference policy
+            is_embodied_model = self.config.model.model_type == "embodied"
+            RefPolicyClass = RobDataParallelPPOActor if is_embodied_model else DataParallelPPOActor
+            
+            self.ref_policy = RefPolicyClass(
+                config=self.config.ref,
+                actor_module=self.ref_module_fsdp
+            )
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)

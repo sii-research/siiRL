@@ -21,9 +21,10 @@ from typing import Iterable, Tuple
 import torch
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from loguru import logger
 
 from siirl.workers.databuffer.protocol import DataProto
-from siirl.workers.dag_worker.core_algos import core_algos
+from siirl.workers.dag_worker import core_algos
 from siirl.workers.actor.base import BasePPOActor
 from siirl.utils.extras.py_functional import append_to_dict
 from siirl.utils.model_utils.torch_functional import logprobs_from_logits, log_probs_from_logits_all_rmpad
@@ -48,9 +49,7 @@ class RobDataParallelPPOActor(BasePPOActor):
         super().__init__(config)
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
-        self.use_remove_padding = self.config.get('use_remove_padding', False)
-        print(f'Actor use_remove_padding={self.use_remove_padding}')
-        print(f'PRM use dynamic bsz={self.config.get("use_dynamic_bsz", False)}')
+        self.use_remove_padding = self.config.use_remove_padding
         self.ulysses_sequence_parallel_size = self.config.ulysses_sequence_parallel_size
         self.use_ulysses_sp = False #self.ulysses_sequence_parallel_size > 1
         self.compute_entropy_from_logits = torch.compile(siirl_F.entropy_from_logits, dynamic=True)
@@ -327,7 +326,7 @@ class RobDataParallelPPOActor(BasePPOActor):
         self.actor_optimizer.step()
         return grad_norm
 
-    def compute_log_prob(self, data: DataProto) -> torch.Tensor:
+    def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
 
         Args:
@@ -353,7 +352,8 @@ class RobDataParallelPPOActor(BasePPOActor):
         use_dynamic_bsz = data.meta_info['use_dynamic_bsz'] #trues
         self.pad_token_id = data.meta_info['pad_token_id']
         
-        select_keys = ['responses', 'input_ids', 'attention_mask', 'pixel_values',"finish_step"]
+        # Note: finish_step is 1D and only needed for reward computation, not for log_prob
+        select_keys = ['responses', 'input_ids', 'attention_mask', 'pixel_values','finish_step']
         batch = data.select(batch_keys=select_keys).batch
 
         if use_dynamic_bsz:
@@ -543,7 +543,7 @@ class RobDataParallelPPOActor(BasePPOActor):
 
                 with torch.no_grad():
                     entropy = self._forward_micro_batch_entropy(micro_batch=data, temperature=temperature)
-                    entropy_loss = verl_F.masked_mean(entropy, response_mask)
+                    entropy_loss = siirl_F.masked_mean(entropy, response_mask)
 
                 if bacth_data.meta_info['is_filtered'] and bacth_data.meta_info['train_mode']:
                     data = {

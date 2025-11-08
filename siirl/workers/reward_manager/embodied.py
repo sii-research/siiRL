@@ -90,30 +90,18 @@ class EmbodiedRewardManager:
             If return_dict=True: {"reward_tensor": tensor, "reward_extra_info": dict}
             If return_dict=False: (reward_tensor_dict, reward_metrics) tuple
         """
-        logger.info(f"[DEBUG EmbodiedRewardManager.__call__] ========== 开始 ==========")
-        logger.info(f"[DEBUG EmbodiedRewardManager.__call__] return_dict: {return_dict}")
-        logger.info(f"[DEBUG EmbodiedRewardManager.__call__] data类型: {type(data)}")
-        
         batch_size = data.batch["responses"].shape[0]
-        logger.info(f"[DEBUG EmbodiedRewardManager.__call__] batch_size: {batch_size}")
-        logger.info(f"[DEBUG EmbodiedRewardManager.__call__] action_token_len: {self.action_token_len}")
-        logger.info(f"[DEBUG EmbodiedRewardManager.__call__] reward_coef: {self.reward_coef}")
 
         # --- Step 1: Delegate the core reward calculation ---
         if self.compute_score is None:
-            logger.error("[DEBUG EmbodiedRewardManager.__call__] No compute_score function available!")
             # Return zero rewards as fallback
             verifier_scores = [0.0] * batch_size
             format_scores = [1.0] * batch_size
             scores_info = [{"score": 0.0, "format_correctness": 1.0, "is_success": False} for _ in range(batch_size)]
         else:
-            logger.info(f"[DEBUG EmbodiedRewardManager.__call__] 调用 compute_score 函数: {self.compute_score.__name__}")
             scores_info = self.compute_score(batch_data=data)
-            logger.info(f"[DEBUG EmbodiedRewardManager.__call__] compute_score 返回了 {len(scores_info)} 个结果")
             verifier_scores = [info["score"] for info in scores_info]
             format_scores = [info.get("format_correctness", 1.0) for info in scores_info]
-            logger.info(f"[DEBUG EmbodiedRewardManager.__call__] verifier_scores前5个: {verifier_scores[:min(5, batch_size)]}")
-            logger.info(f"[DEBUG EmbodiedRewardManager.__call__] format_scores前5个: {format_scores[:min(5, batch_size)]}")
 
         # --- Step 3: Log debug examples (on rank 0 only) ---
         if self.rank == 0 and self.print_count < self.num_examine:
@@ -133,30 +121,17 @@ class EmbodiedRewardManager:
 
         # --- Step 4: Populate the reward tensor at the final timestep ---
         # The reward is applied as a terminal reward at the end of the action sequence.
-        verifier_rewards = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
-        verifier_rewards = verifier_rewards.view(batch_size, -1)
         
-        logger.info(f"[DEBUG EmbodiedRewardManager.__call__] verifier_rewards shape: {verifier_rewards.shape}")
-        logger.info(f"[DEBUG EmbodiedRewardManager.__call__] finish_step: {data.batch['finish_step']}")
+        verifier_rewards = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+        
+        verifier_rewards = verifier_rewards.view(batch_size, -1)
 
         valid_response_length = data.batch["finish_step"] * self.action_token_len
-        logger.info(f"[DEBUG EmbodiedRewardManager.__call__] valid_response_length: {valid_response_length}")
 
         for i in range(batch_size):
             last_step_idx = valid_response_length[i] - 1
             if last_step_idx >= 0:
                 verifier_rewards[i, last_step_idx] = verifier_scores[i]
-        
-        logger.info(f"[DEBUG EmbodiedRewardManager.__call__] 填充后的verifier_rewards详细信息:")
-        for i in range(min(5, batch_size)):
-            non_zero_indices = torch.nonzero(verifier_rewards[i]).squeeze()
-            task_info = scores_info[i]
-            logger.info(f"[DEBUG EmbodiedRewardManager.__call__]   样本{i}: "
-                       f"score={verifier_scores[i]:.4f}, "
-                       f"is_success={task_info.get('is_success')}, "
-                       f"finish_step={valid_response_length[i].item()//self.action_token_len}, "
-                       f"last_step_idx={valid_response_length[i].item()-1}, "
-                       f"非零位置={non_zero_indices.tolist() if non_zero_indices.numel() > 0 else '无'}")
 
         # --- Step 5: Aggregate final rewards and metrics ---
         reward_tensor_dict = {"gt_scores": verifier_rewards}
@@ -173,22 +148,21 @@ class EmbodiedRewardManager:
         reward_tensor_dict["all"] = final_reward_tensor
         reward_metrics["reward_all"] = final_reward_tensor.sum(dim=-1).mean().item()
         
-        logger.info(f"[DEBUG EmbodiedRewardManager.__call__] ========== 计算完成 ==========")
-        logger.info(f"[DEBUG EmbodiedRewardManager.__call__] reward_metrics: {reward_metrics}")
-        logger.info(f"[DEBUG EmbodiedRewardManager.__call__] final_reward_tensor shape: {final_reward_tensor.shape}")
-        logger.info(f"[DEBUG EmbodiedRewardManager.__call__] final_reward_tensor统计: mean={final_reward_tensor.mean():.4f}, max={final_reward_tensor.max():.4f}, min={final_reward_tensor.min():.4f}")
 
         # Return format based on return_dict flag
         if return_dict:
             # Format for compute_reward function (scheduler.reward.compute_reward)
-            logger.info(f"[DEBUG EmbodiedRewardManager.__call__] 返回 dict 格式")
+            # Return per-sample format to match NaiveRewardManager/BatchRewardManager standard
+            reward_extra_info = {
+                "verifier_score": verifier_scores.tolist(),      # Per-sample scores
+                "format_correctness": format_scores.tolist(),    # Per-sample format correctness
+            }
             return {
                 "reward_tensor": reward_tensor_dict["all"],
-                "reward_extra_info": reward_metrics
+                "reward_extra_info": reward_extra_info
             }
         else:
             # Format for direct call (verl compatibility)
-            logger.info(f"[DEBUG EmbodiedRewardManager.__call__] 返回 tuple 格式")
             return reward_tensor_dict, reward_metrics
 
     def verify(self, data: DataProto) -> Tuple[List[float], Dict[str, float], Dict[str, float], Dict[str, float]]:
