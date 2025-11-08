@@ -135,7 +135,7 @@ class RobDataParallelPPOActor(BasePPOActor):
             input_ids_unpad, _ = self.process_tensor(input_ids, self.pad_token_id)
             attention_mask_unpad, _ = self.process_tensor(attention_mask, 0)
             
-            if self.config.vla == "openvla-oft":
+            if self.config.embodied_type == "openvla-oft":
                 logits = self.actor_module(input_ids=input_ids_unpad,
                                         attention_mask=attention_mask_unpad,
                                         pixel_values=pixel_values,
@@ -194,7 +194,7 @@ class RobDataParallelPPOActor(BasePPOActor):
        
         
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            if self.config.vla == "openvla-oft":
+            if self.config.embodied_type == "openvla-oft":
                 
                 input_ids_unpad, _ = self.process_tensor(input_ids, self.pad_token_id)
                 attention_mask_unpad, _ = self.process_tensor(attention_mask, 0)
@@ -272,7 +272,7 @@ class RobDataParallelPPOActor(BasePPOActor):
             input_ids_unpad, _ = self.process_tensor(input_ids, self.pad_token_id)
             attention_mask_unpad, _ = self.process_tensor(attention_mask, 0)
 
-            if  self.config.vla == "openvla-oft":
+            if  self.config.embodied_type == "openvla-oft":
             
                 logits = self.actor_module(input_ids=input_ids_unpad,
                                                 attention_mask=attention_mask_unpad,

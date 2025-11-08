@@ -154,8 +154,8 @@ class EmbodiedRewardManager:
             # Format for compute_reward function (scheduler.reward.compute_reward)
             # Return per-sample format to match NaiveRewardManager/BatchRewardManager standard
             reward_extra_info = {
-                "verifier_score": verifier_scores.tolist(),      # Per-sample scores
-                "format_correctness": format_scores.tolist(),    # Per-sample format correctness
+                "verifier_score": verifier_scores,      # Per-sample scores (already a list)
+                "format_correctness": format_scores,    # Per-sample format correctness (already a list)
             }
             return {
                 "reward_tensor": reward_tensor_dict["all"],

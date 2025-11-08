@@ -1221,8 +1221,12 @@ class ActorRolloutRefWorker(Worker):
             self.config.actor.use_remove_padding = use_remove_padding
             self.config.actor.use_fused_kernels = use_fused_kernels
             
-            # Select appropriate Actor class based on model type
+            # Pass embodied_type to Actor for embodied models
             is_embodied_model = self.config.model.model_type == "embodied"
+            if is_embodied_model:
+                self.config.actor.embodied_type = self.config.embodied.embodied_type
+            
+            # Select appropriate Actor class based on model type
             ActorClass = RobDataParallelPPOActor if is_embodied_model else DataParallelPPOActor
             
             self.actor = ActorClass(
@@ -1255,8 +1259,12 @@ class ActorRolloutRefWorker(Worker):
             self.config.ref.use_remove_padding = use_remove_padding
             self.config.ref.use_fused_kernels = use_fused_kernels
             
-            # Select appropriate Actor class for reference policy
+            # Pass embodied_type to RefPolicy for embodied models
             is_embodied_model = self.config.model.model_type == "embodied"
+            if is_embodied_model:
+                self.config.ref.embodied_type = self.config.embodied.embodied_type
+            
+            # Select appropriate Actor class for reference policy
             RefPolicyClass = RobDataParallelPPOActor if is_embodied_model else DataParallelPPOActor
             
             self.ref_policy = RefPolicyClass(

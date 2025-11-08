@@ -318,6 +318,10 @@ class ActorArguments:
     entropy_from_logits_with_chunking: bool = field(
         default=False, metadata={"help": "Enable entropy from logits with chunking"}
     )
+    embodied_type: Optional[str] = field(
+        default=None, 
+        metadata={"help": "Embodied model type: 'openvla' or 'openvla-oft', None for non-embodied models"}
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -507,6 +511,10 @@ class RefArguments:
     entropy_checkpointing: bool = field(default=False, metadata={"help": "Enable entropy checkpointing"})
     entropy_from_logits_with_chunking: bool = field(
         default=False, metadata={"help": "Enable entropy from logits with chunking"}
+    )
+    embodied_type: Optional[str] = field(
+        default=None, 
+        metadata={"help": "Embodied model type: 'openvla' or 'openvla-oft', None for non-embodied models"}
     )
 
     def to_dict(self) -> Dict[str, Any]:
