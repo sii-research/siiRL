@@ -171,7 +171,7 @@ class NodeExecutorsMixin:
         """Calculates rewards for a batch of generated sequences."""
         if "token_level_rewards" in batch.batch:
             return NodeOutput(batch=batch, metrics={})
-        batch.meta_info["global_token_num"] = (torch.sum(batch.batch["attention_mask"], dim=-1) // tp_size).tolist()
+        batch.meta_info["global_token_num"] = (torch.sum(batch.batch["attention_mask"], dim=-1).flatten() // tp_size).tolist()
         reward_tensor, extra_infos = compute_reward(batch, self.reward_fn)
         batch.batch["token_level_scores"] = reward_tensor
 
@@ -192,7 +192,7 @@ class NodeExecutorsMixin:
         if "global_token_num" not in batch.meta_info:
             # in multi-agent, agentA may don't have reward node
             # insert some info needed
-            batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+            batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).flatten().tolist()
         processed_data = self.agent_group_worker[worker_group_index][NodeRole.ACTOR].compute_log_prob(batch)
         process_group = self._get_node_process_group(self._get_node(NodeRole.ACTOR, worker_group_index))
 

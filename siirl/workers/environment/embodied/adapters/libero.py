@@ -79,7 +79,7 @@ class LIBEROAdapter(BaseVLAEnvironment):
         self.gpu_ids = gpu_ids
 
         self.env: SubprocVectorEnv = None
-        self.step_count = None
+        self.step_count = None  # Will be initialized as a fixed-size array on first reset
 
         self.benchmark_dict = benchmark.get_benchmark_dict()
         self.task_suite = self.benchmark_dict[self.task_suite_name]()
@@ -132,10 +132,29 @@ class LIBEROAdapter(BaseVLAEnvironment):
             f"[LIBEROAdapter] Step 2: Creating/reinitializing SubprocVectorEnv "
             f"(first_time={self.env is None})..."
         )
+        
         if self.env is None:
-            # First time reset, create the SubprocVectorEnv
-            self.env = SubprocVectorEnv(env_creators)
+            # First time reset: Always create self.env_num workers to ensure fixed worker pool
+            if len(env_creators) < self.env_num:
+                # Use the first task's env_creator as placeholder for remaining workers
+                placeholder_creator = env_creators[0]
+                env_creators_full = env_creators + [placeholder_creator] * (self.env_num - len(env_creators))
+                logger.info(
+                    f"[LIBEROAdapter] Creating {self.env_num} workers "
+                    f"({len(env_creators)} active + {self.env_num - len(env_creators)} placeholder)"
+                )
+            else:
+                env_creators_full = env_creators
+                logger.info(f"[LIBEROAdapter] Creating {self.env_num} workers (all active)")
+            
+            self.env = SubprocVectorEnv(env_creators_full)
+            logger.info(f"[LIBEROAdapter] SubprocVectorEnv created with {len(self.env)} workers")
         else:
+            # Subsequent resets: Ensure we don't exceed available workers
+            assert len(task_ids) <= self.env_num, \
+                f"Cannot reset {len(task_ids)} environments when only {self.env_num} workers exist"
+            
+            logger.info(f"[LIBEROAdapter] Reinitializing {len(env_creators)} environments (ids: {active_env_ids[:3]}...)")
             self.env.reinit_envs(env_creators, id=active_env_ids)
 
         logger.info(f"[LIBEROAdapter] Step 3: Calling env.reset() for {len(active_env_ids)} envs...")
@@ -171,7 +190,13 @@ class LIBEROAdapter(BaseVLAEnvironment):
             # Step only the active environments.
             obs_np_list, _, _, _ = self.env.step(dummy_actions, id=active_env_ids)
 
-        self.step_count = np.zeros(len(trial_ids), dtype=int)
+        # Initialize or reset step_count for the fixed-size worker pool
+        if self.step_count is None:
+            self.step_count = np.zeros(self.env_num, dtype=int)
+            logger.info(f"[LIBEROAdapter] Initialized step_count array with size {self.env_num}")
+        else:
+            # Reset step count for the active environments only
+            self.step_count[active_env_ids] = 0
 
         logger.info(f"[LIBEROAdapter] Step 7: Building {len(task_ids)} result dicts...")
         results = []
