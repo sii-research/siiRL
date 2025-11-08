@@ -38,6 +38,8 @@ from siirl.utils.model_utils.torch_functional import get_eos_mask
 import siirl.utils.model_utils.torch_functional as siirl_F
 from siirl.workers.rollout.base import BaseRollout
 from siirl.utils.embodied.video_emb import VideoEmbeddingModel
+from siirl.utils.debug import log_gpu_memory_usage
+from loguru import logger
 
 
 if multiprocessing.get_start_method(allow_none=True) != "spawn":
@@ -152,11 +154,13 @@ class EmbodiedHFRollout(BaseRollout):
         ) if torch.distributed.is_initialized() else 0
         self._num_gpus_per_node = self.config.embodied.n_gpus_per_node
 
+        log_gpu_memory_usage("Before init embedding model to device", logger=logger)
         self.embedding_model = VideoEmbeddingModel(
             model_path=config.embodied.video_embedding_model_path,
             img_size=config.embodied.embedding_img_size,
             enable_fp16=config.embodied.embedding_enable_fp16
         )
+        log_gpu_memory_usage("After init embedding model to device", logger=logger)
 
         self.enable_perf = os.environ.get("SIIRL_ENABLE_PERF", "0") == "1"
         self.embedding_model_offload = config.embodied.embedding_model_offload
@@ -174,6 +178,11 @@ class EmbodiedHFRollout(BaseRollout):
         )
         logger.info(
             f"Initializing LIBEROAdapter with {self.num_workers} environments...")
+        
+        log_gpu_memory_usage("Before offload embedding model to device", logger=logger)
+        if self.embedding_model_offload:
+            self.embedding_model.offload_to_host()
+            log_gpu_memory_usage("After offload embedding model to device", logger=logger)
 
     def close(self):
         """Gracefully shuts down the environment adapter."""
@@ -211,9 +220,11 @@ class EmbodiedHFRollout(BaseRollout):
         if not self._embodied_processed:
             self.embodied_preprocess()
             self._embodied_processed = True
-
+        
+        log_gpu_memory_usage("Before loading embedding model to device", logger=logger)
         if self.embedding_model_offload:
             self.embedding_model.load_to_device()
+            log_gpu_memory_usage("After loading embedding model to device", logger=logger)
 
         tic = time.time()
 
@@ -245,8 +256,10 @@ class EmbodiedHFRollout(BaseRollout):
         # Concatenate the DataProto objects from all chunks
         final_output = DataProto.concat(all_chunk_outputs)
 
+        log_gpu_memory_usage("Before offload embedding model to device", logger=logger)
         if self.embedding_model_offload:
             self.embedding_model.offload_to_host()
+            log_gpu_memory_usage("After offload embedding model to device", logger=logger)
             
         logger.info(f"RobHFRollout.generate_sequences finished for a single batch of size {final_output.batch.batch_size[0]}"
                     f", took {time.time() - tic:.2f} seconds")

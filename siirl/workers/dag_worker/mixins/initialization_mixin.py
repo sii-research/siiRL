@@ -753,10 +753,15 @@ class InitializationMixin:
         # Use lazy import and defer execution.
         sharding_manager_map = {
             ("fsdp", "hf"): (
-                "siirl.workers.sharding_manager.base.BaseShardingManager",
+                "siirl.workers.sharding_manager.fsdp_hf.FSDPHFShardingManager",
                 lambda: {
-                    # BaseShardingManager is a pass-through for FSDP+HF rollout
-                    # Actor and Rollout are in the same process, module sharing is direct
+                    "module": actor_worker.actor_module_fsdp,
+                    "rollout": rollout_worker.rollout,
+                    "offload_param": getattr(actor_worker, "_is_offload_param", False),
+                    "offload_embedding": (
+                        getattr(rollout_worker.config, "embodied", None) is not None and
+                        getattr(rollout_worker.config.embodied, "embedding_model_offload", False)
+                    ),
                 },
             ),
             ("fsdp", "vllm"): (

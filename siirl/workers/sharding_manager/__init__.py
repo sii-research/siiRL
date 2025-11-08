@@ -12,4 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .base import BaseShardingManager
+from .fsdp_hf import FSDPHFShardingManager
 # from .fsdp_vllm import MultiAgentFSDPVLLMShardingManager
+
+__all__ = [
+    "BaseShardingManager",
+    "FSDPHFShardingManager",
+]
