@@ -373,14 +373,37 @@ class FlopsCounter:
         Estimate the FLOPS based on the number of valid tokens in the current batch and the time taken.
 
         Args:
-            batch_seqlens (List[int]): A list where each element represents the number of valid tokens in the current batch.
+            batch_seqlens (List[int] or int): A list where each element represents the number of valid tokens in the current batch,
+                or a single integer representing total tokens. Can also handle nested lists.
             delta_time (float): The time taken to process the batch, in seconds.
 
         Returns:
             estimated_flops (float): The estimated FLOPS based on the input tokens and time.
             promised_flops (float): The expected FLOPS of the current device.
         """
-        tokens_sum = sum(batch_seqlens)
+        # Normalize batch_seqlens to a flat list of integers
+        def flatten_to_ints(data):
+            """Recursively flatten nested lists/tuples to a flat list of integers."""
+            if isinstance(data, (int, float)):
+                return [int(data)]
+            elif isinstance(data, (list, tuple)):
+                result = []
+                for item in data:
+                    result.extend(flatten_to_ints(item))
+                return result
+            else:
+                # If it's some other type (e.g., tensor), try to convert
+                try:
+                    return flatten_to_ints(list(data))
+                except:
+                    # Fallback: treat as single item
+                    return [int(data)]
+        
+        batch_seqlens_flat = flatten_to_ints(batch_seqlens)
+        tokens_sum = sum(batch_seqlens_flat)
+        
+        # Use the flattened list for further processing
+        batch_seqlens = batch_seqlens_flat
         func = self.estimate_func.get(
             self.config.model_type, self._estimate_unknown_flops
         )

@@ -20,7 +20,6 @@ Manages model loading/offloading between training (actor) and inference (rollout
 from loguru import logger
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
 
-from siirl.utils.debug import GPUMemoryLogger, log_gpu_memory_usage
 from siirl.utils.extras.device import get_torch_device
 from siirl.utils.model_utils.fsdp_utils import load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
 from siirl.workers.sharding_manager.base import BaseShardingManager
@@ -67,7 +66,6 @@ class FSDPHFShardingManager(BaseShardingManager):
             f"offload_param={offload_param}, offload_embedding={offload_embedding}"
         )
     
-    @GPUMemoryLogger(role="FSDPHFShardingManager.__enter__", logger=logger)
     def __enter__(self):
         """
         Called before rollout generation.
@@ -79,19 +77,14 @@ class FSDPHFShardingManager(BaseShardingManager):
         
         # 1. Load actor model to GPU
         if self.offload_param:
-            logger.info("Loading actor model to GPU for rollout...")
             load_fsdp_model_to_gpu(self.module)
-            log_gpu_memory_usage("After loading actor model for rollout", logger=logger)
         
         # 2. Load embedding model to GPU (for EmbodiedHFRollout)
-        if self.offload_embedding and hasattr(self.rollout, 'embedding_model'):
-            logger.info("Loading embedding model to GPU...")
+        if self.offload_embedding:
             self.rollout.embedding_model.load_to_device()
-            log_gpu_memory_usage("After loading embedding model", logger=logger)
         
         self.is_asleep = False
     
-    @GPUMemoryLogger(role="FSDPHFShardingManager.__exit__", logger=logger)
     def __exit__(self, exc_type, exc_value, traceback):
         """
         Called after rollout generation.
@@ -102,16 +95,12 @@ class FSDPHFShardingManager(BaseShardingManager):
             return
         
         # 1. Offload embedding model first (for EmbodiedHFRollout)
-        if self.offload_embedding and hasattr(self.rollout, 'embedding_model'):
-            logger.info("Offloading embedding model to CPU...")
+        if self.offload_embedding:
             self.rollout.embedding_model.offload_to_host()
-            log_gpu_memory_usage("After offloading embedding model", logger=logger)
         
         # 2. Offload actor model to CPU
         if self.offload_param:
-            logger.info("Offloading actor model to CPU after rollout...")
             offload_fsdp_model_to_cpu(self.module)
-            log_gpu_memory_usage("After offloading actor model from rollout", logger=logger)
         
         # 3. Clear cache
         get_torch_device().empty_cache()

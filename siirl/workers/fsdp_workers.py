@@ -40,7 +40,6 @@ from siirl.workers.base_worker import Worker
 from siirl.scheduler.enums import Role
 from siirl.utils.model_utils.activation_offload import enable_activation_offloading
 from siirl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
-from siirl.utils.debug import log_gpu_memory_usage
 from siirl.utils.extras.device import get_device_id, get_device_name, get_nccl_backend, get_torch_device, is_cuda_available, is_npu_available
 from siirl.utils.model_utils.flops_counter import FlopsCounter
 from siirl.utils.extras.fs import copy_to_local
@@ -276,8 +275,6 @@ class ActorRolloutRefWorker(Worker):
         
         assert role in [Role.Actor, Role.RefPolicy]
         
-        log_gpu_memory_usage(f"Before init {role} from HF AutoModel", logger=logger)
-        
         # Step 1: Prepare and load model
         actor_module, actor_model_config, torch_dtype = self._prepare_and_load_model(
             model_path=model_path,
@@ -300,7 +297,6 @@ class ActorRolloutRefWorker(Worker):
         torch.distributed.barrier()
         if self.rank == 0:
             print_model_size(actor_module)
-        log_gpu_memory_usage(f"After init {role} from HF AutoModel", logger=logger)
         
         # Step 3: Wrap model with FSDP
         actor_module_fsdp = self._setup_fsdp_wrapper(
@@ -310,8 +306,6 @@ class ActorRolloutRefWorker(Worker):
             enable_activation_offload=enable_activation_offload,
             enable_gradient_checkpointing=enable_gradient_checkpointing,
         )
-        
-        log_gpu_memory_usage(f"After {role} FSDP init", logger=logger)
         
         # Step 4: Create optimizer and scheduler
         actor_optimizer, actor_lr_scheduler = self._create_optimizer_and_scheduler(
@@ -349,7 +343,6 @@ class ActorRolloutRefWorker(Worker):
 
         assert role in [Role.Actor, Role.RefPolicy]
 
-        log_gpu_memory_usage(f"Before init {role} from HF AutoModel", logger=logger)
         local_path = model_path
 
         if self.config.model.model_type == "embodied":
@@ -526,8 +519,6 @@ class ActorRolloutRefWorker(Worker):
         if self.rank == 0:
             print_model_size(actor_module)
 
-        log_gpu_memory_usage(f"After init {role} from HF AutoModel", logger=logger)
-
         # We wrap FSDP for rollout as well
         mixed_precision_config = fsdp_config.mixed_precision
         if mixed_precision_config is not None:
@@ -598,8 +589,6 @@ class ActorRolloutRefWorker(Worker):
         if enable_activation_offload:
             enable_activation_offloading(actor_module_fsdp, fsdp_strategy, enable_gradient_checkpointing)
 
-        log_gpu_memory_usage(f"After {role} FSDP init", logger=logger)
-
         # TODO: add more optimizer args into config
         if role == Role.Actor and optim_config is not None:
             from siirl.utils.model_utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
@@ -631,8 +620,6 @@ class ActorRolloutRefWorker(Worker):
                                                                      num_cycles=num_cycles)
             else:
                 raise NotImplementedError(f"Warmup style {warmup_style} is not supported")
-
-            log_gpu_memory_usage(f"After {role} optimizer init", logger=logger)
         else:
             actor_optimizer = None
             actor_lr_scheduler = None
@@ -1096,8 +1083,6 @@ class ActorRolloutRefWorker(Worker):
         else:
             raise NotImplementedError(f"Warmup style '{warmup_style}' is not supported")
         
-        log_gpu_memory_usage(f"After {role} optimizer init", logger=logger)
-        
         return optimizer, lr_scheduler
 
     def _build_rollout(self, trust_remote_code=False):
@@ -1119,7 +1104,6 @@ class ActorRolloutRefWorker(Worker):
         elif rollout_name == "vllm":
             from siirl.workers.rollout.vllm_rollout import vllm_mode, vLLMRollout
 
-            log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
             local_path = copy_to_local(self.config.model.path, use_shm=self.config.model.use_shm)
             lora_kwargs = {"lora_kwargs": {"enable_lora": True, "max_loras": 1, "max_lora_rank": self._lora_rank}} if self._is_lora else {}
             # lora_kwargs = {}
@@ -1133,10 +1117,8 @@ class ActorRolloutRefWorker(Worker):
             else:
                 raise NotImplementedError("vllm_mode must be 'customized' or 'spmd'")
 
-            log_gpu_memory_usage(f"After building {rollout_name} rollout", logger=logger)
             if self.device_mesh.mesh.numel() == 1:
                 self.config.rollout.load_format = "dummy_hf"
-            log_gpu_memory_usage("After building sharding manager", logger=logger)
 
         elif rollout_name == "sglang":
             from siirl.workers.rollout.sglang_rollout import SGLangRollout
@@ -1151,7 +1133,6 @@ class ActorRolloutRefWorker(Worker):
             # from siirl.workers.sharding_manager.fsdp_sglang import MultiAgentFSDPSGLangShardingManager
 
             local_path = copy_to_local(self.config.model.path)
-            log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
             rollout = SGLangRollout(
                 actor_module=local_path,
                 config=self.config.rollout,
@@ -1160,7 +1141,6 @@ class ActorRolloutRefWorker(Worker):
                 processing_class=self.processor if self.processor is not None else self.tokenizer,
                 trust_remote_code=trust_remote_code,
             )
-            log_gpu_memory_usage(f"After building {rollout_name} rollout", logger=logger)
 
         else:
             raise NotImplementedError(f"Rollout name: {self.config.rollout.name} is not supported")
@@ -1211,20 +1191,20 @@ class ActorRolloutRefWorker(Worker):
 
             if self._is_offload_param:
                 offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-                log_gpu_memory_usage("After offload actor model during init", logger=logger)
 
             if self._is_offload_optimizer:
                 offload_fsdp_optimizer(optimizer=self.actor_optimizer)
-                log_gpu_memory_usage("After offload actor optimizer during init", logger=logger)
         # load from checkpoint
         if self._is_actor:
             self.config.actor.use_remove_padding = use_remove_padding
             self.config.actor.use_fused_kernels = use_fused_kernels
             
-            # Pass embodied_type to Actor for embodied models
+            # Pass embodied parameters to Actor for embodied models
             is_embodied_model = self.config.model.model_type == "embodied"
             if is_embodied_model:
                 self.config.actor.embodied_type = self.config.embodied.embodied_type
+                self.config.actor.action_token_len = self.config.embodied.action_token_len
+                self.config.actor.action_chunks_len = self.config.embodied.action_chunks_len
             
             # Select appropriate Actor class based on model type
             ActorClass = RobDataParallelPPOActor if is_embodied_model else DataParallelPPOActor
@@ -1259,10 +1239,12 @@ class ActorRolloutRefWorker(Worker):
             self.config.ref.use_remove_padding = use_remove_padding
             self.config.ref.use_fused_kernels = use_fused_kernels
             
-            # Pass embodied_type to RefPolicy for embodied models
+            # Pass embodied parameters to RefPolicy for embodied models
             is_embodied_model = self.config.model.model_type == "embodied"
             if is_embodied_model:
                 self.config.ref.embodied_type = self.config.embodied.embodied_type
+                self.config.ref.action_token_len = self.config.embodied.action_token_len
+                self.config.ref.action_chunks_len = self.config.embodied.action_chunks_len
             
             # Select appropriate Actor class for reference policy
             RefPolicyClass = RobDataParallelPPOActor if is_embodied_model else DataParallelPPOActor
@@ -1313,10 +1295,8 @@ class ActorRolloutRefWorker(Worker):
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-            log_gpu_memory_usage("After offload actor model during update_actor", logger=logger)
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(optimizer=self.actor_optimizer)
-            log_gpu_memory_usage("After offload actor optimizer during update_actor", logger=logger)
 
         return processed_data
 
@@ -1332,8 +1312,6 @@ class ActorRolloutRefWorker(Worker):
         }
         prompts.meta_info.update(meta_info)
         with self.rollout_sharding_manager:
-            log_gpu_memory_usage("After entering rollout sharding manager", logger=logger)
-
             if self.config.rollout.name == "sglang_async":
                 from siirl.workers.rollout.sglang_rollout import AsyncSGLangRollout
 
@@ -1352,7 +1330,6 @@ class ActorRolloutRefWorker(Worker):
                 metrics["perf/mfu/rollout"] = estimated_flops / promised_flops / self.config.rollout.tensor_model_parallel_size
                 metrics["perf/delta_time/rollout"] = delta_time
                 output.meta_info.update({"metrics": metrics})
-            log_gpu_memory_usage("After rollout generation", logger=logger)
 
         output = output.to("cpu")
 
@@ -1364,6 +1341,7 @@ class ActorRolloutRefWorker(Worker):
         # when is_lora is True, we use the actor without lora applied to calculate the log_prob
         # which is mostly used for ref log_prob calculation
         assert self._is_actor
+        
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
@@ -1372,12 +1350,16 @@ class ActorRolloutRefWorker(Worker):
 
         is_lora = data.meta_info.pop("is_lora", False)
         adapter_ctx = self.actor.actor_module.disable_adapter() if is_lora else nullcontext()
+        
         data = data.to(get_device_id())
+        
         # we should always recompute old_log_probs when it is HybridEngine
         data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
         data.meta_info["temperature"] = self.config.rollout.temperature
+        data.meta_info["pad_token_id"] = self.tokenizer.pad_token_id
+        
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
@@ -1405,7 +1387,6 @@ class ActorRolloutRefWorker(Worker):
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-            log_gpu_memory_usage("After offload actor model during compute_log_prob", logger=logger)
 
         return processed_data
 
@@ -1645,8 +1626,6 @@ class CriticWorker(Worker):
 
         auto_wrap_policy = get_fsdp_wrap_policy(module=critic_module, config=self.config.model.fsdp_config.wrap_policy, is_lora=self.config.model.lora_rank > 0)
 
-        log_gpu_memory_usage("Before critic FSDP", logger=logger)
-
         fsdp_mesh = self.device_mesh
         sharding_strategy = get_sharding_strategy(fsdp_mesh)
 
@@ -1690,8 +1669,6 @@ class CriticWorker(Worker):
             enable_gradient_checkpointing = config.model.enable_gradient_checkpointing
             enable_activation_offloading(critic_module, config.strategy, enable_gradient_checkpointing)
 
-        log_gpu_memory_usage("After critic FSDP", logger=logger)
-
         critic_optimizer = optim.AdamW(
             critic_module.parameters(),
             lr=config.optim.lr,
@@ -1730,10 +1707,8 @@ class CriticWorker(Worker):
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.critic_module)
-            log_gpu_memory_usage("After offload critic model during init", logger=logger)
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(optimizer=self.critic_optimizer)
-            log_gpu_memory_usage("After offload critic optimizer during init", logger=logger)
 
         self.critic = DataParallelPPOCritic(config=self.config, critic_module=self.critic_module, critic_optimizer=self.critic_optimizer)
 

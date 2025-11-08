@@ -109,7 +109,6 @@ class RobDataParallelPPOActor(BasePPOActor):
             entropy: # (bs, response_len)
             log_probs: # (bs, response_len)
         """
-        
         batch_size = micro_batch['responses'].size(0)
         traj_len = micro_batch['responses'].size(1)
         tot_pad_len = micro_batch['input_ids'].size(2)
@@ -160,9 +159,9 @@ class RobDataParallelPPOActor(BasePPOActor):
                 log_probs, entropy = self.apply_mask_with_grad_control(log_probs, entropy, mask)
                 
                 log_probs = log_probs.reshape((batch_size, traj_len*response_length))
-                entropy = entropy.reshape((batch_size, traj_len*response_length)) 
+                entropy = entropy.reshape((batch_size, traj_len*response_length))
                 
-            elif self.config.vla == "openvla":
+            elif self.config.embodied_type == "openvla":
                 output = self.actor_module(input_ids=input_ids_unpad,
                                     attention_mask=attention_mask_unpad,
                                     pixel_values=pixel_values,
@@ -222,7 +221,7 @@ class RobDataParallelPPOActor(BasePPOActor):
                 
                 return entropy, log_probs
             
-            elif self.config.vla == "openvla":
+            elif self.config.embodied_type == "openvla":
                 response_length = responses.size(-1)
                 input_ids_unpad, _ = self.process_tensor(input_ids, self.pad_token_id)
                 attention_mask_unpad, _ = self.process_tensor(attention_mask, 0)
@@ -294,7 +293,7 @@ class RobDataParallelPPOActor(BasePPOActor):
                 entropy = entropy.reshape((batch_size, traj_len*response_length))
                 return entropy
             
-            elif self.config.vla == "openvla":
+            elif self.config.embodied_type == "openvla":
                 output = self.actor_module(input_ids=input_ids_unpad,
                                         attention_mask=attention_mask_unpad,
                                         pixel_values=pixel_values,
@@ -344,7 +343,6 @@ class RobDataParallelPPOActor(BasePPOActor):
         Returns:
             torch.Tensor: the log_prob tensor
         """
-        
         self.actor_module.eval()
 
         micro_batch_size = data.meta_info['micro_batch_size'] #256
@@ -364,7 +362,7 @@ class RobDataParallelPPOActor(BasePPOActor):
             micro_batches = batch.split(micro_batch_size)
 
         log_probs_lst = []
-        for micro_batch in micro_batches:
+        for i, micro_batch in enumerate(micro_batches):
             with torch.no_grad():
                 _, log_probs = self._forward_micro_batch(micro_batch, temperature=temperature)
             log_probs_lst.append(log_probs)
@@ -381,13 +379,12 @@ class RobDataParallelPPOActor(BasePPOActor):
     def update_policy(self, data: DataProto):
         self.actor_module.train()
 
-        assert self.config.ppo_mini_batch_size % self.config.ppo_micro_batch_size == 0
-        self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size
+        assert self.config.ppo_mini_batch_size % self.config.ppo_micro_batch_size_per_gpu == 0
+        self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
 
         select_keys = ['responses', 'input_ids', 'attention_mask', 'pixel_values', 'old_log_probs', 'advantages',"finish_step"]
         batch = data.select(batch_keys=select_keys).batch
-        assert self.config.ppo_micro_batch_size == 1
 
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
@@ -401,7 +398,7 @@ class RobDataParallelPPOActor(BasePPOActor):
                 micro_batches, _ = rearrange_micro_batches(batch=mini_batch, max_token_len=max_token_len)
             else:
                 # split batch into micro_batches
-                micro_batches = mini_batch.split(self.config.ppo_micro_batch_size)
+                micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
 
             self.actor_optimizer.zero_grad()
 
@@ -508,8 +505,8 @@ class RobDataParallelPPOActor(BasePPOActor):
             self.actor_module.eval()
             print("eval mode")
 
-        assert self.config.ppo_mini_batch_size % self.config.ppo_micro_batch_size == 0
-        self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size
+        assert self.config.ppo_mini_batch_size % self.config.ppo_micro_batch_size_per_gpu == 0
+        self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
         temperature = bacth_data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
 
         select_keys = ['responses', 'input_ids', 'attention_mask', 'pixel_values', "finish_step"]
@@ -529,7 +526,7 @@ class RobDataParallelPPOActor(BasePPOActor):
                 micro_batches, _ = rearrange_micro_batches(batch=mini_batch, max_token_len=max_token_len)
             else:
                 # split batch into micro_batches
-                micro_batches = mini_batch.split(self.config.ppo_micro_batch_size)
+                micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
 
             for data in micro_batches:
                 data = data.cuda()  # actor device is cpu when using offload

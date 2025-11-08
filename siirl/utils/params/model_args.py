@@ -318,9 +318,23 @@ class ActorArguments:
     entropy_from_logits_with_chunking: bool = field(
         default=False, metadata={"help": "Enable entropy from logits with chunking"}
     )
+    # Embodied AI parameters (inherited from EmbodiedArguments at runtime)
     embodied_type: Optional[str] = field(
         default=None, 
-        metadata={"help": "Embodied model type: 'openvla' or 'openvla-oft', None for non-embodied models"}
+        metadata={"help": "Embodied model type: 'openvla' or 'openvla-oft', inherited from embodied.embodied_type"}
+    )
+    action_token_len: Optional[int] = field(
+        default=None,
+        metadata={"help": "Number of action tokens, inherited from embodied.action_token_len at runtime"}
+    )
+    action_chunks_len: Optional[int] = field(
+        default=None,
+        metadata={"help": "Number of action chunks, inherited from embodied.action_chunks_len at runtime"}
+    )
+    # Actor-specific training parameters
+    traj_mini_batch_size: int = field(
+        default=1,
+        metadata={"help": "Mini-batch size for trajectory splitting during training (must divide traj_len evenly)"}
     )
 
     def to_dict(self) -> Dict[str, Any]:
