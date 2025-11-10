@@ -1374,7 +1374,8 @@ class ActorRolloutRefWorker(Worker):
                 "perf/delta_time/actor_log_prob": delta_time,
             }
             data.batch["old_log_probs"] = output
-            data.batch["entropys"] = entropys
+            if entropys is not None:
+                data.batch["entropys"] = entropys 
             data.meta_info["metrics"] = metrics
             processed_data = self.ulysses_sharding_manager.postprocess_data(data)
 

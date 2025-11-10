@@ -87,11 +87,14 @@ def setup_embodied_task_manifest(siirl_args: SiiRLArguments) -> SiiRLArguments:
         ValueError: If embodied training is detected but data.train_files is not specified.
     """
     from loguru import logger
-    # Detect embodied run by checking if embodied.env is configured
-    if (
-        hasattr(siirl_args.actor_rollout_ref, 'embodied')
-        and siirl_args.actor_rollout_ref.embodied
-    ):
+    # Detect embodied run by checking if model_type is "embodied"
+    is_embodied_model = (
+        hasattr(siirl_args.actor_rollout_ref, 'model') 
+        and hasattr(siirl_args.actor_rollout_ref.model, 'model_type')
+        and siirl_args.actor_rollout_ref.model.model_type == "embodied"
+    )
+    
+    if is_embodied_model:
         embodied_env_args = siirl_args.actor_rollout_ref.embodied.env
 
         # For embodied training, `data.train_files` must be specified to indicate the output path.

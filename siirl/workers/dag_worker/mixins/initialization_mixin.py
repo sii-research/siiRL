@@ -728,8 +728,7 @@ class InitializationMixin:
         actor_worker = worker_dict[NodeRole.ACTOR]
         rollout_worker = worker_dict[NodeRole.ROLLOUT]
 
-        from siirl.workers.rollout.embodied_rollout import EmbodiedHFRollout
-        if isinstance(getattr(rollout_worker, "rollout", None), EmbodiedHFRollout):
+        if self.config.actor_rollout_ref.model.model_type == "embodied":
             if hasattr(actor_worker, "actor_module_fsdp"):
                 rollout_worker.rollout.model = actor_worker.actor_module_fsdp
                 logger.info(f"[Embodied] Set module for EmbodiedHFRollout for agent group {agent_group}.")

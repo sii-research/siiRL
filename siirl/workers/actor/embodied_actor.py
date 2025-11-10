@@ -325,7 +325,7 @@ class RobDataParallelPPOActor(BasePPOActor):
         self.actor_optimizer.step()
         return grad_norm
 
-    def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
+    def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
 
         Args:
@@ -342,6 +342,7 @@ class RobDataParallelPPOActor(BasePPOActor):
 
         Returns:
             torch.Tensor: the log_prob tensor
+            torch.Tensor: the entropy tensor
         """
         self.actor_module.eval()
 
@@ -374,7 +375,7 @@ class RobDataParallelPPOActor(BasePPOActor):
             revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
             log_probs = log_probs[revert_indices]
 
-        return log_probs
+        return log_probs, None # TODO: implement entropy computation
 
     def update_policy(self, data: DataProto):
         self.actor_module.train()
@@ -452,21 +453,23 @@ class RobDataParallelPPOActor(BasePPOActor):
     
 
                 for i in range(0, traj_len, int(traj_len/traj_split_num)):
-                   
-                    entropy, log_prob = self._forward_micro_batch_update(input_ids=input_ids[i:i+int(traj_len/traj_split_num)], attention_mask=attention_mask[i:i+int(traj_len/traj_split_num)], pixel_values=pixel_values[i:i+int(traj_len/traj_split_num)], responses=responses[i:i+int(traj_len/traj_split_num)], temperature=temperature)
-                    
+                    entropy, log_prob = self._forward_micro_batch_update(input_ids=input_ids[i:i+int(traj_len/traj_split_num)], 
+                                                                         attention_mask=attention_mask[i:i+int(traj_len/traj_split_num)], 
+                                                                         pixel_values=pixel_values[i:i+int(traj_len/traj_split_num)], 
+                                                                         responses=responses[i:i+int(traj_len/traj_split_num)], 
+                                                                         temperature=temperature)
+
                     slice_id = i*self.config.action_token_len*self.config.action_chunks_len
                     next_slice_id = (i+int(traj_len/traj_split_num))*self.config.action_token_len*self.config.action_chunks_len
                     old_log_prob_tmp = old_log_prob[:, slice_id: next_slice_id]
                     advantages_tmp = advantages[:, slice_id: next_slice_id]
                     response_mask_tmp = response_mask[:, slice_id: next_slice_id]
                         
-                    pg_loss, pg_clipfrac, ppo_kl = core_algos.compute_policy_loss(old_log_prob=old_log_prob_tmp,
+                    pg_loss, pg_clipfrac, ppo_kl, _ = core_algos.compute_policy_loss_vanilla(old_log_prob=old_log_prob_tmp,
                                                                             log_prob=log_prob,
                                                                             advantages=advantages_tmp,
-                                                                            eos_mask=response_mask_tmp,
-                                                                            clip_ratio_high=clip_ratio_high,
-                                                                            clip_ratio_low=clip_ratio_low)
+                                                                            response_mask=response_mask_tmp,
+                                                                            config=self.config)
                     
                     response_mask_tmp_sum = response_mask_tmp.sum(axis=None)
                     pg_loss = pg_loss* response_mask_tmp_sum

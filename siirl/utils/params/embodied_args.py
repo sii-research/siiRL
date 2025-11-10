@@ -15,8 +15,6 @@
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Literal, Optional
 
-from siirl.utils.reward_score import embodied
-
 
 @dataclass
 class EnvironmentArgs:
