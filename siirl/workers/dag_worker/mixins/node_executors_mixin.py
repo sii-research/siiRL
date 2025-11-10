@@ -123,9 +123,9 @@ class NodeExecutorsMixin:
         # Set meta_info for embodied training (aligned with verl implementation)
         # Reference: verl/trainer/ppo/ray_trainer.py:526-530
         batch.meta_info = {
-            "eos_token_id": self.tokenizer.eos_token_id if hasattr(self, 'tokenizer') else None,
+            "eos_token_id": self.validate_tokenizer.eos_token_id if self.validate_tokenizer else None,
             "n_samples": self.config.actor_rollout_ref.rollout.n,
-            "pad_token_id": self.tokenizer.pad_token_id if hasattr(self, 'tokenizer') else None,
+            "pad_token_id": self.validate_tokenizer.pad_token_id if self.validate_tokenizer else None,
         }
         
         logger.info(f"[Embodied Training] Batch size: {batch.batch.batch_size[0]}, meta_info: {batch.meta_info}")

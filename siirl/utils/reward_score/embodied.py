@@ -61,48 +61,24 @@ def compute_embodied_reward(
     # --- Step 1: Data Extraction and Global Pre-filtering ---
     from loguru import logger
     
-    logger.info(f"[DEBUG compute_embodied_reward] ========== 开始计算 reward ==========")
-    logger.info(f"[DEBUG compute_embodied_reward] batch_data 类型: {type(batch_data)}")
-    logger.info(f"[DEBUG compute_embodied_reward] batch_data.batch 中的键: {list(batch_data.batch.keys())}")
-    
     batch_size = batch_data.batch["responses"].size(0)
-    logger.info(f"[DEBUG compute_embodied_reward] batch_size: {batch_size}")
-    
     completes = np.array(batch_data.batch["complete"].tolist())
-    logger.info(f"[DEBUG compute_embodied_reward] completes shape: {completes.shape}")
-    logger.info(f"[DEBUG compute_embodied_reward] completes 内容: {completes}")
-    logger.info(f"[DEBUG compute_embodied_reward] 完成任务数: {completes.sum()}/{batch_size} ({100*completes.sum()/batch_size:.1f}%)")
-    
     finish_steps = batch_data.batch["finish_step"].cpu().numpy()
-    logger.info(f"[DEBUG compute_embodied_reward] finish_step: {finish_steps}")
-    
     embeddings = batch_data.batch["vjepa_embedding"].cpu().numpy()
-    logger.info(f"[DEBUG compute_embodied_reward] embeddings shape: {embeddings.shape}")
-    logger.info(f"[DEBUG compute_embodied_reward] embeddings dtype: {embeddings.dtype}")
-    logger.info(f"[DEBUG compute_embodied_reward] 前3个embedding的范数: {[np.linalg.norm(embeddings[i]) for i in range(min(3, batch_size))]}")
-    
     task_file_names = _tensor_to_str_list(batch_data.batch["task_file_name"])
-    logger.info(f"[DEBUG compute_embodied_reward] task_file_names前3个: {task_file_names[:min(3, batch_size)]}")
-    
-    # 打印样本级别的详细信息
-    logger.info(f"[DEBUG compute_embodied_reward] 样本详细信息:")
-    for i in range(min(5, batch_size)):
-        logger.info(f"[DEBUG compute_embodied_reward]   样本{i}: complete={completes[i]}, finish_step={finish_steps[i]}, "
-                   f"embedding_norm={np.linalg.norm(embeddings[i]):.4f}, task={task_file_names[i][:40]}")
 
     # Pre-filtering: Identify all invalid samples (all-zero embeddings) upfront.
     zero_embedding_mask = np.all(embeddings == 0, axis=1)
     # Create an array of indices for only the valid samples.
     valid_indices = np.where(~zero_embedding_mask)[0]
     
-    # 🔍 Diagnostic logging
+    # Diagnostic logging
     num_zero = zero_embedding_mask.sum()
     num_success = completes.sum()
     num_valid = len(valid_indices)
-    logger.info(f"[REWARD COMPUTE] *** Batch size: {batch_size}, Success: {num_success}, Zero embeddings: {num_zero}, Valid embeddings: {num_valid} ***")
+    logger.info(f"[REWARD COMPUTE] Batch size: {batch_size}, Success: {num_success}, Zero embeddings: {num_zero}, Valid embeddings: {num_valid}")
     if num_zero == batch_size:
-        logger.error(f"[REWARD COMPUTE] ⚠️ ALL EMBEDDINGS ARE ZERO! All rewards will be 0!")
-        logger.info(f"[REWARD COMPUTE] Sample embedding shape: {embeddings.shape}, norm: {np.linalg.norm(embeddings[0]) if batch_size > 0 else 'N/A'}")
+        logger.error(f"[REWARD COMPUTE] ALL EMBEDDINGS ARE ZERO! All rewards will be 0!")
     elif num_zero > 0:
         logger.warning(f"[REWARD COMPUTE] {num_zero}/{batch_size} embeddings are zero")
 
@@ -128,10 +104,6 @@ def compute_embodied_reward(
     for idx in valid_indices:
         task_name = task_names[idx]
         task_to_valid_indices.setdefault(task_name, []).append(idx)
-    
-    logger.info(f"[DEBUG compute_embodied_reward] 按任务分组后的任务数量: {len(task_to_valid_indices)}")
-    for task_name, indices in list(task_to_valid_indices.items())[:3]:
-        logger.info(f"[DEBUG compute_embodied_reward]   任务 {task_name}: {len(indices)} 个样本")
 
     # Process each task group using only the valid indices.
     for task_name, indices in task_to_valid_indices.items():
@@ -144,14 +116,14 @@ def compute_embodied_reward(
         success_indices = indices[success_mask]
         fail_indices = indices[fail_mask]
         
-        logger.info(f"[DEBUG compute_embodied_reward] 处理任务 {task_name}: 成功={len(success_indices)}, 失败={len(fail_indices)}")
+        logger.info(f"[REWARD COMPUTE] Processing task '{task_name}': {len(success_indices)} success, {len(fail_indices)} failed")
 
         # Assign base scores only for the valid samples.
         final_rewards[success_indices] = 1.0
         # Failed valid samples default to 0, may be updated by reward shaping below.
 
         if len(success_indices) == 0 or len(fail_indices) == 0:
-            logger.info(f"[DEBUG compute_embodied_reward]   跳过 {task_name}: 没有成功样本或失败样本")
+            logger.info(f"[REWARD COMPUTE] Skipping task '{task_name}': no success or no failed samples for reward shaping")
             continue
 
         # --- Expensive computations now run only on the smaller, valid subset ---
@@ -209,19 +181,21 @@ def compute_embodied_reward(
     for i in range(batch_size):
         results[i]["score"] = final_rewards[i]
     
-    logger.info(f"[DEBUG compute_embodied_reward] ========== Reward 计算完成 ==========")
-    logger.info(f"[DEBUG compute_embodied_reward] 最终rewards统计:")
-    logger.info(f"[DEBUG compute_embodied_reward]   - 平均reward: {final_rewards.mean():.4f}")
-    logger.info(f"[DEBUG compute_embodied_reward]   - 最大reward: {final_rewards.max():.4f}")
-    logger.info(f"[DEBUG compute_embodied_reward]   - 最小reward: {final_rewards.min():.4f}")
-    logger.info(f"[DEBUG compute_embodied_reward]   - reward > 0 的样本数: {(final_rewards > 0).sum()}/{batch_size}")
-    logger.info(f"[DEBUG compute_embodied_reward]   - reward = 1.0 的样本数(成功): {(final_rewards == 1.0).sum()}/{batch_size}")
-    logger.info(f"[DEBUG compute_embodied_reward]   - 0 < reward < 1.0 的样本数(部分): {((final_rewards > 0) & (final_rewards < 1.0)).sum()}/{batch_size}")
-    logger.info(f"[DEBUG compute_embodied_reward]   - reward = 0 的样本数(失败): {(final_rewards == 0).sum()}/{batch_size}")
+    # Consolidated statistics log
+    num_success = (final_rewards == 1.0).sum()
+    num_partial = ((final_rewards > 0) & (final_rewards < 1.0)).sum()
+    num_failed = (final_rewards == 0).sum()
+    logger.info(
+        f"[REWARD COMPUTE] Batch {batch_size} completed - "
+        f"Avg: {final_rewards.mean():.4f}, "
+        f"Success (reward=1.0): {num_success}, "
+        f"Partial (0<reward<1.0): {num_partial}, "
+        f"Failed (reward=0): {num_failed}"
+    )
     
-    logger.info(f"[DEBUG compute_embodied_reward] 每个样本的最终reward:")
+    # Detailed per-sample information (debug level)
     for i in range(min(10, batch_size)):
         dist_info = f", dist={results[i].get('normalized_distance', 'N/A'):.4f}" if 'normalized_distance' in results[i] else ""
-        logger.info(f"[DEBUG compute_embodied_reward]   样本{i}: complete={completes[i]}, reward={final_rewards[i]:.4f}{dist_info}, zero_emb={results[i]['is_zero_embedding']}")
+        logger.debug(f"[REWARD COMPUTE] Sample {i}: complete={completes[i]}, reward={final_rewards[i]:.4f}{dist_info}, zero_emb={results[i]['is_zero_embedding']}")
 
     return results

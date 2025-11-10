@@ -603,11 +603,11 @@ class ValidationMixin:
         # 2. Compute per-data-source metrics
         metric_dict = {}
         for data_source, rewards in data_source_rewards.items():
-            metric_dict[f'embodied/test_score/{data_source}'] = np.mean(rewards)
+            metric_dict[f'val/test_score/{data_source}'] = np.mean(rewards)
         
         # 3. Compute overall mean reward
         all_rewards = [p.score for p in all_payloads]
-        metric_dict['embodied/test_score/all'] = np.mean(all_rewards)
+        metric_dict['val/test_score/all'] = np.mean(all_rewards)
         
         # 4. Collect and average batch-level metrics from all batches
         batch_metrics_list = []
