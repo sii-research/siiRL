@@ -108,7 +108,7 @@ reward_model:
   reward_manager: embodied            # Use EmbodiedRewardManager for validation
   reward_kwargs:                      # Embodied-specific reward kwargs
     action_token_len: 7               # Number of action tokens (must match model)
-    reward_coef: 1.0                  # Reward coefficient for scaling
+    reward_coef: 5.0                  # Reward coefficient for scaling
 
 # Algorithm configuration - Standard GRPO with embodied sampling (aligned with DAPO architecture)
 algorithm:

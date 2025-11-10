@@ -1582,6 +1582,8 @@ class CriticWorker(Worker):
 
             use_remove_padding = config.model.use_remove_padding
 
+            # Apply monkey patch for performance optimizations
+            from siirl.models.transformers.monkey_patch import apply_monkey_patch
             apply_monkey_patch(
                 model=critic_module,
                 use_remove_padding=use_remove_padding,
@@ -1872,8 +1874,9 @@ class RewardModelWorker(Worker):
                 torch_dtype=torch.bfloat16,
                 attn_implementation="flash_attention_2",
                 trust_remote_code=trust_remote_code,
-            )
-
+            )            
+            # Apply monkey patch for performance optimizations
+            from siirl.models.transformers.monkey_patch import apply_monkey_patch
             apply_monkey_patch(
                 model=reward_module,
                 use_remove_padding=config.model.use_remove_padding,
