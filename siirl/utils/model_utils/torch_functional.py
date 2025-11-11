@@ -229,6 +229,31 @@ def get_response_mask(response_id: torch.Tensor, eos_token: Union[int, List[int]
     return (eos_mask.cumsum(dim=1) - eos_mask).eq(0).to(dtype)
 
 
+def get_eos_mask(response_id: torch.Tensor, eos_token: int = 2, dtype=torch.int64):
+    """
+    Get EOS mask for response sequences.
+    
+    e.g. end of sentence token=1
+    response_id: [0, 0, 2, 42, 3, 5, 1, 0, 0]
+    eos_mask:     [1, 1, 1, 1,  1, 1, 1, 0, 0]
+    
+    This is a simplified version of get_response_mask for single EOS token.
+    Used for VLA embodied rollout compatibility.
+    
+    Args:
+        response_id: Token IDs tensor
+        eos_token: End of sequence token ID (single int)
+        dtype: Output dtype
+        
+    Returns:
+        Boolean mask where 1 indicates valid tokens before EOS
+    """
+    eos_mask = response_id.eq(eos_token).long()
+    eos_mask = (torch.cumsum(eos_mask, dim=1) - eos_mask).bool()
+    eos_mask = torch.logical_not(eos_mask).to(dtype)
+    return eos_mask
+
+
 def compute_grad_norm(model: nn.Module):
     total_grad_square = 0
     for param in model.parameters():

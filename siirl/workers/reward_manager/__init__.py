@@ -18,4 +18,11 @@ from .naive import NaiveRewardManager
 from .prime import PrimeRewardManager
 from .parallel import ParallelRewardManager
 
-__all__ = ["BatchRewardManager", "DAPORewardManager", "NaiveRewardManager", "PrimeRewardManager", "ParallelRewardManager"]
+# Lazy import for embodied reward manager to avoid loading embodied dependencies for LLM/VLM tasks
+def __getattr__(name):
+    if name == "EmbodiedRewardManager":
+        from .embodied import EmbodiedRewardManager
+        return EmbodiedRewardManager
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+
+__all__ = ["BatchRewardManager", "DAPORewardManager", "NaiveRewardManager", "PrimeRewardManager", "ParallelRewardManager", "EmbodiedRewardManager"]

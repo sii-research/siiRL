@@ -35,6 +35,7 @@ class AdvantageEstimator(str, Enum):
 class WorkflowType(str, Enum):
     DEFAULT = "default"
     DAPO = "dapo"
+    EMBODIED = "embodied"
 
 
 class Role(Enum):

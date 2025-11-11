@@ -65,14 +65,149 @@ def get_init_weight_context_manager(use_meta_tensor=True, mesh: DeviceMesh = Non
 
 # Copyright 2020-present the HuggingFace Inc. team.
 # Adapted from https://github.com/huggingface/transformers/src/transformers/trainer.py
+def get_fsdp_wrap_policy_vla(module, config=None, is_lora=False):
+    """
+    Get FSDP wrap policy specifically for VLA (Vision-Language-Action) models.
+    
+    VLA models have a three-component architecture:
+    1. Vision Backbone (VisionTransformer + Block)
+    2. Projector (PrismaticProjector) 
+    3. Language Model (Transformer layers)
+    
+    Args:
+        module: The VLA module to get wrap policy for
+        config: Configuration for wrap policy (currently unused, for API compatibility)
+        is_lora: Whether to enable lambda policy for LoRA modules
+        
+    Returns:
+        FSDP auto wrap policy combining vision, projector, and language model policies
+    """
+    from torch.distributed.fsdp.wrap import (
+        _module_wrap_policy, 
+        _or_policy, 
+        transformer_auto_wrap_policy, 
+        lambda_auto_wrap_policy
+    )
+    
+    # Import VLA-specific classes
+    try:
+        from timm.models.vision_transformer import Block, VisionTransformer
+    except ImportError:
+        raise ImportError("timm is required for VLA models. Install with: pip install timm")
+    
+    # 1. Vision Backbone Policy
+    vit_wrap_policy = functools.partial(
+        _module_wrap_policy, 
+        module_classes={VisionTransformer}
+    )
+    transformer_block_policy = functools.partial(
+        transformer_auto_wrap_policy, 
+        transformer_layer_cls={Block}
+    )
+    vision_fsdp_wrapping_policy = functools.partial(
+        _or_policy, 
+        policies=[vit_wrap_policy, transformer_block_policy]
+    )
+    
+    # 2. Language Model Policy
+    # VLA models have nested structure: module.language_model contains the LLM
+    default_transformer_cls_names_to_wrap = getattr(
+        module.language_model, "_no_split_modules", None
+    )
+    
+    if default_transformer_cls_names_to_wrap is None:
+        raise ValueError(
+            "Cannot find _no_split_modules in module.language_model. "
+            "Ensure the module is a valid VLA model with language_model attribute."
+        )
+    
+    transformer_cls_to_wrap = set()
+    for layer_class in default_transformer_cls_names_to_wrap:
+        logger.info(f"VLA LLM layer class: {layer_class}")
+        transformer_cls = get_module_class_from_name(module, layer_class)
+        if transformer_cls is None:
+            raise ValueError(
+                f"Could not find transformer layer class '{layer_class}' in the model. "
+                f"Available modules: {[n for n, _ in module.named_modules()][:10]}..."
+            )
+        transformer_cls_to_wrap.add(transformer_cls)
+    
+    llm_wrap_policy = functools.partial(
+        transformer_auto_wrap_policy,
+        transformer_layer_cls=transformer_cls_to_wrap,
+    )
+    logger.info(f"VLA LLM wrap policy configured with {len(transformer_cls_to_wrap)} layer types")
+    
+    # 3. Projector Policy
+    # Import PrismaticProjector - try both openvla and openvla-oft
+    PrismaticProjector = None
+    try:
+        from siirl.models.embodied.openvla_oft.modeling_prismatic import PrismaticProjector
+    except ImportError:
+        try:
+            from siirl.models.embodied.openvla.modeling_prismatic import PrismaticProjector
+        except ImportError:
+            raise ImportError(
+                "Cannot import PrismaticProjector. Ensure VLA model files are available."
+            )
+    
+    prismatic_fsdp_wrapping_policy = functools.partial(
+        _module_wrap_policy,
+        module_classes={PrismaticProjector},
+    )
+    
+    # 4. Build combined policy list
+    vla_policies = [
+        vision_fsdp_wrapping_policy,
+        llm_wrap_policy,
+        prismatic_fsdp_wrapping_policy,
+    ]
+    
+    # 5. Add LoRA policy if needed
+    if is_lora:
+        def lambda_policy_fn(module):
+            return bool(
+                len(list(module.named_children())) == 0
+                and getattr(module, "weight", None) is not None
+                and module.weight.requires_grad
+            )
+        
+        lambda_policy = functools.partial(
+            lambda_auto_wrap_policy, 
+            lambda_fn=lambda_policy_fn
+        )
+        vla_policies.append(lambda_policy)
+        logger.info("Added LoRA lambda policy for VLA model")
+    
+    return functools.partial(_or_policy, policies=vla_policies)
+
+
 def get_fsdp_wrap_policy(module, config=None, is_lora=False):
     """Get FSDP wrap policy for the module.
+    
+    Automatically detects model type and routes to appropriate policy:
+    - VLA models (OpenVLA, OpenVLA-OFT) → get_fsdp_wrap_policy_vla
+    - Standard models (LLMs, VLMs) → standard transformer policy
 
     Args:
         module: The module to get wrap policy for
         config: Configuration for wrap policy
         is_lora: Whether to enable lambda policy for LoRA modules
     """
+    # Auto-detect VLA models
+    is_embodied_model = (
+        hasattr(module, 'vision_backbone') 
+        and hasattr(module, 'projector')
+        and hasattr(module, 'language_model')
+    )
+    
+    if is_embodied_model:
+        logger.info("🎯 Detected VLA model architecture, using specialized VLA wrap policy")
+        return get_fsdp_wrap_policy_vla(module, config, is_lora)
+    
+    # Standard policy for non-VLA models
+    logger.info("📦 Using standard FSDP wrap policy")
+    
     if config is None:
         config = {}
 

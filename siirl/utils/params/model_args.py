@@ -15,6 +15,7 @@
 
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Literal, Optional
+from .embodied_args import EmbodiedArguments, EmbodiedSamplingConfig
 
 
 @dataclass
@@ -222,6 +223,7 @@ class ModelArguments(ProcessorArguments):
     )
     use_shm: bool = field(default=False)
     enable_activation_offload: bool = field(default=False, metadata={"help": "enable activation offload"})
+    model_type: str = field(default="llm", metadata={"help": "model type"})
 
     def __post_init__(self):
         if self.path is None:
@@ -315,6 +317,24 @@ class ActorArguments:
     entropy_checkpointing: bool = field(default=False, metadata={"help": "Enable entropy checkpointing"})
     entropy_from_logits_with_chunking: bool = field(
         default=False, metadata={"help": "Enable entropy from logits with chunking"}
+    )
+    # Embodied AI parameters (inherited from EmbodiedArguments at runtime)
+    embodied_type: Optional[str] = field(
+        default=None, 
+        metadata={"help": "Embodied model type: 'openvla' or 'openvla-oft', inherited from embodied.embodied_type"}
+    )
+    action_token_len: Optional[int] = field(
+        default=None,
+        metadata={"help": "Number of action tokens, inherited from embodied.action_token_len at runtime"}
+    )
+    action_chunks_len: Optional[int] = field(
+        default=None,
+        metadata={"help": "Number of action chunks, inherited from embodied.action_chunks_len at runtime"}
+    )
+    # Actor-specific training parameters
+    traj_mini_batch_size: int = field(
+        default=1,
+        metadata={"help": "Mini-batch size for trajectory splitting during training (must divide traj_len evenly)"}
     )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -506,6 +526,10 @@ class RefArguments:
     entropy_from_logits_with_chunking: bool = field(
         default=False, metadata={"help": "Enable entropy from logits with chunking"}
     )
+    embodied_type: Optional[str] = field(
+        default=None, 
+        metadata={"help": "Embodied model type: 'openvla' or 'openvla-oft', None for non-embodied models"}
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -518,6 +542,7 @@ class ActorRolloutRefArguments:
     actor: ActorArguments = field(default_factory=ActorArguments, metadata={"help": "Actor configuration"})
     ref: RefArguments = field(default_factory=RefArguments, metadata={"help": "Reference model settings"})
     rollout: RolloutArguments = field(default_factory=RolloutArguments, metadata={"help": "Rollout parameters"})
+    embodied: EmbodiedArguments = field(default_factory=EmbodiedArguments, metadata={"help": "Embodied AI settings"})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -665,6 +690,9 @@ class AlgorithmArguments:
     )
     use_pf_ppo: bool = field(default=False, metadata={"help": "Whether to enable preference feedback PPO."})
     pf_ppo: dict[str, Any] = field(default_factory=dict, metadata={"help": " Preference feedback PPO settings."})
+    embodied_sampling: EmbodiedSamplingConfig = field(
+        default_factory=EmbodiedSamplingConfig, metadata={"help": "Embodied dynamic sampling configuration"}
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

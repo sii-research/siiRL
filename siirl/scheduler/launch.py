@@ -138,7 +138,7 @@ class RayTrainer:
         if not use_dynamic_bsz:
             self._check_mutually_exclusive(actor_conf.to_dict(), "ppo_micro_batch_size", "ppo_micro_batch_size_per_gpu", f"Node {node.node_id} (Actor)")
             # Ensure the global training batch size is at least as large as the PPO mini-batch size.
-            assert self.base_config.data.train_batch_size >= ppo_mini_batch_size, f"Node {node.node_id} (Actor): train_batch_size ({self.base_config.data.train_batch_size}) must be >= ppo_mini_batch_size ({ppo_mini_batch_size})"
+            assert self.base_config.data.train_batch_size * self.base_config.actor_rollout_ref.rollout.n >= ppo_mini_batch_size, f"Node {node.node_id} (Actor): train_batch_size ({self.base_config.data.train_batch_size}) must be >= ppo_mini_batch_size ({ppo_mini_batch_size})"
             # If micro-batch size is set, perform further divisibility checks.
             if ppo_micro_batch_size is not None:
                 component_total_mbs = ppo_micro_batch_size_per_gpu * self.total_gpu

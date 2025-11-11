@@ -1,4 +1,4 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
+# Copyright 2025, Shanghai Innovation Institute. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .base import BaseShardingManager
-from .fsdp_hf import FSDPHFShardingManager
-# from .fsdp_vllm import MultiAgentFSDPVLLMShardingManager
+"""Embodied AI environment adapters."""
+
+from .base import BaseVLAEnvironment as BaseEmbodiedEnvironment
+from .venv import SubprocVectorEnv
+from .adapters.libero import LIBEROAdapter
 
 __all__ = [
-    "BaseShardingManager",
-    "FSDPHFShardingManager",
+    "BaseEmbodiedEnvironment",
+    "LIBEROAdapter",
+    "SubprocVectorEnv",
 ]
