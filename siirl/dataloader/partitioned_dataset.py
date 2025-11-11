@@ -57,7 +57,6 @@ def collate_fn(data_list: list[dict]) -> dict:
             if isinstance(val, torch.Tensor):
                 tensors[key].append(val)
             elif key in embodied_tensor_fields and isinstance(val, (int, np.integer)):
-                # Convert embodied int fields to tensor (align with verl)
                 tensors[key].append(torch.tensor(val, dtype=torch.int64))
             else:
                 non_tensors[key].append(val)

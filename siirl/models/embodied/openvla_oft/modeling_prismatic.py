@@ -1961,7 +1961,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
 
         # Unnormalize predicted actions
         actions = self._unnormalize_actions(normalized_actions, unnorm_key)
-        #verl add!
+        
         actions = actions.reshape(-1 ,NUM_ACTIONS_CHUNK, ACTION_DIM)
         #
         return actions, reponse_ids

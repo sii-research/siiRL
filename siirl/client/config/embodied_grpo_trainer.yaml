@@ -1,11 +1,3 @@
-# OpenVLA-OFT GRPO Training Configuration with FSDP Rollout (OPTIMIZED)
-# OpenVLA-OFT uses Orthogonal Finetuning (OFT) for parameter-efficient training
-# GRPO (Group Relative Policy Optimization) eliminates the need for a critic model
-# Based on siirl-gitee/verl VLA GRPO implementation
-#
-# NOTE: This is the siiRL-vla-sync adaptation using DAG architecture
-# OPTIMIZED: Removed duplicate parameters, aligned with DAPO architecture
-
 defaults:
   - ppo_dag_trainer
   - _self_

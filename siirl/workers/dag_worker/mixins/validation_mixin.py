@@ -486,7 +486,6 @@ class ValidationMixin:
             List[ValidationPayload]: Lightweight payloads for gathering
         """
         if self.val_reward_fn:
-            # verl pattern: verify returns (scores, reward_metrics, format_metrics, reward_format_metrics)
             verifier_score, reward_metrics, format_metrics, reward_format_metrics = self.val_reward_fn.verify(generated_proto)
             reward_tensor = torch.tensor(verifier_score, dtype=torch.float32).unsqueeze(-1)
             

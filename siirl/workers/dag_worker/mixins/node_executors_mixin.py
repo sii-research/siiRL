@@ -120,8 +120,7 @@ class NodeExecutorsMixin:
         
         rollout_worker = self.agent_group_worker[worker_group_index][NodeRole.ROLLOUT]
         
-        # Set meta_info for embodied training (aligned with verl implementation)
-        # Reference: verl/trainer/ppo/ray_trainer.py:526-530
+        # Set meta_info for embodied training
         batch.meta_info = {
             "eos_token_id": self.validate_tokenizer.eos_token_id if self.validate_tokenizer else None,
             "n_samples": self.config.actor_rollout_ref.rollout.n,

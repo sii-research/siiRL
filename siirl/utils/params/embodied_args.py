@@ -123,15 +123,15 @@ class EmbodiedSamplingConfig:
     
     filter_accuracy: bool = field(
         default=False,
-        metadata={"help": "Enable accuracy-based filtering for embodied tasks (verl: True)"}
+        metadata={"help": "Enable accuracy-based filtering for embodied tasks"}
     )
     accuracy_lower_bound: float = field(
         default=0.0,
-        metadata={"help": "Minimum success rate threshold for keeping prompts (verl: 0.1)"}
+        metadata={"help": "Minimum success rate threshold for keeping prompts"}
     )
     accuracy_upper_bound: float = field(
         default=1.0,
-        metadata={"help": "Maximum success rate threshold for keeping prompts (verl: 0.9)"}
+        metadata={"help": "Maximum success rate threshold for keeping prompts"}
     )
     filter_truncated: bool = field(
         default=False,
@@ -139,7 +139,7 @@ class EmbodiedSamplingConfig:
     )
     oversample_factor: int = field(
         default=1,
-        metadata={"help": "Oversample factor for data filtering (verl: 1)"}
+        metadata={"help": "Oversample factor for data filtering"}
     )
     
     def to_dict(self) -> Dict[str, Any]:

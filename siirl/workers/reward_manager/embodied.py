@@ -84,7 +84,7 @@ class EmbodiedRewardManager:
         Args:
             data: DataProto containing batch information
             return_dict: If True, returns format compatible with compute_reward function
-                        If False, returns format compatible with verl direct call
+                        If False, returns format compatible direct call
         
         Returns:
             If return_dict=True: {"reward_tensor": tensor, "reward_extra_info": dict}
@@ -162,15 +162,13 @@ class EmbodiedRewardManager:
                 "reward_extra_info": reward_extra_info
             }
         else:
-            # Format for direct call (verl compatibility)
             return reward_tensor_dict, reward_metrics
 
     def verify(self, data: DataProto) -> Tuple[List[float], Dict[str, float], Dict[str, float], Dict[str, float]]:
         """
-        Verify and compute rewards for validation (verl-compatible interface).
+        Verify and compute rewards for validation.
         
-        This method directly reads the 'complete' field from data.batch, following verl's
-        RobRewardManager.verify() implementation exactly. No external compute_score is called.
+        This method directly reads the 'complete' field from data.batch.
         
         Args:
             data: DataProto containing batch information with embodied task data
@@ -182,15 +180,15 @@ class EmbodiedRewardManager:
                 - format_metrics: Dict[str, float] - Format correctness (always 1.0)
                 - reward_format_metrics: Dict[str, float] - Same as reward_metrics
         """
-        # Step 1: Read complete field directly from batch (verl pattern)
+        # Step 1: Read complete field directly from batch
         completes = data.batch['complete'].tolist()
         batch_size = data.batch['responses'].size(0)
         assert len(completes) == batch_size
         
-        # Convert boolean to float (0.0 or 1.0) - verl uses float(item)
+        # Convert boolean to float (0.0 or 1.0)
         score = [float(item) for item in completes]
         
-        # Step 2: Store to batch tensors (verl pattern, optimized)
+        # Step 2: Store to batch tensors
         device = data.batch['responses'].device
         acc_tensor = torch.tensor(score, dtype=torch.float32, device=device)
         format_tensor = torch.ones(batch_size, dtype=torch.float32, device=device)
@@ -198,13 +196,13 @@ class EmbodiedRewardManager:
         data.batch['acc'] = acc_tensor
         data.batch['format_correctness'] = format_tensor
         
-        # Step 3: Compute aggregated metrics (verl pattern)
+        # Step 3: Compute aggregated metrics
         success_rate = acc_tensor.mean().item()
         
         reward_metrics = {'all': success_rate}
         format_metrics = {'all': 1.0}  # Always 1.0, no need to compute
         reward_format_metrics = {'all': success_rate}
         
-        # Return the 4-tuple expected by validation_mixin.py (verl pattern)
+        # Return the 4-tuple expected by validation_mixin.py
         return score, reward_metrics, format_metrics, reward_format_metrics
 
