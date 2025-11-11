@@ -35,7 +35,7 @@ actor_rollout_ref:
       lr: 5e-6                    
       weight_decay: 0.0
     ppo_mini_batch_size: 32       
-    ppo_micro_batch_size_per_gpu: 8  
+    ppo_micro_batch_size_per_gpu: 1  
     ppo_epochs: 1
     grad_clip: 1.0
     shuffle: true                 # Shuffle training data
@@ -57,9 +57,8 @@ actor_rollout_ref:
     temperature: 1.6             
     do_sample: true
     response_length: 512
-    log_prob_micro_batch_size_per_gpu: 8 
+    log_prob_micro_batch_size_per_gpu: 1 
     micro_batch_size: 1           # Rollout inference micro batch size
-    gpu_memory_utilization: 0.9   # GPU memory utilization for inference
     top_k: 0
     top_p: 1.0
   
@@ -94,7 +93,7 @@ actor_rollout_ref:
     unnorm_key: libero_10_no_noops
       
   ref:
-    log_prob_micro_batch_size_per_gpu: 8
+    log_prob_micro_batch_size_per_gpu: 1
     fsdp_config:
       param_offload: false
 
