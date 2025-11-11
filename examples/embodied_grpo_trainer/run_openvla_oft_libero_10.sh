@@ -27,60 +27,60 @@ export VJEPA_MODEL_PATH=$HOME_PATH/models/vjepa2/vitg-384.pt
 export BASE_CKPT_PATH=ckpts
 export BASE_TENSORBOARD_PATH=tensorboard
 
-# --- Embodied AI Specific Parameters (from YAML) ---
+# --- Embodied AI Specific Parameters ---
 export ACTION_TOKEN_LEN=7        # 7 dimensions: xyz (3), quaternion (3), gripper (1)
 export ACTION_CHUNKS_LEN=8       # OpenVLA-OFT uses 8-step action chunks
-export NUM_ENVS=16               # From YAML: actor_rollout_ref.embodied.env.num_envs
-export MAX_EPISODE_STEPS=512     # From YAML: actor_rollout_ref.embodied.env.max_steps
+export NUM_ENVS=16               # actor_rollout_ref.embodied.env.num_envs
+export MAX_EPISODE_STEPS=512     # actor_rollout_ref.embodied.env.max_steps
 
-# --- Data and Sampling Parameters (OPTIMIZED - removed duplicates) ---
+# --- Data and Sampling Parameters ---
 export VAL_BATCH_SIZE=496                      # Validation batch size
 export MAX_PROMPT_LENGTH=256                   
 export MAX_RESPONSE_LENGTH=128                 
 
-# --- Embodied Sampling Parameters (moved to algorithm.embodied_sampling) ---
+# --- Embodied Sampling Parameters ---
 export FILTER_ACCURACY=True                    # Enable accuracy-based filtering
 export ACCURACY_LOWER_BOUND=0.1                # Only keep prompts with success rate >= 0.1
 export ACCURACY_UPPER_BOUND=0.9                # Only keep prompts with success rate <= 0.9
 export FILTER_TRUNCATED=False                  # Filter truncated episodes (uses env.max_steps)
 export OVERSAMPLE_FACTOR=1                     # Oversample factor for filtering
 
-# --- Training Hyperparameters (from YAML) ---
-export TRAIN_BATCH_SIZE=64       # From YAML: data.train_batch_size
-export PPO_MINI_BATCH_SIZE=32    # From YAML: actor_rollout_ref.actor.ppo_mini_batch_size
+# --- Training Hyperparameters ---
+export TRAIN_BATCH_SIZE=64       # data.train_batch_size
+export PPO_MINI_BATCH_SIZE=32    # actor_rollout_ref.actor.ppo_mini_batch_size
 export ROLLOUT_N_SAMPLES=8       # REUSED: Number of samples per prompt
-export PPO_EPOCHS=1              # From YAML: actor_rollout_ref.actor.ppo_epochs
+export PPO_EPOCHS=1              # actor_rollout_ref.actor.ppo_epochs
 
-# Algorithm parameters (verl standard)
+# Algorithm parameters
 export LEARNING_RATE=5e-6        
-export WEIGHT_DECAY=0.0          # From YAML: actor_rollout_ref.actor.optim.weight_decay
-export CLIP_RATIO_HIGH=0.28      # From YAML: actor_rollout_ref.actor.clip_ratio_high
-export CLIP_RATIO_LOW=0.2        # From YAML: actor_rollout_ref.actor.clip_ratio_low
+export WEIGHT_DECAY=0.0          # actor_rollout_ref.actor.optim.weight_decay
+export CLIP_RATIO_HIGH=0.28      # actor_rollout_ref.actor.clip_ratio_high
+export CLIP_RATIO_LOW=0.2        # actor_rollout_ref.actor.clip_ratio_low
 export ENTROPY_COEFF=0.0         
 export TEMPERATURE=1.6          
 export GAMMA=1.0                 
 export LAM=1.0                   
 export GRAD_CLIP=1.0            
 
-# --- Image/Video Processing (from YAML) ---
-export IMG_SIZE=384              # From YAML: actor_rollout_ref.embodied.img_size
-export ENABLE_FP16=True          # From YAML: actor_rollout_ref.embodied.enable_fp16
-export EMBEDDING_MODEL_OFFLOAD=False  # From YAML: actor_rollout_ref.embodied.embedding_model_offload
-export CENTER_CROP=True          # From YAML: actor_rollout_ref.embodied.center_crop
+# --- Image/Video Processing ---
+export IMG_SIZE=384              # actor_rollout_ref.embodied.img_size
+export ENABLE_FP16=True          # actor_rollout_ref.embodied.enable_fp16
+export EMBEDDING_MODEL_OFFLOAD=False  # actor_rollout_ref.embodied.embedding_model_offload
+export CENTER_CROP=True          # actor_rollout_ref.embodied.center_crop
 export NUM_IMAGES_IN_INPUT=1     
 export NUM_STEPS_WAIT=10           # Environment stabilization steps
 
-# --- Trainer Configuration (from YAML) ---
+# --- Trainer Configuration ---
 export SAVE_FREQ=5              
 export TEST_FREQ=5              
-export TOTAL_EPOCHS=1000         # From YAML: trainer.total_epochs
-export MAX_CKPT_KEEP=5           # From YAML: trainer.max_actor_ckpt_to_keep
-export VAL_BEFORE_TRAIN=True     # From YAML: trainer.val_before_train
+export TOTAL_EPOCHS=1000         # trainer.total_epochs
+export MAX_CKPT_KEEP=5           # trainer.max_actor_ckpt_to_keep
+export VAL_BEFORE_TRAIN=True     # trainer.val_before_train
 
 # --- Multi-node distributed training ---
-export N_GPUS_PER_NODE=8         # From YAML: trainer.n_gpus_per_node
-export NNODES=1                  # From YAML: trainer.nnodes
-export NODE_RANK=${NODE_RANK:-0}
+export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-8}
+export NNODES=${PET_NNODES:-1}
+export NODE_RANK=${PET_NODE_RANK:-0}
 export MASTER_ADDR=${MASTER_ADDR:-localhost}
 export MASTER_PORT=${MASTER_PORT:-29500}
 
@@ -93,16 +93,16 @@ export GLOO_SOCKET_TIMEOUT=600
 timestamp=$(date +%Y%m%d_%H%M%S)
 export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_${NNODES}nodes
 export PROJECT_NAME=siirl_embodied_${DATASET}
-export EXPERIMENT_NAME=openvla_oft_grpo_fsdp_verl_aligned
+export EXPERIMENT_NAME=openvla_oft_grpo_fsdp
 export TENSORBOARD_DIR=${BASE_TENSORBOARD_PATH}/${MODEL_NAME}_${ALG}_${DATASET}/${timestamp}
 export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${ALG}_${DATASET}_${timestamp}
 
 # --- Define the Training Command ---
 TRAINING_CMD=(
     python3 -m siirl.client.main_dag
-    --config-name=embodied_grpo_dag_trainer
+    --config-name=embodied_grpo_trainer
     
-    # Data configuration (OPTIMIZED - removed duplicates)
+    # Data configuration
     data.train_files=\$TRAIN_DATA_PATH
     data.val_files=\$TEST_DATA_PATH
     data.train_batch_size=\$TRAIN_BATCH_SIZE
@@ -110,7 +110,7 @@ TRAINING_CMD=(
     data.max_prompt_length=\$MAX_PROMPT_LENGTH
     data.max_response_length=\$MAX_RESPONSE_LENGTH
     
-    # Algorithm configuration (standard GRPO - verl aligned)
+    # Algorithm configuration
     algorithm.workflow_type=embodied
     algorithm.adv_estimator=grpo
     algorithm.gamma=\$GAMMA
@@ -163,7 +163,7 @@ TRAINING_CMD=(
     actor_rollout_ref.embodied.num_images_in_input=\$NUM_IMAGES_IN_INPUT
     actor_rollout_ref.embodied.unnorm_key=\$DATASET
     
-    # Environment configuration (aligned with verl - REUSES env.env_name instead of data.task_suite_name)
+    # Environment configuration
     actor_rollout_ref.embodied.env.env_type=libero
     actor_rollout_ref.embodied.env.env_name=\$DATASET
     actor_rollout_ref.embodied.env.num_envs=\$NUM_ENVS
