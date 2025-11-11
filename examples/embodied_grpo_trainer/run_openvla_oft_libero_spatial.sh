@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # ===================================================================================
-# ===    Embodied AI GRPO Training with OpenVLA-OFT on LIBERO-10               ===
+# ===    Embodied AI GRPO Training with OpenVLA-OFT on LIBERO-SPATIAL             ===
 # ===================================================================================
 # 
-# This script trains an OpenVLA-OFT model using GRPO on the LIBERO-10 benchmark.
 
 set -e
 
@@ -12,7 +11,7 @@ export SIIRL_DIR="${SIIRL_DIR:your_siirl_path}"
 export PYTHONPATH="$SIIRL_DIR:/root/LIBERO/:your_vjepa2_path:$PYTHONPATH"
 
 # --- Experiment and Model Definition ---
-export DATASET=libero_10
+export DATASET=libero_spatial
 export ALG=grpo
 export MODEL_NAME=openvla-oft-7b
 export MODEL_TYPE=openvla-oft
@@ -21,7 +20,7 @@ export MODEL_TYPE=openvla-oft
 export HOME_PATH=${HOME_PATH:your_home_path}
 export TRAIN_DATA_PATH=$HOME_PATH/datasets/vla-oft/libero/$DATASET/train.parquet
 export TEST_DATA_PATH=$HOME_PATH/datasets/vla-oft/libero/$DATASET/test.parquet
-export MODEL_PATH=$HOME_PATH/models/Haozhan72/Openvla-oft-SFT-libero10-traj1
+export MODEL_PATH=$HOME_PATH/models/Haozhan72/Openvla-oft-SFT-libero-spatial-traj1
 export VJEPA_MODEL_PATH=$HOME_PATH/models/vjepa2/vitg-384.pt
 
 # Base output paths
@@ -195,6 +194,97 @@ TRAINING_CMD=(
 # ===                          EXECUTION LOGIC                                    ===
 # ===================================================================================
 
+# --- Boilerplate Setup ---
+set -e
+set -o pipefail
 set -x
-eval "${TRAINING_CMD[@]}" 2>&1 | tee "$CKPT_PATH/logs/training_${timestamp}.log"
 
+# --- Infrastructure & Boilerplate Functions ---
+start_ray_cluster() {
+    local RAY_HEAD_WAIT_TIMEOUT=600
+    export RAY_RAYLET_NODE_MANAGER_CONFIG_NIC_NAME=${INTERFACE_NAME}
+    export RAY_GCS_SERVER_CONFIG_NIC_NAME=${INTERFACE_NAME}
+    export RAY_RUNTIME_ENV_AGENT_CREATION_TIMEOUT_S=1200
+    export RAY_GCS_RPC_CLIENT_CONNECT_TIMEOUT_S=120
+
+    local ray_start_common_opts=(
+        --num-gpus "$N_GPUS_PER_NODE"
+        --object-store-memory 100000000000
+        --memory 100000000000
+    )
+
+    if [ "$NNODES" -gt 1 ]; then
+        if [ "$NODE_RANK" = "0" ]; then
+            echo "INFO: Starting Ray head node on $(hostname)..."
+            export RAY_ADDRESS="$RAY_MASTER_ADDR:$RAY_MASTER_PORT"
+            ray start --head --port="$RAY_MASTER_PORT" --dashboard-port="$RAY_DASHBOARD_PORT" "${ray_start_common_opts[@]}" --system-config='{"gcs_server_request_timeout_seconds": 60, "gcs_rpc_server_reconnect_timeout_s": 60}'
+            local start_time=$(date +%s)
+            while ! ray health-check --address "$RAY_ADDRESS" &>/dev/null; do
+                if [ "$(( $(date +%s) - start_time ))" -ge "$RAY_HEAD_WAIT_TIMEOUT" ]; then echo "ERROR: Timed out waiting for head node. Exiting." >&2; ray stop --force; exit 1; fi
+                echo "Head node not healthy yet. Retrying in 5s..."
+                sleep 5
+            done
+            echo "INFO: Head node is healthy."
+        else
+            local head_node_address="$MASTER_ADDR:$RAY_MASTER_PORT"
+            echo "INFO: Worker node $(hostname) waiting for head at $head_node_address..."
+            local start_time=$(date +%s)
+            while ! ray health-check --address "$head_node_address" &>/dev/null; do
+                if [ "$(( $(date +%s) - start_time ))" -ge "$RAY_HEAD_WAIT_TIMEOUT" ]; then echo "ERROR: Timed out waiting for head. Exiting." >&2; exit 1; fi
+                echo "Head not healthy yet. Retrying in 5s..."
+                sleep 5
+            done
+            echo "INFO: Head is healthy. Worker starting..."
+            ray start --address="$head_node_address" "${ray_start_common_opts[@]}"
+        fi
+    else
+        echo "INFO: Starting Ray in single-node mode..."
+        ray start --head "${ray_start_common_opts[@]}"
+    fi
+}
+
+# --- Main Execution Function ---
+main() {
+    local timestamp=$(date +"%Y%m%d_%H%M%S")
+    ray stop --force
+
+    export VLLM_USE_V1=1
+    export GLOO_SOCKET_TIMEOUT=600
+    export GLOO_TCP_TIMEOUT=600
+    export GLOO_LOG_LEVEL=DEBUG
+    export RAY_MASTER_PORT=${RAY_MASTER_PORT:-6379}
+    export RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-8265}
+    export RAY_MASTER_ADDR=$MASTER_ADDR
+    
+    start_ray_cluster
+
+    if [ "$NNODES" -gt 1 ] && [ "$NODE_RANK" = "0" ]; then
+        echo "Waiting for all $NNODES nodes to join..."
+        local TIMEOUT=600; local start_time=$(date +%s)
+        while true; do
+            if [ "$(( $(date +%s) - start_time ))" -ge "$TIMEOUT" ]; then echo "Error: Timeout waiting for nodes." >&2; exit 1; fi
+            local ready_nodes=$(ray list nodes --format=json | python3 -c "import sys, json; print(len(json.load(sys.stdin)))")
+            if [ "$ready_nodes" -ge "$NNODES" ]; then break; fi
+            echo "Waiting... ($ready_nodes / $NNODES nodes ready)"
+            sleep 5
+        done
+        echo "All $NNODES nodes have joined."
+    fi
+
+    if [ "$NODE_RANK" = "0" ]; then
+        echo "INFO [RANK 0]: Starting main training command."
+        eval "${TRAINING_CMD[@]}" "$@"
+        echo "INFO [RANK 0]: Training finished."
+        sleep 30; ray stop --force >/dev/null 2>&1
+    elif [ "$NNODES" -gt 1 ]; then
+        local head_node_address="$MASTER_ADDR:$RAY_MASTER_PORT"
+        echo "INFO [RANK $NODE_RANK]: Worker active. Monitoring head node at $head_node_address."
+        while ray health-check --address "$head_node_address" &>/dev/null; do sleep 15; done
+        echo "INFO [RANK $NODE_RANK]: Head node down. Exiting."
+    fi
+
+    echo "INFO: Script finished on rank $NODE_RANK."
+}
+
+# --- Script Entrypoint ---
+main "$@"

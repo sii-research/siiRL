@@ -1,31 +1,26 @@
 #!/usr/bin/env bash
-
 # ===================================================================================
-# ===    Embodied AI GRPO Training with OpenVLA-OFT on LIBERO-10               ===
+# ===    Embodied AI GRPO Training with OpenVLA-OFT on LIBERO-OBJECT               ===
 # ===================================================================================
 # 
-# This script trains an OpenVLA-OFT model using GRPO on the LIBERO-10 benchmark.
-# Supports both single-node and multi-node distributed training.
 
-# ===================================================================================
-# ===                       USER CONFIGURATION SECTION                            ===
-# ===================================================================================
+set -e
 
 # --- Environment Setup (Critical for siiRL) ---
-export SIIRL_DIR="${SIIRL_DIR:-/inspire/hdd/global_user/liuliming-liuliming/code/python/siirl4vla-debug}"
-export PYTHONPATH="$SIIRL_DIR:/root/LIBERO/:/inspire/hdd/project/qianghuaxuexi/public/models/vjepa2:$PYTHONPATH"
+export SIIRL_DIR="${SIIRL_DIR:your_siirl_path}"
+export PYTHONPATH="$SIIRL_DIR:/root/LIBERO/:your_vjepa2_path:$PYTHONPATH"
 
 # --- Experiment and Model Definition ---
-export DATASET=libero_10
+export DATASET=libero_object
 export ALG=grpo
 export MODEL_NAME=openvla-oft-7b
 export MODEL_TYPE=openvla-oft
 
 # --- Path Definitions (USER PROVIDED) ---
-export HOME_PATH=${HOME_PATH:-/inspire/hdd/project/qianghuaxuexi/public}
+export HOME_PATH=${HOME_PATH:your_home_path}
 export TRAIN_DATA_PATH=$HOME_PATH/datasets/vla-oft/libero/$DATASET/train.parquet
 export TEST_DATA_PATH=$HOME_PATH/datasets/vla-oft/libero/$DATASET/test.parquet
-export MODEL_PATH=$HOME_PATH/models/Haozhan72/Openvla-oft-SFT-libero10-traj1
+export MODEL_PATH=$HOME_PATH/models/Haozhan72/Openvla-oft-SFT-libero-object-traj1
 export VJEPA_MODEL_PATH=$HOME_PATH/models/vjepa2/vitg-384.pt
 
 # Base output paths
@@ -37,70 +32,57 @@ export ACTION_TOKEN_LEN=7        # 7 dimensions: xyz (3), quaternion (3), grippe
 export ACTION_CHUNKS_LEN=8       # OpenVLA-OFT uses 8-step action chunks
 export NUM_ENVS=16               # From YAML: actor_rollout_ref.embodied.env.num_envs
 export MAX_EPISODE_STEPS=512     # From YAML: actor_rollout_ref.embodied.env.max_steps
-export UNNORM_KEY=libero_10      # ALIGNED: Standard key (not _no_noops)
 
 # --- Data and Sampling Parameters (OPTIMIZED - removed duplicates) ---
-export VAL_BATCH_SIZE=496                      # Validation batch size (verl: 496)
-export MAX_PROMPT_LENGTH=256                   # ALIGNED: Changed from 512 to 256 (verl: 256)
-export MAX_RESPONSE_LENGTH=128                 # ALIGNED: Changed from 512 to 128 (verl: 128)
+export VAL_BATCH_SIZE=496                      # Validation batch size
+export MAX_PROMPT_LENGTH=256                   
+export MAX_RESPONSE_LENGTH=128                 
 
 # --- Embodied Sampling Parameters (moved to algorithm.embodied_sampling) ---
-export FILTER_ACCURACY=True                    # Enable accuracy-based filtering (verl: True)
-export ACCURACY_LOWER_BOUND=0.1                # Only keep prompts with success rate >= 0.1 (verl: 0.1)
-export ACCURACY_UPPER_BOUND=0.9                # Only keep prompts with success rate <= 0.9 (verl: 0.9)
+export FILTER_ACCURACY=True                    # Enable accuracy-based filtering
+export ACCURACY_LOWER_BOUND=0.1                # Only keep prompts with success rate >= 0.1
+export ACCURACY_UPPER_BOUND=0.9                # Only keep prompts with success rate <= 0.9
 export FILTER_TRUNCATED=False                  # Filter truncated episodes (uses env.max_steps)
-export OVERSAMPLE_FACTOR=1                     # Oversample factor for filtering (verl: 1)
+export OVERSAMPLE_FACTOR=1                     # Oversample factor for filtering
 
-# --- Training Hyperparameters (from YAML - verl standard) ---
+# --- Training Hyperparameters (from YAML) ---
 export TRAIN_BATCH_SIZE=64       # From YAML: data.train_batch_size
 export PPO_MINI_BATCH_SIZE=32    # From YAML: actor_rollout_ref.actor.ppo_mini_batch_size
-export PPO_MICRO_BATCH_SIZE_PER_GPU=8          # 
-export LOG_PROB_MICRO_BATCH_SIZE=1             # Log prob micro batch size (verl: 8)
-export ROLLOUT_MICRO_BATCH_SIZE=1              # Rollout micro batch size (verl: 1)
-export ROLLOUT_N_SAMPLES=8                     # REUSED: Number of samples per prompt (replaces N_SAMPLES)
-export PPO_EPOCHS=1                            # From YAML: actor_rollout_ref.actor.ppo_epochs
+export ROLLOUT_N_SAMPLES=8       # REUSED: Number of samples per prompt
+export PPO_EPOCHS=1              # From YAML: actor_rollout_ref.actor.ppo_epochs
 
 # Algorithm parameters (verl standard)
-export LEARNING_RATE=5e-6        # ALIGNED: Changed from 1e-6 to 5e-6 (verl: 5e-6)
+export LEARNING_RATE=5e-6        
 export WEIGHT_DECAY=0.0          # From YAML: actor_rollout_ref.actor.optim.weight_decay
 export CLIP_RATIO_HIGH=0.28      # From YAML: actor_rollout_ref.actor.clip_ratio_high
 export CLIP_RATIO_LOW=0.2        # From YAML: actor_rollout_ref.actor.clip_ratio_low
-export ENTROPY_COEFF=0.0         # ALIGNED: Changed from 0.001 to 0.0 (verl: 0.0)
-export TEMPERATURE=1.6           # ALIGNED: Changed from 1.0 to 1.6 (verl: 1.6)
-export GAMMA=1.0                 # From YAML: algorithm.gamma (verl standard)
-export LAM=1.0                   # From YAML: algorithm.lam (verl standard)
-export GRAD_CLIP=1.0             # From YAML: actor_rollout_ref.actor.grad_clip
+export ENTROPY_COEFF=0.0         
+export TEMPERATURE=1.6          
+export GAMMA=1.0                 
+export LAM=1.0                   
+export GRAD_CLIP=1.0            
 
 # --- Image/Video Processing (from YAML) ---
 export IMG_SIZE=384              # From YAML: actor_rollout_ref.embodied.img_size
 export ENABLE_FP16=True          # From YAML: actor_rollout_ref.embodied.enable_fp16
-export EMBEDDING_MODEL_OFFLOAD=True  # From YAML: actor_rollout_ref.embodied.embedding_model_offload
+export EMBEDDING_MODEL_OFFLOAD=False  # From YAML: actor_rollout_ref.embodied.embedding_model_offload
 export CENTER_CROP=True          # From YAML: actor_rollout_ref.embodied.center_crop
-export NUM_IMAGES_IN_INPUT=1     # CRITICAL: Aligned to 1 (verl: 1, avoids 12-channel error)
-export NUM_STEPS_WAIT=10         # NEW: Environment stabilization steps (verl: 10)
-export GPU_MEMORY_UTILIZATION=0.9  # NEW: GPU memory utilization (verl: 0.9)
+export NUM_IMAGES_IN_INPUT=1     
+export NUM_STEPS_WAIT=10           # Environment stabilization steps
 
 # --- Trainer Configuration (from YAML) ---
-export SAVE_FREQ=-1              # ALIGNED: Changed from 25 to 4 (verl: 4)
-export TEST_FREQ=5               # ALIGNED: Changed from 5 to 4 (verl: 4)
-export TOTAL_EPOCHS=5000         # From YAML: trainer.total_epochs
+export SAVE_FREQ=5              
+export TEST_FREQ=5              
+export TOTAL_EPOCHS=1000         # From YAML: trainer.total_epochs
 export MAX_CKPT_KEEP=5           # From YAML: trainer.max_actor_ckpt_to_keep
 export VAL_BEFORE_TRAIN=True     # From YAML: trainer.val_before_train
 
-# --- Multi-node (Multi-machine) distributed training environments ---
-
-# Uncomment the following line and set the correct network interface if needed for distributed backend
-# export GLOO_SOCKET_IFNAME=bond0  # Modify as needed
-
-# --- Distributed Training & Infrastructure ---
-export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-8}
-export NNODES=${PET_NNODES:-1}
-export NODE_RANK=${PET_NODE_RANK:-0}
+# --- Multi-node distributed training ---
+export N_GPUS_PER_NODE=8         # From YAML: trainer.n_gpus_per_node
+export NNODES=1                  # From YAML: trainer.nnodes
+export NODE_RANK=${NODE_RANK:-0}
 export MASTER_ADDR=${MASTER_ADDR:-localhost}
 export MASTER_PORT=${MASTER_PORT:-29500}
-
-# Network interface for Ray distributed communication (optional)
-export INTERFACE_NAME=${INTERFACE_NAME:-}
 
 # --- Environment Variables ---
 export MUJOCO_GL=egl
@@ -108,18 +90,17 @@ export PYOPENGL_PLATFORM=egl
 export GLOO_SOCKET_TIMEOUT=600
 
 # --- Output Paths and Experiment Naming ---
+timestamp=$(date +%Y%m%d_%H%M%S)
 export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_${NNODES}nodes
-export PROJECT_NAME=siirl_embodied_${DATASET}_debug
-export EXPERIMENT_NAME=openvla_oft_grpo_fsdp_verl_aligned_${TRAIN_BATCH_SIZE}bs_siirl
-export TENSORBOARD_DIR=${BASE_TENSORBOARD_PATH}/${MODEL_NAME}_${ALG}_${DATASET}
-export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${ALG}_${DATASET}
-export WANDB_BASE_URL=https://wandb1.sii.edu.cn/
-export WANDB_API_KEY=local-6a4cc4c8b917355ce21530f9c9be52014cc55ee2
+export PROJECT_NAME=siirl_embodied_${DATASET}
+export EXPERIMENT_NAME=openvla_oft_grpo_fsdp_verl_aligned
+export TENSORBOARD_DIR=${BASE_TENSORBOARD_PATH}/${MODEL_NAME}_${ALG}_${DATASET}/${timestamp}
+export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${ALG}_${DATASET}_${timestamp}
 
-# --- Define the Training Command (aligned with embodied_grpo_dag_trainer.yaml) ---
+# --- Define the Training Command ---
 TRAINING_CMD=(
     python3 -m siirl.client.main_dag
-    --config-name=embodied_grpo_trainer
+    --config-name=embodied_grpo_dag_trainer
     
     # Data configuration (OPTIMIZED - removed duplicates)
     data.train_files=\$TRAIN_DATA_PATH
@@ -151,7 +132,6 @@ TRAINING_CMD=(
     actor_rollout_ref.actor.optim.lr=\$LEARNING_RATE
     actor_rollout_ref.actor.optim.weight_decay=\$WEIGHT_DECAY
     actor_rollout_ref.actor.ppo_mini_batch_size=\$PPO_MINI_BATCH_SIZE
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.actor.ppo_epochs=\$PPO_EPOCHS
     actor_rollout_ref.actor.grad_clip=\$GRAD_CLIP
     actor_rollout_ref.actor.clip_ratio_high=\$CLIP_RATIO_HIGH
@@ -162,17 +142,14 @@ TRAINING_CMD=(
     # Actor FSDP configuration
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.grad_offload=False
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
     
-    # Rollout configuration (aligned with verl - REUSES rollout.n instead of data.n_samples)
+    # Rollout configuration
     actor_rollout_ref.rollout.name=hf
     actor_rollout_ref.rollout.n=\$ROLLOUT_N_SAMPLES
     actor_rollout_ref.rollout.temperature=\$TEMPERATURE
     actor_rollout_ref.rollout.do_sample=True
     actor_rollout_ref.rollout.response_length=512
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=\$LOG_PROB_MICRO_BATCH_SIZE
-    actor_rollout_ref.rollout.micro_batch_size=\$ROLLOUT_MICRO_BATCH_SIZE
-    actor_rollout_ref.rollout.gpu_memory_utilization=\$GPU_MEMORY_UTILIZATION
     
     # Embodied AI specific configuration
     actor_rollout_ref.embodied.embodied_type=\$MODEL_TYPE
@@ -184,7 +161,7 @@ TRAINING_CMD=(
     actor_rollout_ref.embodied.embedding_model_offload=\$EMBEDDING_MODEL_OFFLOAD
     actor_rollout_ref.embodied.center_crop=\$CENTER_CROP
     actor_rollout_ref.embodied.num_images_in_input=\$NUM_IMAGES_IN_INPUT
-    actor_rollout_ref.embodied.unnorm_key=\$UNNORM_KEY
+    actor_rollout_ref.embodied.unnorm_key=\$DATASET
     
     # Environment configuration (aligned with verl - REUSES env.env_name instead of data.task_suite_name)
     actor_rollout_ref.embodied.env.env_type=libero
@@ -195,10 +172,6 @@ TRAINING_CMD=(
     actor_rollout_ref.embodied.env.num_trials_per_task=50
     actor_rollout_ref.embodied.env.model_family=openvla
     
-    # Reference policy configuration
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=\$LOG_PROB_MICRO_BATCH_SIZE
-    actor_rollout_ref.ref.fsdp_config.param_offload=False
-    
     # Critic configuration (GRPO doesn't use critic)
     critic.use_critic_model=False
     
@@ -207,7 +180,7 @@ TRAINING_CMD=(
     trainer.save_freq=\$SAVE_FREQ
     trainer.test_freq=\$TEST_FREQ
     trainer.max_actor_ckpt_to_keep=\$MAX_CKPT_KEEP
-    trainer.logger=['console','wandb']
+    trainer.logger=['console','tensorboard']
     trainer.project_name=\$PROJECT_NAME
     trainer.experiment_name=\$EXPERIMENT_NAME
     trainer.nnodes=\$NNODES
@@ -218,7 +191,7 @@ TRAINING_CMD=(
 )
 
 # ===================================================================================
-# ===                  MAIN EXECUTION LOGIC & INFRASTRUCTURE                      ===
+# ===                          EXECUTION LOGIC                                    ===
 # ===================================================================================
 
 # --- Boilerplate Setup ---
@@ -274,8 +247,6 @@ start_ray_cluster() {
 main() {
     local timestamp=$(date +"%Y%m%d_%H%M%S")
     ray stop --force
-
-    
 
     export VLLM_USE_V1=1
     export GLOO_SOCKET_TIMEOUT=600
