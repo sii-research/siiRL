@@ -111,14 +111,15 @@ def load_pipeline(siirl_args: SiiRLArguments) -> TaskGraph:
         siirl_args.actor_rollout_ref.actor.use_cpgd_loss = True
 
     # Select appropriate built-in pipeline
-    if siirl_args.algorithm.adv_estimator == AdvantageEstimator.GRPO:
+    # Check algorithm_name first for special variants like DAPO (which may have adv_estimator=grpo)
+    if hasattr(siirl_args.algorithm, 'algorithm_name') and siirl_args.algorithm.algorithm_name == AlgorithmType.DAPO.value:
+        return dapo_pipeline()
+    elif siirl_args.algorithm.adv_estimator == AdvantageEstimator.GRPO:
         return grpo_pipeline()
     elif siirl_args.algorithm.adv_estimator == AdvantageEstimator.CPGD:
         return grpo_pipeline()  # CPGD uses GRPO structure
     elif siirl_args.algorithm.adv_estimator == AdvantageEstimator.GAE:
         return ppo_pipeline()
-    elif siirl_args.algorithm.algorithm_name == AlgorithmType.DAPO.value:
-        return dapo_pipeline()
     else:
         raise NotImplementedError(
             f"No built-in pipeline for algorithm '{siirl_args.algorithm.adv_estimator}'. "

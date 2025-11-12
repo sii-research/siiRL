@@ -68,7 +68,9 @@ def dynamic_sampling(siirl_args: SiiRLArguments, batch: TensorDict, node_config:
     metric_values = batch[metric_name]
 
     for i in range(len(uids)):
-        prompt_uid_to_metric_vals[uids[i]].append(metric_values[i])
+        # Convert tensor uid to Python int for use as dict key
+        uid_key = int(uids[i]) if hasattr(uids[i], 'item') else uids[i]
+        prompt_uid_to_metric_vals[uid_key].append(metric_values[i])
 
     # Calculate the standard deviation of the metric for each group of trajectories.
     prompt_uid_to_metric_std = {prompt_uid: np.std(metric_vals) for prompt_uid, metric_vals in prompt_uid_to_metric_vals.items()}
@@ -82,7 +84,10 @@ def dynamic_sampling(siirl_args: SiiRLArguments, batch: TensorDict, node_config:
     if not kept_prompt_uids:
         kept_traj_indices = []
     else:
-        kept_traj_indices = [idx for idx, traj_uid in enumerate(uids) if traj_uid in kept_prompt_uids]
+        kept_traj_indices = [
+            idx for idx in range(len(uids))
+            if (int(uids[idx]) if hasattr(uids[idx], 'item') else uids[idx]) in kept_prompt_uids
+        ]
 
     # Filter the original batch by slicing it with the collected indices.
     # The DataProto object natively supports this slicing operation.
@@ -92,5 +97,8 @@ def dynamic_sampling(siirl_args: SiiRLArguments, batch: TensorDict, node_config:
     final_traj_count = len(filtered_batch) if filtered_batch is not None else 0
     kept_ratio = final_traj_count / initial_traj_count if initial_traj_count > 0 else 1.0
     metrics = {"dapo_sampling/kept_trajectories_ratio": kept_ratio, "dapo_sampling/initial_trajectories": initial_traj_count, "dapo_sampling/final_trajectories": final_traj_count, "dapo_sampling/kept_groups": len(kept_prompt_uids), "dapo_sampling/total_groups": len(prompt_uid_to_metric_vals)}
+    
+    # Also return the indices for np.ndarray filtering in the next node
+    metrics['dapo_sampling/filtered_indices'] = kept_traj_indices
 
     return NodeOutput(batch=filtered_batch, metrics=metrics)
