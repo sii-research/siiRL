@@ -86,6 +86,13 @@ class DAGWorker(
         # This is the core state-carrying mechanism for dynamic sampling.
         self.sampling_leftover_cache: Optional[DataProto] = None
 
+        # Cumulative timing tracking for dynamic sampling
+        # When filtering causes insufficient data, we need multiple rollouts.
+        # These variables track the cumulative timing across all rollouts until training completes.
+        self.cumulative_timing_raw: Dict[str, float] = {}  # Accumulated timing from incomplete rollouts
+        self.cumulative_rollout_count: int = 0              # Number of incomplete rollouts so far
+        self.cumulative_start_time: Optional[float] = None  # Wall time when first rollout started
+
         # multi agent
         self._multi_agent = False
         try:

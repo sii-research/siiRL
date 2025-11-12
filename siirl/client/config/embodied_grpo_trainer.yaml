@@ -41,6 +41,8 @@ actor_rollout_ref:
       param_offload: false
       grad_offload: false
       optimizer_offload: false
+    
+    traj_mini_batch_size: 16
   
   rollout:
     # Use HF (HuggingFace) backend for FSDP-based rollout
