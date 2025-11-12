@@ -105,15 +105,30 @@ class SampleManager(BaseModel):
 
 def preprocess_dataloader(data:Dict, n:int = 1):
     batch_size = len(data['input_ids'])
-    uid = np.array([str(uuid.uuid4()) for _ in range(batch_size)])
+    
+    # Create integer indices for GRPO grouping
+    # Each prompt gets a unique index (0, 1, 2, ..., batch_size-1)
+    # This will be repeated to [0,0,0,...,1,1,1,...,2,2,2,...] after repeat
+    uid = np.arange(batch_size, dtype=np.int64)
     data['uid'] = uid
-    for key,value in data.items():
-        if isinstance(value, np.ndarray): 
-            value = np.repeat(value, n, axis=0)
-            data[key] = value
-
-    tensor_dict = TensorDict(data, batch_size=batch_size)
-    tensor_dict = tensor_dict.repeat_interleave(n)
+    
+    # Manually repeat all numpy arrays and torch tensors
+    # This ensures consistent handling of all fields
+    for key, value in data.items():
+        if isinstance(value, np.ndarray):
+            # Repeat numpy arrays along axis 0
+            data[key] = np.repeat(value, n, axis=0)
+        elif isinstance(value, torch.Tensor):
+            # Repeat torch tensors along dim 0
+            data[key] = value.repeat_interleave(n, dim=0)
+        elif isinstance(value, list):
+            # Convert list to numpy array and repeat
+            data[key] = np.repeat(np.array(value), n, axis=0)
+    
+    # Now all fields have batch_size * n
+    # Create TensorDict with the expanded batch size
+    tensor_dict = TensorDict(data, batch_size=batch_size * n)
+    
     return tensor_dict
 
 def Dict2Samples(data:TensorDict)-> List[SampleManager]:
@@ -218,3 +233,85 @@ def Samples2Dict(samples: List[Sample]) -> TensorDict:
     tensordict_data["global_token_num"] = NonTensorData((torch.sum(tensordict_data["attention_mask"], dim=-1)).tolist())
 
     return TensorDict(tensordict_data, batch_size=batch_size)
+
+def filter_tensordict(batch: TensorDict, indices: List[int]) -> TensorDict:
+    """
+    Filter a TensorDict by selecting only the samples at the specified indices.
+    
+    This function is used by DAPO to filter out trajectory groups with zero variance.
+    It properly handles both regular tensor fields and NonTensorData fields.
+    
+    Args:
+        batch: The input TensorDict to filter
+        indices: List of indices to keep
+        
+    Returns:
+        A new TensorDict containing only the selected samples
+    """
+    if not indices:
+        # Return an empty TensorDict with the same structure but batch_size=0
+        return TensorDict({}, batch_size=(0,))
+    
+    # Convert indices to both tensor and numpy for different field types
+    indices_tensor = torch.tensor(indices, dtype=torch.long)
+    indices_np = np.array(indices, dtype=np.int64)
+    target_batch_size = len(indices)
+    original_batch_size = batch.batch_size[0] if isinstance(batch.batch_size, tuple) else batch.batch_size
+    
+    from loguru import logger
+    
+    # Manually filter each field to ensure NonTensorData is handled correctly
+    filtered_dict = {}
+    for key, value in batch.items():
+        try:
+            if isinstance(value, NonTensorData):
+                # NonTensorData needs special handling
+                if isinstance(value.data, np.ndarray):
+                    # numpy array wrapped in NonTensorData
+                    data_len = len(value.data)
+                    if data_len == original_batch_size:
+                        # This is batched data - filter it
+                        filtered_data = value.data[indices_np]
+                        filtered_dict[key] = NonTensorData(data=filtered_data, batch_size=[target_batch_size])
+                    else:
+                        # This is metadata (length doesn't match batch_size) - keep as is
+                        filtered_dict[key] = value
+                elif isinstance(value.data, (list, tuple)):
+                    # list/tuple wrapped in NonTensorData
+                    data_len = len(value.data)
+                    if data_len == original_batch_size:
+                        # This is batched data - filter it
+                        filtered_data = [value.data[i] for i in indices]
+                        filtered_dict[key] = NonTensorData(data=filtered_data, batch_size=[target_batch_size])
+                    else:
+                        # This is metadata (length doesn't match batch_size) - keep as is
+                        filtered_dict[key] = value
+                else:
+                    # scalar or other type - keep as is (it's metadata)
+                    filtered_dict[key] = value
+            elif isinstance(value, torch.Tensor):
+                # Regular tensor - use tensor indexing
+                filtered_dict[key] = value[indices_tensor]
+            else:
+                # Other types - try tensor indexing or keep as is
+                try:
+                    filtered_dict[key] = value[indices_tensor]
+                except:
+                    filtered_dict[key] = value
+        except Exception as e:
+            # Provide detailed error message for debugging
+            raise RuntimeError(
+                f"Error filtering field '{key}' in filter_tensordict: {e}\n"
+                f"  Field type: {type(value)}\n"
+                f"  Value type: {type(value.data) if isinstance(value, NonTensorData) else 'N/A'}\n"
+                f"  Data length: {len(value.data) if isinstance(value, NonTensorData) and hasattr(value.data, '__len__') else 'N/A'}\n"
+                f"  Original batch size: {original_batch_size}\n"
+                f"  Target batch size: {target_batch_size}\n"
+                f"  Indices: {indices[:10]}... (showing first 10)\n"
+                f"  Max index: {max(indices) if indices else 'N/A'}"
+            ) from e
+    
+    # Create new TensorDict with filtered data
+    filtered_batch = TensorDict(filtered_dict, batch_size=target_batch_size)
+    
+    return filtered_batch

@@ -318,6 +318,16 @@ class DAGWorker(Worker):
                         else:
                             logger.warning(f"Node {cur_node.node_id} has no executable. Passing data through.")
                             node_output = NodeOutput(batch=batch)
+                    
+                    # Check if node returned empty batch (e.g., DAPO insufficient samples)
+                    # This triggers re-rollout to collect more data
+                    if node_output.batch is not None and len(node_output.batch) == 0:
+                        logger.warning(
+                            f"Rank {self._rank}: Node '{cur_node.node_id}' returned empty batch. "
+                            f"Aborting current step to trigger re-rollout."
+                        )
+                        return None
+                    
                     if self.enable_perf:        
                         with timer(self.enable_perf, f"{node_name_timer}_barrier", timing_raw):
                             dist.barrier(self._gather_group)
@@ -432,7 +442,7 @@ class DAGWorker(Worker):
         """Calculates rewards for a batch of generated sequences."""
         
         if not self.check_mode() and self._rank != 0:
-            return
+            return NodeOutput(batch=batch, metrics={})
         
         tp_size = kwargs.pop("tp_size")
         if "token_level_rewards" in batch and batch["token_level_rewards"].numel() > 0:
@@ -453,6 +463,336 @@ class DAGWorker(Worker):
         else:
             batch["token_level_rewards"] = batch["token_level_scores"]
         return NodeOutput(batch=batch, metrics=metrics)
+
+    @DistProfiler.annotate(role="postprocess_sampling")
+    def postprocess_sampling(self, config, batch: TensorDict, **kwargs) -> NodeOutput:
+        """
+        DAPO dynamic sampling post-processing with caching mechanism.
+        
+        This method MUST run on ALL ranks to ensure consistent batch sizes across ranks.
+        Each rank independently filters its own data, then collectively decides whether
+        to proceed with training or trigger a re-rollout.
+        
+        Workflow:
+        1. All ranks filter their local data based on metric variance
+        2. All ranks merge with cached data if exists
+        3. Global aggregation to count total samples across all ranks
+        4. Collective decision: proceed with training or cache and re-rollout
+        
+        Args:
+            config: Training configuration
+            batch: Input batch to filter (TensorDict)
+            **kwargs: Additional arguments
+            
+        Returns:
+            NodeOutput with filtered batch (or empty if insufficient) and metrics
+        """
+        import torch
+        import torch.distributed as dist
+        from siirl.user_interface.filter_interface import dynamic_sampling
+        
+        try:
+            # Initialize cache if not exists (per-rank cache)
+            if not hasattr(self, 'sampling_leftover_cache'):
+                self.sampling_leftover_cache = None
+            
+            # Step 1: Apply DAPO filtering (ALL RANKS)
+            filter_result = dynamic_sampling(
+                siirl_args=config,
+                batch=batch,
+                node_config={}
+            )
+            
+            filtered_batch = filter_result.batch
+            metrics = filter_result.metrics if self._rank == 0 else {}
+            # Get the indices from the metrics dict for manual np.ndarray filtering
+            filtered_indices = metrics.pop('dapo_sampling/filtered_indices', [])
+
+            # Step 2: Merge with cached data if exists (ALL RANKS)
+            if self.sampling_leftover_cache is not None:
+                # Manual merge to handle NonTensorData and np.ndarray fields properly
+                from tensordict.tensorclass import NonTensorData
+                cache_size = len(self.sampling_leftover_cache)
+                new_size = len(filtered_batch)
+                merged_size = cache_size + new_size
+                
+                merged_dict = {}
+                # Use keys from the new batch as it's guaranteed to be non-empty and have the correct schema
+                for key in filtered_batch.keys():
+                    cache_val = self.sampling_leftover_cache.get(key) # Use .get for safety
+                    new_val = filtered_batch[key]
+                    
+                    # Skip if cache doesn't have this key (e.g., new field added in pipeline)
+                    if cache_val is None:
+                        merged_dict[key] = new_val
+                        continue
+
+                    # --- Simplified merge logic (verified by unit tests) ---
+                    if isinstance(cache_val, torch.Tensor):
+                        if isinstance(new_val, np.ndarray):
+                            new_val = torch.from_numpy(new_val).to(cache_val.device)
+                        merged_dict[key] = torch.cat([cache_val, new_val], dim=0)
+                    else:
+                        # Handle NonTensorData or raw types (TensorDict may unpack NonTensorData)
+                        # Extract the actual data
+                        if isinstance(cache_val, NonTensorData):
+                            cache_data = cache_val.data
+                        else:
+                            cache_data = cache_val
+                        
+                        if isinstance(new_val, NonTensorData):
+                            new_data = new_val.data
+                        else:
+                            new_data = new_val
+                        
+                        # Determine if it's batched data or metadata based on length
+                        if isinstance(cache_data, np.ndarray):
+                            cache_len = len(cache_data)
+                            if cache_len == cache_size:
+                                # Batched np.ndarray - merge
+                                new_arr = new_data if isinstance(new_data, np.ndarray) else np.array(new_data)
+                                merged_data = np.concatenate([cache_data, new_arr], axis=0)
+                                merged_dict[key] = NonTensorData(data=merged_data, batch_size=[merged_size])
+                            else:
+                                # Metadata - keep as NonTensorData
+                                merged_dict[key] = NonTensorData(data=new_data, batch_size=[merged_size])
+                        elif isinstance(cache_data, (list, tuple)):
+                            cache_len = len(cache_data)
+                            if cache_len == cache_size:
+                                # Batched list - merge
+                                new_list = new_data if isinstance(new_data, (list, tuple)) else [new_data] * new_size
+                                merged_data = list(cache_data) + list(new_list)
+                                merged_dict[key] = NonTensorData(data=merged_data, batch_size=[merged_size])
+                            else:
+                                # Metadata - keep as NonTensorData
+                                merged_dict[key] = NonTensorData(data=new_data, batch_size=[merged_size])
+                        else:
+                            # Scalar - always metadata
+                            merged_dict[key] = NonTensorData(data=new_data, batch_size=[merged_size])
+
+                try:
+                    filtered_batch = TensorDict(merged_dict, batch_size=merged_size)
+                except Exception as e:
+                    logger.error(
+                        f"Rank {self._rank}: Failed to create merged TensorDict (target_batch_size={merged_size}). Error: {e}",
+                        exc_info=True
+                    )
+                    # More detailed logging on failure
+                    field_infos = []
+                    for k, v in merged_dict.items():
+                        v_type = type(v).__name__
+                        v_shape = getattr(v, 'shape', 'None')
+                        v_dtype = getattr(v, 'dtype', 'None')
+                        if isinstance(v, NonTensorData):
+                            try:
+                                if hasattr(v.data, '__len__') and not isinstance(v.data, (str, int, float)):
+                                    v_shape = f"({len(v.data)},)"
+                                else:
+                                    v_shape = 'scalar'
+                            except:
+                                v_shape = 'scalar'
+                            v_dtype = type(v.data).__name__
+                        field_infos.append(f"'{k}' -> type={v_type}, shape={v_shape}, dtype={v_dtype}")
+                    logger.error(f"Rank {self._rank}: Merged dict fields: [{', '.join(field_infos)}]")
+                    raise
+                
+                self.sampling_leftover_cache = None
+            
+            # Step 3: Global aggregation - count total samples across all workers
+            local_count = len(filtered_batch) if filtered_batch is not None else 0
+            total_counts = [0] * dist.get_world_size(self._gather_group)
+            dist.all_gather_object(total_counts, local_count, group=self._gather_group)
+            total_samples = sum(total_counts)
+            
+            # Step 4: Calculate target batch size
+            # CRITICAL: Need to account for DP size mismatch between current and next node
+            target_batch_size = config.data.train_batch_size
+            try:
+                rollout_n = config.actor_rollout_ref.rollout.n if hasattr(config, 'actor_rollout_ref') else 1
+            except (AttributeError, KeyError):
+                rollout_n = 1
+            
+            # Get current node's DP info
+            # Try to find the postprocess_sampling node in taskgraph
+            cur_node = None
+            try:
+                # Search for postprocess_sampling node
+                if hasattr(self, 'taskgraph') and self.taskgraph:
+                    for node in self.taskgraph.nodes.values():
+                        if 'postprocess' in node.node_id.lower() and 'sampling' in node.node_id.lower():
+                            cur_node = node
+                            break
+            except Exception as e:
+                if self._rank == 0:
+                    logger.debug(f"Rank {self._rank}: Could not get current node from taskgraph: {e}")
+            
+            # Get next node's DP info to calculate correct target
+            # CRITICAL: Need to find the MAXIMUM DP size among all downstream nodes
+            # because data might go through multiple stages before reaching the node with largest DP
+            next_dp_size = None
+            cur_dp_size_local = None
+            max_downstream_dp_size = None
+            
+            try:
+                if cur_node and hasattr(self, 'taskgraph') and self.taskgraph:
+                    cur_dp_size_local, _, _, _, _, _ = self._get_node_dp_info(cur_node)
+                    
+                    # BFS to find all downstream nodes and their max DP size
+                    visited = set()
+                    queue = [cur_node.node_id]
+                    max_downstream_dp_size = cur_dp_size_local  # Start with current
+                    
+                    while queue:
+                        node_id = queue.pop(0)
+                        if node_id in visited:
+                            continue
+                        visited.add(node_id)
+                        
+                        # Get downstream nodes
+                        downstream = self.taskgraph.get_downstream_nodes(node_id)
+                        for down_node in downstream:
+                            down_dp_size, _, _, _, _, _ = self._get_node_dp_info(down_node)
+                            max_downstream_dp_size = max(max_downstream_dp_size, down_dp_size)
+                            queue.append(down_node.node_id)
+                    
+                    next_dp_size = max_downstream_dp_size
+                    
+                    if self._rank == 0 and max_downstream_dp_size > cur_dp_size_local:
+                        logger.debug(
+                            f"Rank {self._rank}: Found max downstream DP size: {max_downstream_dp_size} "
+                            f"(current: {cur_dp_size_local})"
+                        )
+            except Exception as e:
+                if self._rank == 0:
+                    logger.debug(f"Rank {self._rank}: Could not get DP info from nodes: {e}")
+            
+            target_total_samples = target_batch_size * rollout_n
+            
+            # Adjust target if DP size changes
+            dp_size_ratio = 1.0
+            if cur_dp_size_local and next_dp_size and cur_dp_size_local != next_dp_size:
+                # If next node has MORE ranks, current ranks need to provide MORE samples
+                dp_size_ratio = next_dp_size / cur_dp_size_local
+                target_total_samples = int(target_total_samples * dp_size_ratio)
+                if self._rank == 0:
+                    logger.info(
+                        f"Rank {self._rank}: ⚠️ DP size mismatch detected: "
+                        f"cur_dp={cur_dp_size_local}, next_dp={next_dp_size}, "
+                        f"ratio={dp_size_ratio:.2f}, adjusted_target={target_total_samples} "
+                        f"(original={target_batch_size * rollout_n})"
+                    )
+            
+            # Calculate minimum samples required per rank
+            # Each rank needs at least target_batch_size samples for downstream processing
+            min_required_per_rank = target_batch_size
+            min_local_count = min(total_counts) if total_counts else 0
+            max_local_count = max(total_counts) if total_counts else 0
+            avg_local_count = total_samples / len(total_counts) if total_counts else 0
+            
+            # Calculate distribution variance
+            # Due to DataCoordinator's balance_partitions, uneven distribution can be amplified
+            # We need to ensure not just min >= required, but also average has enough buffer
+            distribution_imbalance = max_local_count - min_local_count if total_counts else 0
+            
+            if self._rank == 0:
+                logger.info(
+                    f"Rank {self._rank}: DAPO filtering: local={local_count}, total={total_samples}, "
+                    f"target={target_total_samples}, min_local={min_local_count}, max_local={max_local_count}"
+                )
+            
+            # Step 5: Collective decision - ALL RANKS must make the same decision
+            # Check both total samples AND minimum per-rank samples
+            if total_samples < target_total_samples:
+                # Insufficient data: ALL RANKS cache and return empty to trigger re-rollout
+                if self._rank == 0:
+                    logger.warning(
+                        f"Rank {self._rank}: Insufficient samples ({total_samples} < {target_total_samples}). "
+                        f"Caching data and triggering re-rollout..."
+                    )
+                    logger.info(
+                        f"Rank {self._rank}: Caching filtered_batch with keys: {list(filtered_batch.keys())}"
+                    )
+                
+                self.sampling_leftover_cache = filtered_batch
+                if self._rank == 0:
+                    metrics.update({
+                        'dapo_sampling/cached_samples': local_count,
+                        'dapo_sampling/need_more': 1,
+                        'dapo_sampling/target': target_total_samples
+                    })
+                # Return empty TensorDict to trigger re-rollout
+                empty_batch = TensorDict({}, batch_size=(0,))
+                return NodeOutput(batch=empty_batch, metrics=metrics)
+            elif min_local_count < min_required_per_rank:
+                # Total samples sufficient BUT minimum local count too low
+                # Due to DataCoordinator's rebalancing, this could cause downstream issues
+                if self._rank == 0:
+                    logger.warning(
+                        f"Rank {self._rank}: Total samples sufficient ({total_samples} >= {target_total_samples}), "
+                        f"BUT minimum local count ({min_local_count}) < required per rank ({min_required_per_rank}). "
+                        f"Caching data and triggering re-rollout..."
+                    )
+                    logger.info(
+                        f"Rank {self._rank}: Unbalanced distribution: {total_counts} (imbalance={distribution_imbalance})"
+                    )
+                
+                self.sampling_leftover_cache = filtered_batch
+                if self._rank == 0:
+                    metrics.update({
+                        'dapo_sampling/cached_samples': local_count,
+                        'dapo_sampling/need_more': 1,
+                        'dapo_sampling/target': target_total_samples,
+                        'dapo_sampling/unbalanced': 1,
+                        'dapo_sampling/min_local_count': min_local_count,
+                        'dapo_sampling/distribution_imbalance': distribution_imbalance
+                    })
+                # Return empty TensorDict to trigger re-rollout
+                empty_batch = TensorDict({}, batch_size=(0,))
+                return NodeOutput(batch=empty_batch, metrics=metrics)
+            elif avg_local_count < min_required_per_rank * 1.2:
+                # Average is too close to minimum required
+                # After DataCoordinator rebalancing, some ranks may not get enough samples
+                if self._rank == 0:
+                    logger.warning(
+                        f"Rank {self._rank}: Total samples sufficient ({total_samples} >= {target_total_samples}), "
+                        f"BUT average local count ({avg_local_count:.1f}) < safety threshold ({min_required_per_rank * 1.2:.1f}). "
+                        f"Distribution lacks sufficient buffer for DataCoordinator rebalancing. "
+                        f"Caching data and triggering re-rollout..."
+                    )
+                    logger.info(
+                        f"Rank {self._rank}: Distribution: min={min_local_count}, avg={avg_local_count:.1f}, max={max_local_count}, "
+                        f"imbalance={distribution_imbalance}"
+                    )
+                
+                self.sampling_leftover_cache = filtered_batch
+                if self._rank == 0:
+                    metrics.update({
+                        'dapo_sampling/cached_samples': local_count,
+                        'dapo_sampling/need_more': 1,
+                        'dapo_sampling/target': target_total_samples,
+                        'dapo_sampling/avg_too_low': 1,
+                        'dapo_sampling/avg_local_count': avg_local_count,
+                        'dapo_sampling/distribution_imbalance': distribution_imbalance
+                    })
+                # Return empty TensorDict to trigger re-rollout
+                empty_batch = TensorDict({}, batch_size=(0,))
+                return NodeOutput(batch=empty_batch, metrics=metrics)
+            else:
+                # Sufficient data AND balanced distribution with safety buffer: ALL RANKS proceed
+                if self._rank == 0:
+                    logger.info(
+                        f"Rank {self._rank}: ✓ All checks passed! "
+                        f"total={total_samples} >= {target_total_samples}, "
+                        f"min_local={min_local_count} >= {min_required_per_rank}, "
+                        f"avg_local={avg_local_count:.1f} >= {min_required_per_rank * 1.2:.1f}. "
+                        f"Proceeding with training."
+                    )
+                return NodeOutput(batch=filtered_batch, metrics=metrics)
+                
+        except Exception as e:
+            logger.error(f"Rank {self._rank}: Error in postprocess_sampling: {e}", exc_info=True)
+            # On error, return original batch to avoid breaking training
+            return NodeOutput(batch=batch, metrics={"dapo_sampling/error": 1.0})
 
     @DistProfiler.annotate(role="compute_old_log_prob")
     def compute_old_log_prob(self, config, batch: TensorDict, **kwargs) -> NodeOutput:
@@ -542,7 +882,7 @@ class DAGWorker(Worker):
         """Computes advantages and returns for PPO using GAE."""
         
         if not self.check_mode() and self._rank != 0:
-            return
+            return NodeOutput(batch=batch, metrics={})
         
         if self._multi_agent:
             return self.compute_multi_agent_advantage(config, batch, **kwargs)
@@ -1015,14 +1355,11 @@ class DAGWorker(Worker):
         The data is tagged with a 'key' to be retrieved by the correct downstream node.
         """
         try:
-            logger.debug(f"Rank {self._rank}: Starting put_data_to_buffers for key '{key}'")
-
+            batch_size = len(data) if data is not None else 0
 
             if source_dp_size == dest_dp_size:
                 with timer(self.enable_perf, f"put_intern_data_{key}", timing_raw):
-                    logger.debug(f"Rank {self._rank}: DP size match ({source_dp_size}). Storing data for key '{key}' in local cache.")
                     self.internal_data_cache[key] = data
-                    logger.debug(f"Rank {self._rank}: Successfully stored data for key '{key}' in local cache.")
             else:
                 samples = Dict2Samples(data)
                 if not samples:
@@ -1030,18 +1367,25 @@ class DAGWorker(Worker):
                     return
 
                 with timer(self.enable_perf, f"put_samples_to_coordinator_{key}", timing_raw):
-                    sample_infos = [
-                        SampleInfo(
+                    sample_infos = []
+                    for sample in samples:
+                        # Convert uid to string (handle tensor uid from postprocess_sampling)
+                        uid_val = getattr(sample, 'uid', uuid.uuid4().int)
+                        if isinstance(uid_val, torch.Tensor):
+                            uid_str = str(int(uid_val.item()))
+                        else:
+                            uid_str = str(uid_val)
+                        
+                        sample_infos.append(SampleInfo(
                             sum_tokens=getattr(sample, 'sum_tokens', int(sample.attention_mask.sum())),
                             prompt_length=getattr(sample, 'prompt_length', 0),
                             response_length=getattr(sample, 'response_length', 0),
-                            uid=getattr(sample, 'uid', uuid.uuid4().int),
+                            uid=uid_str,
                             dict_info={
                                 'key': key,
                                 'source_dp_size': source_dp_size  # Store source DP size
                             }
-                        ) for sample in samples
-                    ]
+                        ))
                     
                     # Although ray.put is called multiple times, it is more efficient than remote actor calls.
                     # This is the main source of the remaining overhead, but it is necessary
@@ -1063,7 +1407,7 @@ class DAGWorker(Worker):
                     
                     put_future = self.data_coordinator.put_batch.remote(sample_infos, sample_refs, caller_node_id)
                     loop.run_until_complete(put_future)
-                    logger.debug(f"Rank {self._rank}: Successfully put {len(samples)} samples for key '{key}' into DataCoordinator from node {caller_node_id[:16]}...")
+                    logger.info(f"Rank {self._rank}: ✅ Successfully PUT {len(samples)} samples to DataCoordinator for key '{key}' (source_dp={source_dp_size}, dest_dp={dest_dp_size})")
 
         except Exception as e:
             logger.error(f"Rank {self._rank}: Unexpected error in put_data_to_buffers for key '{key}': {e}", exc_info=True)
@@ -1087,11 +1431,10 @@ class DAGWorker(Worker):
             timing_raw: Timing dict for performance tracking
         """
         try:
-            logger.debug(f"Rank {self._rank}: Fetching data from DataCoordinator for key '{key}'.")
             with timer(self.enable_perf, f"get_intern_data_{key}", timing_raw):
                 if key in self.internal_data_cache:
-                    logger.debug(f"Rank {self._rank}: Found data for key '{key}' in local cache. Bypassing Ray.")
-                    return self.internal_data_cache.pop(key)
+                    cached_data = self.internal_data_cache.pop(key)
+                    return cached_data
             def key_filter(sample_info: SampleInfo) -> bool:
                 return sample_info.dict_info.get('key') == key
 
@@ -1108,7 +1451,7 @@ class DAGWorker(Worker):
                 )
                 
                 if source_dp_size_info is None:
-                    logger.warning(f"Rank {self._rank}: No samples found for key '{key}' in DataCoordinator")
+                    logger.warning(f"Rank {self._rank}: ❌ No samples found for key '{key}' in DataCoordinator (peek returned None)")
                     return None
                 
                 source_dp_size = source_dp_size_info
@@ -1123,6 +1466,11 @@ class DAGWorker(Worker):
                 
                 adjusted_batch_size = int(self.config.data.train_batch_size * rollout_n / cur_dp_size)
                 
+                logger.info(
+                    f"Rank {self._rank}: Requesting from DataCoordinator: "
+                    f"key='{key}', source_dp={source_dp_size}, cur_dp={cur_dp_size}, "
+                    f"adjusted_batch_size={adjusted_batch_size} (train_bs={self.config.data.train_batch_size} * rollout_n={rollout_n} / cur_dp={cur_dp_size})"
+                )
                 
                 # Use filter_plugin to get only samples with matching key
                 # Use balance_partitions to optimize sample distribution by length
@@ -1135,10 +1483,10 @@ class DAGWorker(Worker):
                 )
 
             if not sample_refs:
-                logger.warning(f"Rank {self._rank}: Found no samples in DataCoordinator for key '{key}'.")
+                logger.warning(f"Rank {self._rank}: ❌ DataCoordinator returned EMPTY list for key '{key}' (adjusted_batch_size={adjusted_batch_size})")
                 return None
 
-            logger.debug(f"Rank {self._rank}: Retrieved {len(sample_refs)} sample references for key '{key}'.")
+            logger.info(f"Rank {self._rank}: ✅ Retrieved {len(sample_refs)} sample references from DataCoordinator for key '{key}'")
 
             with timer(self.enable_perf, f"ray_get_samples_{key}", timing_raw):
                 samples = ray.get(sample_refs)

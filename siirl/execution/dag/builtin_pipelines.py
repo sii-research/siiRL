@@ -162,13 +162,14 @@ def dapo_pipeline() -> TaskGraph:
     """
     DAPO (Data-Augmented Policy Optimization) pipeline.
 
-    DAPO is a variant of GRPO with an additional post-processing step
-    after rollout for sampling augmentation.
+    DAPO is a variant of GRPO with dynamic sampling filtering based on metric variance.
+    The key difference is that after computing rewards, we filter out trajectory groups
+    with zero variance (all correct or all incorrect) as they provide no learning signal.
 
     Workflow:
         1. rollout_actor: Generate sequences using the policy model
-        2. postprocess_sampling: DAPO-specific sampling post-processing
-        3. function_reward: Compute rewards for augmented sequences
+        2. function_reward: Compute rewards for generated sequences
+        3. postprocess_sampling: DAPO-specific filtering based on metric variance
         4. calculate_advantages: Calculate advantage estimates
         5. actor_old_log_prob: Compute log probabilities with old policy (forward only)
         6. reference_log_prob: Compute log probabilities with reference model
@@ -186,21 +187,21 @@ def dapo_pipeline() -> TaskGraph:
         node_type=NodeType.MODEL_INFERENCE,
         node_role=NodeRole.ROLLOUT
     ).add_node(
-        "postprocess_sampling",
-        func="siirl.dag_worker.dagworker:DAGWorker.postprocess_sampling",
-        deps=["rollout_actor"],
-        node_type=NodeType.COMPUTE,
-        node_role=NodeRole.POSTPROCESS_SAMPLING
-    ).add_node(
         "function_reward",
         func="siirl.dag_worker.dagworker:DAGWorker.compute_reward",
-        deps=["postprocess_sampling"],
+        deps=["rollout_actor"],
         node_type=NodeType.COMPUTE,
         node_role=NodeRole.REWARD
     ).add_node(
+        "postprocess_sampling",
+        func="siirl.dag_worker.dagworker:DAGWorker.postprocess_sampling",
+        deps=["function_reward"],
+        node_type=NodeType.COMPUTE,
+        node_role=NodeRole.POSTPROCESS_SAMPLING
+    ).add_node(
         "calculate_advantages",
         func="siirl.dag_worker.dagworker:DAGWorker.compute_advantage",
-        deps=["function_reward"],
+        deps=["postprocess_sampling"],
         node_type=NodeType.COMPUTE,
         node_role=NodeRole.ADVANTAGE
     ).add_node(
