@@ -21,6 +21,11 @@ from siirl.params.model_args import ProcessorArguments
 
 @dataclass
 class DataArguments:
+    dataset_type: str = field(
+        default="llm",
+        metadata={"help": "Type of dataset, e.g., 'llm' for traditional prompt-based datasets, "
+                          "or 'vla' for Vision-Language-Action task manifests."}
+    )
     tokenizer: Optional[str] = field(
         default=None,
         metadata={"help": "Tokenizer configuration (null for auto-detection)"},

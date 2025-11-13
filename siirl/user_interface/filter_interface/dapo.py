@@ -73,11 +73,15 @@ def dynamic_sampling(siirl_args: SiiRLArguments, batch: TensorDict, node_config:
         prompt_uid_to_metric_vals[uid_key].append(metric_values[i])
 
     # Calculate the standard deviation of the metric for each group of trajectories.
-    prompt_uid_to_metric_std = {prompt_uid: np.std(metric_vals) for prompt_uid, metric_vals in prompt_uid_to_metric_vals.items()}
+    prompt_uid_to_metric_std = {
+        prompt_uid: np.std(metric_vals) for prompt_uid, metric_vals in prompt_uid_to_metric_vals.items()
+    }
 
     # Decide which prompts (UIDs) to keep. A group is kept if its metric values
     # show variance (std > 0) or if it's a single-sample group (which cannot have variance).
-    kept_prompt_uids = {uid for uid, std in prompt_uid_to_metric_std.items() if std > 0 or len(prompt_uid_to_metric_vals[uid]) == 1}
+    kept_prompt_uids = {
+        uid for uid, std in prompt_uid_to_metric_std.items() if std > 0 or len(prompt_uid_to_metric_vals[uid]) == 1
+    }
 
     # Find the indices of all trajectories that belong to the kept groups.
     # This ensures that all trajectories for a kept UID are preserved together.

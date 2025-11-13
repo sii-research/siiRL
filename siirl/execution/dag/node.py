@@ -15,12 +15,32 @@
 import importlib
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+import dacite
 from loguru import logger
 
 from siirl.params import log_dict_formatted
 from siirl.params.model_args import AgentArguments
 from siirl.models.loader import load_tokenizer
 import dacite
+
+
+def dynamic_load_function(func_path: str):
+    if "." not in func_path:
+        raise ValueError(f"{func_path} is not a correct module path")
+    
+    module_path, func_name = func_path.rsplit(".", 1)  
+    
+
+    module = importlib.import_module(module_path)
+    
+
+    target_func = getattr(module, func_name)
+
+    if not callable(target_func):
+        raise TypeError(f"{func_path} is not an valid path")
+    
+    return target_func
 class NodeType(Enum):
     """
     Define the types of nodes in the DAG.
@@ -52,6 +72,7 @@ class NodeRole(Enum):
     REWARD = "REWARD"  # Reward
 
     POSTPROCESS_SAMPLING = "POSTPROCESS_SAMPLING"  # Post-process sampling for dapo
+    DATA_REBALANCE = "DATA_REBALANCE"  # distribute data rebalance after any sampling algorithm
 
 
 class NodeStatus(Enum):
@@ -66,7 +87,8 @@ class NodeStatus(Enum):
     FAILED = "FAILED"  # Execution failed
     SKIPPED = "SKIPPED"  # Skipped
 
-class AgentProcess():
+
+class AgentProcess:
     def __init__(self, agent_options: AgentArguments, node_config):
         from siirl.dag_worker.constants import DAGConstants
         self.env = None
@@ -84,20 +106,21 @@ class AgentProcess():
         self.pre_process_kwargs: dict = agent_options.pre_process_kwargs
         self.post_process_kwargs: dict = agent_options.post_process_kwargs
         self._init_process_handle(process_path)
-        
+
         self.env_path = agent_options.env_path
-        self.env_managers = [{}] # map str to env instance
-        
+        self.env_managers = [{}]  # map str to env instance
+
         if self.env_path:
             self.init_env_class()
-        
+
         self.env_handles = None
+
     def load_attr(self, file_path, attr_name):
         try:
-            module_name = f"{hash(file_path) & 0xfffffff}"
+            module_name = f"{hash(file_path) & 0xFFFFFFF}"
             spec = importlib.util.spec_from_file_location(module_name, file_path)
             module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)    
+            spec.loader.exec_module(module)
         except Exception as e:
             raise RuntimeError(f"Error loading class from '{file_path}': {e}") from e
         try:
@@ -106,33 +129,35 @@ class AgentProcess():
         except Exception as e:
             logger.warning(f"Error loading attr from '{file_path}:{e}")
         return None
-            
+
     def init_env_class(self):
         self.env = []
         for env_path in self.env_path:
-            file_path, class_ref = env_path.split(':')
+            file_path, class_ref = env_path.split(":")
             env = self.load_attr(file_path, class_ref)
             self.env.append(env)
-        
+
     def _init_process_handle(self, process_path):
         if process_path is not None:
-            self.pre_process = self.load_attr(process_path, 'pre_process')
-            self.post_process = self.load_attr(process_path, 'post_process')
-    # each agent may have diferent tokenizer
+            self.pre_process = self.load_attr(process_path, "pre_process")
+            self.post_process = self.load_attr(process_path, "post_process")
+
+    # each agent may have different tokenizer
     # so, we make sure preprocess get str instead of list except get List[int] from dataloader in first agent
     def apply_pre_process(self, prompt: Optional[Tuple[str, List]], obs: Optional[Tuple[str, List]]) -> str:
         """
         Applies preprocessing to the input prompt (and optional environment observation) to generate a templated prompt.
-        
+
         Converts raw prompts to token IDs (if needed) and uses a custom preprocessing function (if configured)
         to format the prompt (e.g., adding chat templates, incorporating observations).
 
         Args:
             prompt: Input prompt to preprocess. Can be either a raw string (to be tokenized) or a list of token IDs.
-            obs: Optional environment observation (tuple of string/list) to incorporate into the prompt (for agent-environment interactions).
+            obs: Optional environment observation (tuple of string/list) to incorporate into the prompt
+            (for agent-environment interactions).
 
         Returns:
-            Tuple[List[int], List[int]]: 
+            Tuple[List[int], List[int]]:
                 - Original prompt (converted to token IDs if it was a string).
                 - Templated prompt (token IDs after preprocessing, e.g., with chat templates or observations added).
         """
@@ -140,27 +165,30 @@ class AgentProcess():
         if isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
         if self.pre_process:
-            templated_prompt = self.pre_process(self.tokenizer, prompt, obs, **self.pre_process_kwargs) 
+            templated_prompt = self.pre_process(self.tokenizer, prompt, obs, **self.pre_process_kwargs)
         else:
             templated_prompt = prompt
         return prompt, templated_prompt
-    # each agent may have diferent tokenizer
+
+    # each agent may have different tokenizer
     # so, we make sure postprocess get list[int] and return str
-    def apply_post_process(self, oridinal_prompt , templated_prompt , response) -> Tuple[List[int], List[int]]:
+    def apply_post_process(self, oridinal_prompt, templated_prompt, response) -> Tuple[List[int], List[int]]:
         """
         Applies postprocessing to the generation result to combine the original prompt with the response,
         and generates a mask for the response tokens.
-        
+
         Converts raw string responses to token IDs (if needed), merges the prompt with the response,
         and creates a binary mask to identify response tokens (for training tasks like next-token prediction).
 
         Note: Each agent may use a different tokenizer, so this method ensures input is list of token IDs
-        and returns properly formatted outputs (decoded string for original prompt, token IDs for templated prompt/mask).
+        and returns properly formatted outputs (decoded string for original prompt,
+        token IDs for templated prompt/mask).
 
         Args:
             oridinal_prompt: Original prompt (list of token IDs) before generation.
             templated_prompt: Preprocessed templated prompt (list of token IDs) used for generation.
-            response: Generated response to postprocess. Can be either a raw string (to be tokenized) or a list of token IDs.
+            response: Generated response to postprocess. Can be either a raw string (to be tokenized)
+            or a list of token IDs.
 
         Returns:
             Tuple[str, List[int], List[int]]:
@@ -177,23 +205,26 @@ class AgentProcess():
         response_mask = [1] * len(response)
         templated_prompt = templated_prompt + response
         return self.tokenizer.decode(oridinal_prompt), templated_prompt, response_mask
-  
+
+
 class Node:
     """
     Represents a node (task unit) in the DAG.
     """
+
     def __init__(
-        self, 
-        node_id: str, 
-        node_type: NodeType, 
-        node_role: NodeRole = NodeRole.DEFAULT, 
-        only_forward_compute: bool = False, 
-        agent_group: int = 0, 
-        dependencies: Optional[List[str]] = None, 
-        config: Optional[Dict[str, Any]] = None, 
-        executable_ref: Optional[str] = None, 
-        agent_options: AgentArguments = None, 
-        retry_limit: int = 0
+        self,
+        node_id: str,
+        node_type: NodeType,
+        node_role: NodeRole = NodeRole.DEFAULT,
+        only_forward_compute: bool = False,
+        agent_group: int = 0,
+        dependencies: Optional[List[str]] = None,
+        config: Optional[Dict[str, Any]] = None,
+        executable_ref: Optional[str] = None,
+        filter_plugin: Optional[Callable] = None,
+        agent_options: AgentArguments = None,
+        retry_limit: int = 0,
     ):
         """
         Initialize a node.
@@ -202,11 +233,14 @@ class Node:
             node_id (str): The unique identifier of the node.
             node_type (NodeType): The type of the node.
             node_role (NodeRole): The role played by the node. Defaults to NodeRole.DEFAULT.
-            dependencies (Optional[List[str]]): A list of IDs of other nodes that this node depends on. Defaults to an empty list.
-            config (Optional[Dict[str, Any]]): Specific configuration information for the node. Defaults to an empty dictionary.
+            dependencies (Optional[List[str]]): A list of IDs of other nodes that this node depends on.
+            Defaults to an empty list.
+            config (Optional[Dict[str, Any]]): Specific configuration information for the node.
+            Defaults to an empty dictionary.
             executable_ref (Optional[str]): A string reference to the Python function for the node's execution logic
                                            (e.g., "my_module.my_submodule.my_function").
-                                           If None, it means the node may have built-in logic or be handled by an external executor.
+                                           If None, it means the node may have built-in logic or be handled by
+                                           an external executor.
             retry_limit (int): The maximum number of retries when the node execution fails. Defaults to 0 (no retries).
         """
         if not isinstance(node_id, str) or not node_id:
@@ -215,7 +249,10 @@ class Node:
             raise ValueError("node_type must be a member of the NodeType enum.")
         if not isinstance(node_role, NodeRole):
             raise ValueError("node_role must be a member of the NodeRole enum.")
-        if node_type not in [NodeType.COMPUTE, NodeType.MODEL_TRAIN, NodeType.MODEL_INFERENCE] and node_role != NodeRole.DEFAULT:
+        if (
+            node_type not in [NodeType.COMPUTE, NodeType.MODEL_TRAIN, NodeType.MODEL_INFERENCE]
+            and node_role != NodeRole.DEFAULT
+        ):
             raise ValueError("The role type of non-model nodes must be DEFAULT")
 
         self.node_id: str = node_id
@@ -235,7 +272,7 @@ class Node:
         self.output: Any = None  # Store the result of the node execution
         self.error_info: Optional[str] = None  # Store error information when the node fails
         if isinstance(agent_options, Dict):
-                agent_options: AgentArguments = dacite.from_dict(
+            agent_options: AgentArguments = dacite.from_dict(
                 data_class=AgentArguments,
                 data=agent_options,
                 config=dacite.Config(strict=False)
@@ -246,7 +283,8 @@ class Node:
             self._resolve_executable()
 
         self.status: NodeStatus = NodeStatus.PENDING
-
+        if filter_plugin:
+            self.filter_plugin = dynamic_load_function(filter_plugin)
     def _resolve_executable(self) -> None:
         """
         Dynamically import and obtain the executable function based on the executable_ref string.
@@ -341,7 +379,10 @@ class Node:
                               and only new keys from new_config_items will be added.
         """
         if not isinstance(new_config_items, dict):
-            logger.warning(f"Node {self.node_id}: Failed to update config. Provided new_config_items is not a dictionary (type: {type(new_config_items)}).")
+            logger.warning(
+                f"Node {self.node_id}: Failed to update config. Provided new_config_items is not a dictionary ("
+                f"type: {type(new_config_items)})."
+            )
             return
 
         if overwrite:
@@ -371,7 +412,9 @@ class Node:
         Returns:
             Any: The result of the node execution.
         """
-        logger.debug(f"Starting to execute node: {self.node_id} (Type: {self.node_type.value}, Role: {self.node_role.value})")
+        logger.debug(
+            f"Starting to execute node: {self.node_id} (Type: {self.node_type.value}, Role: {self.node_role.value})"
+        )
         self.update_status(NodeStatus.RUNNING)
 
         if not self.executable:
@@ -429,20 +472,25 @@ class Node:
             raise RuntimeError(error_message) from e
 
     def __repr__(self) -> str:
-        return f"Node(node_id='{self.node_id}', type='{self.node_type.value}', role='{self.node_role.value}', agent_group='{self.agent_group}', only_forward_compute='{self.only_forward_compute}', status='{self.status.value}', deps={len(self.dependencies)})"
+        return (
+            f"Node(node_id='{self.node_id}', type='{self.node_type.value}', role='{self.node_role.value}', "
+            f"agent_group='{self.agent_group}', only_forward_compute='{self.only_forward_compute}', "
+            f"status='{self.status.value}', deps={len(self.dependencies)})"
+        )
 
     def copy(self) -> "Node":
         new_node = Node(
-            node_id=self.node_id, 
-            node_type=self.node_type, 
-            node_role=self.node_role, 
-            dependencies=list(self.dependencies), 
-            config=dict(self.config), 
-            executable_ref=self.executable_ref, 
-            retry_limit=self.retry_limit, 
-            only_forward_compute=self.only_forward_compute, 
-            agent_group=self.agent_group, 
-            agent_options=self.agent_options
+            node_id=self.node_id,
+            node_type=self.node_type,
+            node_role=self.node_role,
+            dependencies=list(self.dependencies),
+            config=dict(self.config),
+            executable_ref=self.executable_ref,
+            retry_limit=self.retry_limit,
+            only_forward_compute=self.only_forward_compute,
+            agent_group=self.agent_group,
+            filter_plugin=getattr(self, "filter_plugin", None),
+            agent_options=self.agent_options,
         )
         new_node.status = self.status
         new_node.retries_done = self.retries_done

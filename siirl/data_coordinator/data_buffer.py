@@ -261,7 +261,7 @@ class DataCoordinator:
         
         Args:
             batch_size: The requested batch size.
-            filter_plugin: An optional filter function for custom sampling logic.
+            filter_plugin: optional filters function for custom sampling logic.
             balance_partitions: If specified, the returned samples will be optimized
                               for even distribution among the given number of workers,
                               balancing the sum of sequence lengths for each worker.
@@ -297,16 +297,23 @@ class DataCoordinator:
                 return get_refs
             # With filter plugin, use O(N) filtering and reconstruction
             else:
-                
                 # 1. The filtering process does not consume elements from the queue
-                potential_items = []
-                while self._sample_queue:
-                    item = self._sample_queue.popleft()
-                    potential_items.append(item)
+                if isinstance(filter_plugin, list):
+                    potential_items = []
+                    all_items =  [item for item in self._sample_queue ]
+                    for item in self._sample_queue:
+                        if all(filter_func(item[0]) for filter_func in filter_plugin):
+                            potential_items.append(item)
+                else:
+                    potential_items = [item for item in self._sample_queue if filter_plugin(item[0])]
                 # 2. Check if there are enough samples
                 if len(potential_items) < batch_size :
                     loguru.logger.warning(f"After filtering, coordinator has {len(potential_items)} samples, which is less than requested batch size ({batch_size}). Returning empty list.")
                     return []
+                # 4. Efficiently remove the selected items from the original queue
+                # Use ObjectRef (guaranteed unique and hashable) to identify items for removal
+                refs_to_remove = {item[1] for item in potential_items}
+                self._sample_queue = deque(item for item in self._sample_queue if item[1] not in refs_to_remove)
                 # Apply length balancing if requested
                 if balance_partitions and balance_partitions > 1:
                     batch_refs = self._apply_length_balancing(potential_items, balance_partitions)
@@ -411,6 +418,7 @@ class DataCoordinator:
             return None
 
     def reset_cache(self):
+        self._sample_queue.clear()
         self._cache = []
 
     def __repr__(self) -> str:

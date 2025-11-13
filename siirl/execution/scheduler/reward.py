@@ -35,7 +35,8 @@ from siirl.engine.reward_manager import (
     BatchRewardManager,
     NaiveRewardManager,
     PrimeRewardManager,
-    ParallelRewardManager
+    ParallelRewardManager,
+    EmbodiedRewardManager
 )
 
 Tokenizer = Any
@@ -125,13 +126,26 @@ def create_reward_manager(
     Raises:
         NotImplementedError: If the specified `reward_manager_name` is unknown.
     """
+    
     # Map manager names to their respective classes for clean, extensible selection.
     manager_map = {
         "naive": NaiveRewardManager,
         "prime": PrimeRewardManager,
         "batch": BatchRewardManager,
         "dapo": DAPORewardManager,
-        "parallel": ParallelRewardManager
+        "parallel": ParallelRewardManager,
+        "embodied": EmbodiedRewardManager
+    }
+
+    # Map each manager to its default compute_score function
+    # Note: compute_embodied_reward is imported lazily to avoid loading sklearn for LLM/VLM tasks
+    default_compute_score_map = {
+        "naive": default_compute_score,
+        "prime": default_compute_score,
+        "batch": default_compute_score,
+        "dapo": default_compute_score,
+        "parallel": default_compute_score,
+        "embodied": None,  # Will be loaded lazily if needed
     }
     reward_manager_name = config.reward_model.reward_manager
     reward_manager_cls = manager_map.get(reward_manager_name)
@@ -160,7 +174,16 @@ def create_reward_manager(
             )
         else:
             # Fallback to the default scoring function.
-            compute_score_fn = default_compute_score
+            compute_score_fn = default_compute_score_map.get(
+                reward_manager_name,
+                default_compute_score  # Fallback for any unmapped managers
+            )
+            
+            # Lazy import for embodied reward to avoid loading sklearn for LLM/VLM tasks
+            if compute_score_fn is None and reward_manager_name == "embodied":
+                from siirl.utils.reward_score.embodied import compute_embodied_reward
+                compute_score_fn = compute_embodied_reward
+                logger.info("Loaded embodied reward function (with sklearn dependencies)")
 
     return reward_manager_cls(
         tokenizer=tokenizer,

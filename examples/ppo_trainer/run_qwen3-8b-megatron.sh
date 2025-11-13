@@ -13,9 +13,8 @@ export ALG=gae
 export MODEL_NAME=qwen3-8b
 
 # --- Path Definitions ---
-export HOME={your_home_path}
-export TRAIN_DATA_PATH=$HOME/data/datasets/$DATASET/train.parquet
-export TEST_DATA_PATH=$HOME/data/datasets/$DATASET/test.parquet
+export TRAIN_DATA_PATH=$HOME/data/dataset/$DATASET/train.parquet
+export TEST_DATA_PATH=$HOME/data/dataset/$DATASET/test.parquet
 export MODEL_PATH=$HOME/data/models/Qwen3-8B
 
 # Base output paths
@@ -23,8 +22,8 @@ export BASE_CKPT_PATH=$HOME/ckpts
 export BASE_TENSORBOARD_PATH=$HOME/tensorboard
 
 # --- Key Training Hyperparameters ---
-export TRAIN_BATCH_SIZE_PER_NODE=128
-export PPO_MINI_BATCH_SIZE_PER_NODE=16
+export TRAIN_BATCH_SIZE_PER_NODE=1024
+export PPO_MINI_BATCH_SIZE_PER_NODE=256
 export PPO_MICRO_BATCH_SIZE_PER_GPU=8
 export MAX_PROMPT_LENGTH=2048
 export MAX_RESPONSE_LENGTH=4096
@@ -35,12 +34,10 @@ export TEST_FREQ=10
 export TOTAL_EPOCHS=30
 export MAX_CKPT_KEEP=5
 
-# ---- Key Parallelism Configuration ----
-export ROLLOUT_TP=4
-export ACTOR_REF_TP=4
-export ACTOR_REF_PP=2
-export ACTOR_REF_CP=1
-export ACTOR_REF_SP=False
+export ACTOR_REF_CRITIC_TP=2
+export ACTOR_REF_CRITIC_PP=2
+export ACTOR_REF_CRITIC_CP=1
+export ACTOR_REF_CRITIC_SP=False
 
 # --- Multi-node (Multi-machine) distributed training environments ---
 
@@ -111,11 +108,11 @@ TRAINING_CMD=(
     actor_rollout_ref.rollout.response_length=\$MAX_RESPONSE_LENGTH
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.ref.strategy=megatron
-    actor_rollout_ref.ref.megatron.tensor_model_parallel_size=\$ACTOR_REF_TP
-    actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=\$ACTOR_REF_PP
-    actor_rollout_ref.ref.megatron.context_parallel_size=\$ACTOR_REF_CP
-    actor_rollout_ref.ref.megatron.sequence_parallel=\$ACTOR_REF_SP
-    actor_rollout_ref.ref.megatron.param_offload=True
+    actor_rollout_ref.ref.megatron.tensor_model_parallel_size=\$ACTOR_REF_CRITIC_TP
+    actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=\$ACTOR_REF_CRITIC_PP
+    actor_rollout_ref.ref.megatron.context_parallel_size=\$ACTOR_REF_CRITIC_CP
+    actor_rollout_ref.ref.megatron.sequence_parallel=\$ACTOR_REF_CRITIC_SP
+    actor_rollout_ref.ref.megatron.param_offload=False
     critic.optim.lr=1e-5
     critic.model.use_remove_padding=True
     critic.model.path=\$MODEL_PATH
@@ -133,7 +130,7 @@ TRAINING_CMD=(
     critic.megatron.optimizer_offload=True
     algorithm.kl_ctrl.kl_coef=0.001
     trainer.critic_warmup=0
-    trainer.logger=['console']
+    trainer.logger=['console','tensorboard']
     trainer.project_name=\$PROJECT_NAME
     trainer.experiment_name=\$EXPERIMENT_NAME
     trainer.n_gpus_per_node=\$N_GPUS_PER_NODE
@@ -204,6 +201,8 @@ start_ray_cluster() {
 main() {
     local timestamp=$(date +"%Y%m%d_%H%M%S")
     ray stop --force
+
+
 
     export VLLM_USE_V1=1
     export GLOO_SOCKET_TIMEOUT=600

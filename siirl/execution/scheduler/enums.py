@@ -26,6 +26,12 @@ class AdvantageEstimator(str, Enum):
     GAE_MARFT = "gae_marft"
 
 
+class WorkflowType(str, Enum):
+    DEFAULT = "default"
+    DAPO = "dapo"
+    EMBODIED = "embodied"
+
+
 class Role(Enum):
     """
     To create more roles dynamically, you can subclass Role and add new members

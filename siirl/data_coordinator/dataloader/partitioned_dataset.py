@@ -48,11 +48,16 @@ def collate_fn(data_list: list[dict]) -> dict:
     """
     tensors = defaultdict(list)
     non_tensors = defaultdict(list)
+    
+    # Fields that should be converted to tensors for embodied tasks
+    embodied_tensor_fields = {'task_id', 'trial_id'}
 
     for data in data_list:
         for key, val in data.items():
             if isinstance(val, torch.Tensor):
                 tensors[key].append(val)
+            elif key in embodied_tensor_fields and isinstance(val, (int, np.integer)):
+                tensors[key].append(torch.tensor(val, dtype=torch.int64))
             else:
                 non_tensors[key].append(val)
 
@@ -108,6 +113,13 @@ class PartitionedRLHFDataset(Dataset):
         self.ddp_world_size = ddp_world_size
         self.is_eval = is_eval
         self.drop_last = drop_last if drop_last is not None else (not is_eval)
+        
+        # The dataset type determines the processing pipeline.
+        # 'llm': Standard processing for prompt-based datasets.
+        # 'embodied': Minimal processing for embodied task manifests, passing metadata through.
+        self.dataset_type = self.data_args.dataset_type
+        if self._rank == 0:
+            logger.info(f"Initializing dataset with dataset_type='{self.dataset_type}'.")
 
         self.prompt_key = self.data_args.prompt_key
         self.image_key = self.data_args.image_key
@@ -162,25 +174,39 @@ class PartitionedRLHFDataset(Dataset):
             except Exception:
                 # We can safely ignore this exception because we mainly rely on the 'padded_duplicate' flag to identify padded elements.
                 pass
-            
-        # 3. Preprocess the entire partition using multiple processes
-        # By only removing the specific prompt_key, we ensure that other columns,
-        # including complex types like dicts and strings from the original dataset,
-        # are preserved. The .map() function will then add the new columns
-        # returned by _preprocess_function. This is safer than removing all
-        # columns and rebuilding the dataset from scratch.
+        
+        # Based on the dataset type, we either perform full preprocessing or just
+        # pass the raw embodied metadata through.
+        # Initialize load_on_the_fly before branching to ensure it's always set
         self.load_on_the_fly = self.force_on_the_fly
-        if self.load_on_the_fly:
+        
+        if self.dataset_type == "embodied":
+            # For embodied, we do no preprocessing. The dataset is just the raw manifest.
+            # The tokenizer and processor are not used at this stage.
             self.processed_dataframe = raw_dataframe
-        else:
             if self._rank == 0:
-                logger.warning("Currently preloading and preprocessing the entire dataset. If you encounter Out-Of-Memory issues, please set data.force_on_the_fly=True to enable on-the-fly loading mode.")
-            with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-                self.processed_dataframe = list(tqdm(
-                    executor.map(self._preprocess_function, raw_dataframe),
-                    total=len(raw_dataframe),
-                    desc="Processing"
-                ))
+                logger.info("Embodied dataset type detected. Skipping tokenization and prompt processing.")
+        else:
+            # For 'llm' (default), proceed with the original preprocessing logic.
+            # 3. Preprocess the entire partition using multiple processes
+            # By only removing the specific prompt_key, we ensure that other columns,
+            # including complex types like dicts and strings from the original dataset,
+            # are preserved. The .map() function will then add the new columns
+            # returned by _preprocess_function. This is safer than removing all
+            # columns and rebuilding the dataset from scratch.
+            if self.load_on_the_fly:
+                self.processed_dataframe = raw_dataframe
+            else:
+                if self._rank == 0:
+                    logger.warning("Currently preloading and preprocessing the entire dataset. If you encounter Out-Of-Memory issues, "
+                     f"please set data.force_on_the_fly=True to enable on-the-fly loading mode. "
+                     f"Now the dataset type is {self.dataset_type}.")
+                with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+                    self.processed_dataframe = list(tqdm(
+                        executor.map(self._preprocess_function, raw_dataframe),
+                        total=len(raw_dataframe),
+                        desc="Processing"
+                    ))
 
     def _load_partitioned_raw_data(self, dataset_files: Sequence[str]) -> Optional[datasets.Dataset]:
         """
@@ -205,7 +231,9 @@ class PartitionedRLHFDataset(Dataset):
                 logger.debug(f"DDP rank={self.ddp_rank}, row group infos: {row_group_infos}")
 
             if total_rows < self.ddp_world_size:
-                raise RuntimeError(f"Total rows ({total_rows}) is less than DDP world size ({self.ddp_world_size}),  cannot partition data across ranks. Please ensure enough data is available.")
+                raise RuntimeError(f"Total rows ({total_rows}) is less than DDP world size ({self.ddp_world_size}), "
+                                   f"cannot partition data across ranks. Please ensure enough data is available. "
+                                   f"Now the dataset type is {self.dataset_type}.")
 
             # Compute partition indices
             if self.drop_last:
@@ -215,7 +243,9 @@ class PartitionedRLHFDataset(Dataset):
                 end = start + rows_per_rank
                 if self._rank == 0:
                     logger.warning(
-                        f"DDP Rank {self.ddp_rank} using drop_last=True, partitioning rows into {self.ddp_world_size} ranks with {rows_per_rank} rows each. Total used rows: {total_used_rows}, start={start}, end={end}. Total rows: {total_rows}, total dropped rows: {total_rows - total_used_rows}."
+                        f"DDP Rank {self.ddp_rank} using drop_last=True, partitioning rows into {self.ddp_world_size} ranks"
+                        f"with {rows_per_rank} rows each. Total used rows: {total_used_rows}, start={start}, end={end}. "
+                        f"Total rows: {total_rows}, total dropped rows: {total_rows - total_used_rows}. "
                     )
             else:
                 # Distribute the remainder to the first (total_rows % ddp_world_size) ranks
@@ -324,7 +354,9 @@ class PartitionedRLHFDataset(Dataset):
                 multi_modal_data["image"] = images
             videos = None
             if self.video_key in processed_row:
-                videos = [process_video(video, fps=self.video_fps, fps_max_frames=self.video_maxlen, max_pixels=self.video_max_pixels, min_pixels=self.video_min_pixels) for video in processed_row.pop(self.video_key)]
+                videos = [process_video(video, fps=self.video_fps, fps_max_frames=self.video_maxlen, 
+                                        max_pixels=self.video_max_pixels, min_pixels=self.video_min_pixels) 
+                                        for video in processed_row.pop(self.video_key)]
                 multi_modal_data["video"] = [video.numpy() for video in videos]
 
             model_inputs = self.processor(text=[raw_prompt], images=images, videos=videos, return_tensors="pt")
@@ -415,4 +447,10 @@ class PartitionedRLHFDataset(Dataset):
         """
         if self.processed_dataframe is None:
             raise IndexError("Dataset is empty or not initialized properly.")
-        return self.processed_dataframe[item] if not self.load_on_the_fly else self._preprocess_function(self.processed_dataframe[item])
+        
+        # For embodied, __getitem__ is a simple lookup.
+        # For LLM, it may involve on-the-fly preprocessing.
+        if self.dataset_type == "embodied":
+            return self.processed_dataframe[item]
+        else:
+            return self.processed_dataframe[item] if not self.load_on_the_fly else self._preprocess_function(self.processed_dataframe[item])

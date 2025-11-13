@@ -227,5 +227,68 @@ def dapo_pipeline() -> TaskGraph:
 
     return pipeline.build()
 
+def embodied_grpo_pipeline() -> TaskGraph:
+    """
+    Embodied AI GRPO training pipeline with data filtering and VJEPA-based reward computation.
+
+    Workflow:
+        1. rollout_actor: Environment rollout with embodied AI agent
+        2. embodied_sampling: Data verification and filtering
+        3. data_rebalance: Data rebalancing across workers (after filtering)
+        4. compute_reward: VJEPA-based reward computation
+        5. calculate_advantages: Calculate advantages (GRPO group-based)
+        6. actor_old_log_prob: Compute old actor log probabilities (forward only)
+        7. reference_log_prob: Compute reference model log probabilities
+        8. actor_train: Actor training with GRPO
+
+    Returns:
+        TaskGraph: A validated task graph ready for execution
+    """
+    pipeline = Pipeline(
+        "embodied_grpo_training_pipeline",
+        "Embodied AI GRPO training workflow with data filtering and VJEPA-based reward computation."
+    )
+
+    pipeline.add_node(
+        "rollout_actor",
+        func="siirl.dag_worker.dagworker:DAGWorker.generate",  
+        filter_plugin="siirl.user_interface.filter_interface.embodied.embodied_local_rank_sampling",
+        deps=[],
+        node_type=NodeType.MODEL_INFERENCE,
+        node_role=NodeRole.ROLLOUT
+    ).add_node(
+        "compute_reward",
+        func="siirl.dag_worker.dagworker:DAGWorker.compute_reward",
+        deps=["data_rebalance"],
+        node_type=NodeType.COMPUTE,
+        node_role=NodeRole.REWARD
+    ).add_node(
+        "calculate_advantages",
+        func="siirl.dag_worker.dagworker:DAGWorker.compute_advantage",
+        deps=["compute_reward"],
+        node_type=NodeType.COMPUTE,
+        node_role=NodeRole.ADVANTAGE
+    ).add_node(
+        "actor_old_log_prob",
+        func="siirl.dag_worker.dagworker:DAGWorker.compute_old_log_prob",
+        deps=["calculate_advantages"],
+        node_type=NodeType.MODEL_TRAIN,
+        node_role=NodeRole.ACTOR,
+        only_forward_compute=True
+    ).add_node(
+        "reference_log_prob",
+        func="siirl.dag_worker.dagworker:DAGWorker.compute_ref_log_prob",
+        deps=["actor_old_log_prob"],
+        node_type=NodeType.MODEL_TRAIN,
+        node_role=NodeRole.REFERENCE
+    ).add_node(
+        "actor_train",
+        func="siirl.dag_worker.dagworker:DAGWorker.train_actor",  
+        deps=["reference_log_prob"],
+        node_type=NodeType.MODEL_TRAIN,
+        node_role=NodeRole.ACTOR
+    )
+
+    return pipeline.build()
 
 __all__ = ["grpo_pipeline", "ppo_pipeline", "dapo_pipeline"]

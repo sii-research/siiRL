@@ -177,6 +177,7 @@ class DAGConfigLoader:
             # Multi-agent need extra params
             agent_options = node_config_dict.get("agent_options", None)
             
+            filter_plugin = node_config_dict.get("filter_plugin", None)
             dag_node = Node(
                 node_id=node_id,
                 node_type=node_type,
@@ -186,6 +187,7 @@ class DAGConfigLoader:
                 dependencies=dependencies,
                 config=node_specific_config,  # Use the renamed variable here
                 executable_ref=executable_ref_str,
+                filter_plugin=filter_plugin,
                 agent_options=agent_options
             )
             dag_nodes.append(dag_node)
