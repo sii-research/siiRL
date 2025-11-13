@@ -410,6 +410,9 @@ class DataCoordinator:
                         return source_dp_size
             return None
 
+    def reset_cache(self):
+        self._cache = []
+
     def __repr__(self) -> str:
         return f"<DataCoordinator(total_samples={len(self._sample_queue)})>"
 

@@ -1521,7 +1521,8 @@ class DAGWorker(Worker):
         For now, it does nothing as intended.
         """
         logger.debug("`reset_data_buffer` is a no-op with the new DataCoordinator model as gets are consuming.")
-        pass
+        if self._rank == 0:
+            self.data_coordinator.reset_cache.remote()
 
     def _get_node_process_group(self, node: Node) -> ProcessGroup:
         """Retrieves the PyTorch ProcessGroup assigned to a specific graph node."""
