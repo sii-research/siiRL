@@ -19,6 +19,7 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import torch
+from loguru import logger
 
 from siirl import DataProto
 from siirl.scheduler.enums import AdvantageEstimator
@@ -168,8 +169,28 @@ def compute_advantage(
             )
     elif adv_estimator == AdvantageEstimator.GRPO:
         # TODO: test on more adv estimator type
-        grpo_calculation_mask = data.batch["response_mask"]
         
+        # For embodied scenarios, use finish_step-based mask
+        # Check if this is embodied scenario (has finish_step)
+        if "finish_step" in data.batch and data.batch["responses"].ndim == 3:
+            # Embodied scenario: compute mask based on finish_step
+            responses = data.batch["responses"]
+            batch_size = responses.size(0)
+            response_length = responses.size(1) * responses.size(2)  # traj_len * action_token_len
+            
+            # Get action_token_len from config or infer from responses shape
+            action_token_len = responses.size(2)  # action token length
+            finish_step = data.batch['finish_step'] * action_token_len
+            
+            steps = torch.arange(response_length, device=responses.device)
+            steps_expanded = steps.unsqueeze(0).expand(batch_size, -1)
+            grpo_calculation_mask = steps_expanded < finish_step.unsqueeze(1)  # (batch_size, traj_len)
+            
+            logger.info(f"[GRPO] Using finish_step-based mask for embodied scenario")
+        else:
+            # NLP scenario or no finish_step: use attention_mask-based response_mask
+            grpo_calculation_mask = data.batch["response_mask"]
+            logger.info(f"[GRPO] Using attention_mask-based response_mask for NLP scenario")
         
         # Call compute_grpo_outcome_advantage with parameters matching its definition
         advantages, returns = core_algos.compute_grpo_outcome_advantage(
@@ -180,6 +201,9 @@ def compute_advantage(
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
+        # Store the mask for consistent metrics calculation
+        data.batch["response_mask"] = grpo_calculation_mask
+        logger.debug(f"[GRPO] Stored response_mask in batch for consistent metrics")
     elif adv_estimator == AdvantageEstimator.GRPO_PASSK:
         advantages, returns = core_algos.compute_grpo_passk_outcome_advantage(
             token_level_rewards=data.batch["token_level_rewards"],

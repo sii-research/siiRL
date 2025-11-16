@@ -34,6 +34,7 @@ actor_rollout_ref:
     
     clip_ratio_high: 0.28
     clip_ratio_low: 0.2
+    clip_ratio_c: 10000.0         # Set very large to disable Dual-Clip PPO
     entropy_coeff: 0.0
     
     # FSDP configuration for OFT models
