@@ -20,6 +20,7 @@ import torch.distributed as dist
 from loguru import logger
 from tqdm import tqdm
 
+from siirl.scheduler.enums import WorkflowType
 from siirl.utils.debug import DistProfiler
 from siirl.workers.dag.node import Node, NodeType
 from siirl.workers.dag_worker.constants import DAGConstants
@@ -141,6 +142,14 @@ class ExecutionMixin:
             batches_to_skip = self.global_steps % self.dataloader.num_train_batches
 
         for epoch in range(start_epoch, self.config.trainer.total_epochs):
+            # Clear sampling cache at the start of each new epoch for embodied training
+            # For non-embodied training, cache is preserved across epochs for better data utilization
+            is_embodied = self.config.algorithm.workflow_type == WorkflowType.EMBODIED
+            if is_embodied and self.sampling_leftover_cache is not None:
+                cache_size = len(self.sampling_leftover_cache) if hasattr(self.sampling_leftover_cache, '__len__') else 0
+                logger.info(f"Rank {self._rank}: [Embodied] Clearing sampling_leftover_cache at epoch {epoch} (cache had {cache_size} samples)")
+                self.sampling_leftover_cache = None
+            
             for batch_idx in range(self.dataloader.num_train_batches):
                 # If resuming, skip batches that have already been completed in the starting epoch.
                 if epoch == start_epoch and batch_idx < batches_to_skip:
@@ -253,9 +262,113 @@ class ExecutionMixin:
         with self._timer("reset_intern_data_buffer", timing_raw):
             self.internal_data_cache.clear()
 
+    def _accumulate_timing(self, timing_raw: Dict[str, float]) -> None:
+        """
+        Accumulate timing from an incomplete rollout (when dynamic filtering causes insufficient data).
+        
+        This method is called when data_rebalance returns empty batch due to insufficient data
+        after filtering. It accumulates the timing from the current rollout so we can track
+        the total time spent across multiple rollouts.
+        
+        Args:
+            timing_raw: Dictionary of timing metrics from the current incomplete rollout
+        """
+        import time
+        
+        self.cumulative_rollout_count += 1
+        
+        # Accumulate all timing metrics
+        for key, value in timing_raw.items():
+            if key in self.cumulative_timing_raw:
+                self.cumulative_timing_raw[key] += value
+            else:
+                self.cumulative_timing_raw[key] = value
+        
+        # Log accumulation status (only on rank 0 for cleaner logs)
+        if self._rank == 0:
+            logger.info(
+                f"📊 Dynamic Sampling - Timing Accumulation (Rollout #{self.cumulative_rollout_count}):\n"
+                f"  Current step time:      {timing_raw.get('step', 0):.2f}s\n"
+                f"  Cumulative step time:   {self.cumulative_timing_raw.get('step', 0):.2f}s\n"
+                f"  Current rollout time:   {timing_raw.get('rollout', 0):.2f}s\n"
+                f"  Cumulative rollout time: {self.cumulative_timing_raw.get('rollout', 0):.2f}s\n"
+                f"  Total incomplete rollouts: {self.cumulative_rollout_count}"
+            )
+    
+    def _merge_cumulative_timing(self, current_timing: Dict[str, float]) -> Dict[str, float]:
+        """
+        Merge accumulated timing with current timing when training finally completes.
+        
+        This method is called when data_rebalance succeeds and we're about to train.
+        It combines all the timing from previous incomplete rollouts with the final
+        successful rollout to get the true end-to-end timing.
+        
+        Args:
+            current_timing: Dictionary of timing metrics from the final successful rollout
+            
+        Returns:
+            Dictionary with merged timing metrics reflecting total time across all rollouts
+        """
+        import time
+        
+        # If no accumulated timing, just return current timing (normal case without filtering issues)
+        if not self.cumulative_timing_raw:
+            return current_timing
+        
+        # Merge accumulated timing with current timing
+        merged_timing = {}
+        
+        # 1. Start with all accumulated timing
+        for key, value in self.cumulative_timing_raw.items():
+            merged_timing[key] = value
+        
+        # 2. Add current timing
+        for key, value in current_timing.items():
+            if key in merged_timing:
+                merged_timing[key] += value
+            else:
+                merged_timing[key] = value
+        
+        # 3. Recalculate actual step time based on wall clock time
+        # This ensures we capture the true end-to-end latency including any overhead
+        if self.cumulative_start_time is not None:
+            actual_wall_time = time.perf_counter() - self.cumulative_start_time
+            merged_timing["step"] = actual_wall_time
+        
+        # Log the final merged results (only on rank 0)
+        if self._rank == 0:
+            total_rollouts = self.cumulative_rollout_count + 1
+            logger.info(
+                f"✅ Dynamic Sampling - Training Completed (After {total_rollouts} rollout(s)):\n"
+                f"  Total wall time:        {merged_timing.get('step', 0):.2f}s\n"
+                f"  Total rollout time:     {merged_timing.get('rollout', 0):.2f}s\n"
+                f"  Total sampling time:    {merged_timing.get('sampling', 0):.2f}s\n"
+                f"  Single-pass equivalent: {current_timing.get('step', 0):.2f}s\n"
+                f"  Overhead factor:        {merged_timing.get('step', 1) / max(current_timing.get('step', 1), 0.001):.2f}x"
+            )
+        
+        return merged_timing
+    
+    def _reset_cumulative_timing(self) -> None:
+        """
+        Reset all cumulative timing state after successfully completing a training step.
+        
+        This method is called after metrics are collected to prepare for the next
+        training step's potential dynamic sampling cycles.
+        """
+        self.cumulative_timing_raw = {}
+        self.cumulative_rollout_count = 0
+        self.cumulative_start_time = None
+
     def _run_training_step(self, epoch: int, batch_idx: int) -> Optional[List[Tuple[str, Any]]]:
         """Executes a single training step by traversing the computational graph."""
+        import time
+        
         timing_raw, ordered_metrics = {}, []
+        
+        # Track the start time for dynamic sampling (if this is the first rollout)
+        if self.cumulative_start_time is None:
+            self.cumulative_start_time = time.perf_counter()
 
         with self._timer("step", timing_raw):
             # --- 1. Data Loading ---
@@ -371,11 +484,13 @@ class ExecutionMixin:
                         if cur_node.node_role == NodeRole.DATA_REBALANCE:
                             if len(node_output.batch) == 0:
                                 logger.warning(
-                                    f"Rank {self._rank}: Data after data_rebalance is insufficient. Caching "
-                                    f"and skipping the rest of the training step."
+                                    f"Rank {self._rank}: Data after data_rebalance is insufficient. "
+                                    f"Caching and accumulating timing (rollout #{self.cumulative_rollout_count + 1})."
                                 )
+                                # Accumulate timing from this incomplete rollout
+                                self._accumulate_timing(timing_raw)
                                 self._cleanup_step_buffers(visited_nodes, timing_raw)
-                                return None
+                                return None  # Continue to next rollout
                             if "postprocess_status" in node_output.metrics:
                                 del node_output.metrics["postprocess_status"]
 
@@ -433,12 +548,18 @@ class ExecutionMixin:
             # --- 6. Final Metrics Collection ---
             self._cleanup_step_buffers(visited_nodes, timing_raw)
 
+        # Merge accumulated timing with current timing (if we had multiple rollouts)
+        final_timing = self._merge_cumulative_timing(timing_raw)
+        
         if self._multi_agent:
-            ordered_metrics = self._collect_multi_final_metrics(batch, ordered_metrics, timing_raw)
+            ordered_metrics = self._collect_multi_final_metrics(batch, ordered_metrics, final_timing)
         else:
-            final_metrics = self._collect_final_metrics(batch, timing_raw)
+            final_metrics = self._collect_final_metrics(batch, final_timing)
             if final_metrics:
                 ordered_metrics.extend(sorted(final_metrics.items()))
 
+        # Reset cumulative timing state for next training step
+        self._reset_cumulative_timing()
+        
         ordered_metrics.extend([("training/global_step", self.global_steps + 1), ("training/epoch", epoch + 1)])
         return ordered_metrics
