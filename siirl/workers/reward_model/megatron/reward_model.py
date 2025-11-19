@@ -218,13 +218,25 @@ class MegatronRewardModel(BasePPORewardModel):
         indices = None
         if use_dynamic_bsz:
             assert max_token_len is not None, "max_token_len must be set when use_dynamic_bsz is True"
+            # Get data parallel group including context parallel for synchronization
+            # This ensures CP ranks use the same micro-batch split to avoid shape mismatch in KV exchange
+            dp_group = mpu.get_data_parallel_group(with_context_parallel=True)
             vpp_size = mpu.get_virtual_pipeline_model_parallel_world_size()
             if vpp_size is not None and vpp_size > 1:
                 microbatch_group_size_per_vp_stage = self.tf_config.microbatch_group_size_per_vp_stage
-                micro_batches, indices = rearrange_micro_batches(batch=mini_batch.batch, num_batches_divided_by=microbatch_group_size_per_vp_stage, max_token_len=max_token_len)
+                micro_batches, indices = rearrange_micro_batches(
+                    batch=mini_batch.batch, 
+                    num_batches_divided_by=microbatch_group_size_per_vp_stage, 
+                    max_token_len=max_token_len,
+                    dp_group=dp_group,
+                )
                 assert len(micro_batches) % self.tf_config.microbatch_group_size_per_vp_stage == 0, f"micro_batches {micro_batches} must be divisible by microbatch_group_size_per_vp_stage {microbatch_group_size_per_vp_stage} for megatron backend"
             else:
-                micro_batches, indices = rearrange_micro_batches(batch=mini_batch.batch, max_token_len=max_token_len)
+                micro_batches, indices = rearrange_micro_batches(
+                    batch=mini_batch.batch, 
+                    max_token_len=max_token_len,
+                    dp_group=dp_group,
+                )
             total_seqlen = max_token_len
         else:
             assert micro_batch_size is not None, "micro_batch_size is needed to be passed in when not using dynamic batch size"
