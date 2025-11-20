@@ -28,7 +28,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 import torch
 from omegaconf import DictConfig
-
+from loguru import logger
 import siirl.utils.model_utils.torch_functional as siirl_F
 from siirl.params.model_args import AlgorithmArguments, ActorArguments
 from siirl.execution.scheduler.enums import AdvantageEstimator
@@ -1439,7 +1439,25 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, norm_a
                 kwargs.get("pf_ppo_weight_pow", 2.0),
             )
     elif adv_estimator == AdvantageEstimator.GRPO:
-        grpo_calculation_mask = data["response_mask"]
+        if "finish_step" in data and data["responses"].ndim == 3:
+            # Embodied scenario: compute mask based on finish_step
+            responses = data["responses"]
+            batch_size = responses.size(0)
+            response_length = responses.size(1) * responses.size(2)  # traj_len * action_token_len
+            
+            # Get action_token_len from config or infer from responses shape
+            action_token_len = responses.size(2)  # action token length
+            finish_step = data['finish_step'] * action_token_len
+            
+            steps = torch.arange(response_length, device=responses.device)
+            steps_expanded = steps.unsqueeze(0).expand(batch_size, -1)
+            grpo_calculation_mask = steps_expanded < finish_step.unsqueeze(1)  # (batch_size, traj_len)
+            
+            logger.info(f"[GRPO] Using finish_step-based mask for embodied scenario")
+        else:
+            # NLP scenario or no finish_step: use attention_mask-based response_mask
+            grpo_calculation_mask = data["response_mask"]
+            logger.info(f"[GRPO] Using attention_mask-based response_mask for NLP scenario")
         # Call compute_grpo_outcome_advantage with parameters matching its definition
         advantages, returns = compute_grpo_outcome_advantage(
             token_level_rewards=data["token_level_rewards"],
@@ -1449,6 +1467,9 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, norm_a
         )
         data["advantages"] = advantages
         data["returns"] = returns
+        # Store the mask for consistent metrics calculation
+        data["response_mask"] = grpo_calculation_mask
+        logger.debug(f"[GRPO] Stored response_mask in batch for consistent metrics")
     elif adv_estimator == AdvantageEstimator.CPGD:
         cpgd_calculation_mask = data["response_mask"]
         # Call compute_cpgd_outcome_advantage with parameters matching its definition

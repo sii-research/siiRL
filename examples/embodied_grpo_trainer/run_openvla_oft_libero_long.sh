@@ -20,7 +20,7 @@ export MODEL_TYPE=openvla-oft
 export HOME_PATH=${HOME_PATH:your_home_path}
 export TRAIN_DATA_PATH=$HOME_PATH/datasets/vla-oft/libero/$DATASET/train.parquet
 export TEST_DATA_PATH=$HOME_PATH/datasets/vla-oft/libero/$DATASET/test.parquet
-export MODEL_PATH=$HOME_PATH/models/Haozhan72/Openvla-oft-SFT-libero10-traj1
+export MODEL_PATH=$HOME_PATH/models/Sylvest/OpenVLA-AC-PD-1traj-libero-long
 export VJEPA_MODEL_PATH=$HOME_PATH/models/vjepa2/vitg-384.pt
 
 # Base output paths
@@ -47,7 +47,8 @@ export OVERSAMPLE_FACTOR=1                     # Oversample factor for filtering
 
 # --- Training Hyperparameters ---
 export TRAIN_BATCH_SIZE=64       # data.train_batch_size
-export PPO_MINI_BATCH_SIZE=32    # actor_rollout_ref.actor.ppo_mini_batch_size
+export PPO_MINI_BATCH_SIZE=4    # actor_rollout_ref.actor.ppo_mini_batch_size
+                                # Note: actual ppo_mini_batch_size = PPO_MINI_BATCH_SIZE * ROLLOUT_N_SAMPLES
 export ROLLOUT_N_SAMPLES=8       # REUSED: Number of samples per prompt
 export PPO_EPOCHS=1              # actor_rollout_ref.actor.ppo_epochs
 
@@ -100,8 +101,6 @@ export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${ALG}_${DATASET}_${timestamp}
 # --- Define the Training Command ---
 TRAINING_CMD=(
     python3 -m siirl.main_dag
-    --config-name=embodied_grpo_trainer
-    
     # Data configuration
     data.train_files=\$TRAIN_DATA_PATH
     data.val_files=\$TEST_DATA_PATH
@@ -141,6 +140,7 @@ TRAINING_CMD=(
     actor_rollout_ref.actor.ppo_mini_batch_size=\$PPO_MINI_BATCH_SIZE
     actor_rollout_ref.actor.ppo_epochs=\$PPO_EPOCHS
     actor_rollout_ref.actor.grad_clip=\$GRAD_CLIP
+    actor_rollout_ref.actor.clip_ratio_c=10000.0
     actor_rollout_ref.actor.clip_ratio_high=\$CLIP_RATIO_HIGH
     actor_rollout_ref.actor.clip_ratio_low=\$CLIP_RATIO_LOW
     actor_rollout_ref.actor.entropy_coeff=\$ENTROPY_COEFF

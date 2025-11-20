@@ -193,7 +193,7 @@ class DAGWorker(Worker):
         for epoch in range(start_epoch, self.config.trainer.total_epochs):
             is_embodied = self.config.algorithm.workflow_type == WorkflowType.EMBODIED
             if is_embodied:
-                self._cleanup_step_buffers()
+                self._cleanup_step_buffers(self.timing_raw)
             for batch_idx in range(self.dataloader.num_train_batches):
                 if epoch == start_epoch and batch_idx < batches_to_skip:
                     continue
@@ -400,7 +400,7 @@ class DAGWorker(Worker):
                         dist.barrier(self._gather_group)
 
             # --- 6. Final Metrics Collection ---
-            self._cleanup_step_buffers(visited_nodes, timing_raw)
+            self._cleanup_step_buffers(timing_raw)
 
         ordered_metrics = {}
         if cur_tp_rank == 0 and cur_pp_rank == 0:

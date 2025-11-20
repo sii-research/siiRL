@@ -332,7 +332,7 @@ class ActorArguments:
     )
     # Actor-specific training parameters
     traj_mini_batch_size: int = field(
-        default=1,
+        default=16,
         metadata={"help": "Mini-batch size for trajectory splitting during training (must divide traj_len evenly)"}
     )
 

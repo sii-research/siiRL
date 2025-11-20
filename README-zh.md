@@ -44,6 +44,8 @@ siiRL: Shanghai Innovation Institute RL Framework for Advanced LLMs and Multi-Ag
 
 ## 📰 最新动态
 
+* **[2025/11]**: siiRL 现已支持视觉-语言-动作（VLA）模型训练，基于 [SRPO (Self-Referential Policy Optimization for Vision-Language-Action Models)](https://arxiv.org/pdf/2511.15605) 算法，实现了机器人任务的具身强化学习训练。详细使用方法请参考[文档](/docs/examples/embodied_grpo_example.rst)。
+
 * **[2025/09]**: siiRL 现已集成 Megatron 训练后端，并支持MoE模型训练。其性能已在 Qwen3-MoE 模型（30B、235B）上得到验证。
 
 * **[2025/09]**: siiRL通过与华为昇腾、沐曦科技、阿里云等主要厂商合作，现已支持在其GPU 集群上从 32 卡稳定扩展至 1024 卡，线性扩展效率超过 90%。
