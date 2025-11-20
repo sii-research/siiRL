@@ -20,7 +20,7 @@ export MODEL_TYPE=openvla-oft
 export HOME_PATH=${HOME_PATH:your_home_path}
 export TRAIN_DATA_PATH=$HOME_PATH/datasets/vla-oft/libero/$DATASET/train.parquet
 export TEST_DATA_PATH=$HOME_PATH/datasets/vla-oft/libero/$DATASET/test.parquet
-export MODEL_PATH=$HOME_PATH/models/Haozhan72/Openvla-oft-SFT-libero-goal-traj1
+export MODEL_PATH=$HOME_PATH/models/Sylvest/OpenVLA-AC-PD-1traj-libero-goal
 export VJEPA_MODEL_PATH=$HOME_PATH/models/vjepa2/vitg-384.pt
 
 # Base output paths
@@ -47,7 +47,8 @@ export OVERSAMPLE_FACTOR=1                     # Oversample factor for filtering
 
 # --- Training Hyperparameters ---
 export TRAIN_BATCH_SIZE=64       # data.train_batch_size
-export PPO_MINI_BATCH_SIZE=32    # actor_rollout_ref.actor.ppo_mini_batch_size
+export PPO_MINI_BATCH_SIZE=4    # actor_rollout_ref.actor.ppo_mini_batch_size
+                                # Note: actual ppo_mini_batch_size = PPO_MINI_BATCH_SIZE * ROLLOUT_N_SAMPLES
 export ROLLOUT_N_SAMPLES=8       # REUSED: Number of samples per prompt
 export PPO_EPOCHS=1              # actor_rollout_ref.actor.ppo_epochs
 
