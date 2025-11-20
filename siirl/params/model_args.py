@@ -180,7 +180,7 @@ class ModelArguments(ProcessorArguments):
         metadata={"help": "The specific model version to use (can be a branch name, tag name or commit id)."},
     )
     trust_remote_code: bool = field(
-        default=False,
+        default=True,
         metadata={"help": "Whether to trust the execution of code from datasets/models defined on the Hub or not."},
     )
     hf_hub_token: Optional[str] = field(
@@ -242,7 +242,7 @@ class ModelArguments(ProcessorArguments):
 @dataclass
 class CheckpointArguments:
     contents: List[str] = field(
-        default_factory=lambda: ["model", "hf_model", "optimizer", "extra"],  
+        default_factory=lambda: ["model", "optimizer", "extra"],  
         metadata={"help": "The contents to save and load in the checkpoint."}
     )
     save_contents: List[str] = field(
@@ -275,7 +275,7 @@ class ActorArguments:
     strategy: str = field(default="fsdp", metadata={"help": "Parallel strategy"})
     ppo_mini_batch_size: int = field(default=256, metadata={"help": "PPO mini-batch size"})
     ppo_micro_batch_size: Optional[int] = field(default=None, metadata={"help": "[Deprecated] Micro-batch size"})
-    ppo_micro_batch_size_per_gpu: Optional[int] = field(default=None, metadata={"help": "Per-GPU micro-batch size"})
+    ppo_micro_batch_size_per_gpu: Optional[int] = field(default=1, metadata={"help": "Per-GPU micro-batch size"})
     use_dynamic_bsz: bool = field(default=False, metadata={"help": "Dynamic batch sizing"})
     ppo_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU"})
     grad_clip: float = field(default=1.0, metadata={"help": "Gradient clipping"})
@@ -464,7 +464,7 @@ class RolloutArguments:
         default=None, metadata={"help": "[Deprecated] Log prob batch size"}
     )
     log_prob_micro_batch_size_per_gpu: Optional[int] = field(
-        default=None, metadata={"help": "Per-GPU log prob batch size"}
+        default=1, metadata={"help": "Per-GPU log prob batch size"}
     )
     log_prob_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU"})
     log_prob_use_dynamic_bsz: bool = field(default=False, metadata={"help": "Dynamic log prob batch size"})
@@ -503,7 +503,7 @@ class RefArguments:
         default=None, metadata={"help": "[Deprecated] Log prob batch size"}
     )
     log_prob_micro_batch_size_per_gpu: Optional[int] = field(
-        default=None, metadata={"help": "Per-GPU log prob batch size"}
+        default=1, metadata={"help": "Per-GPU log prob batch size"}
     )
     log_prob_use_dynamic_bsz: bool = field(default=False, metadata={"help": "Dynamic log prob batch size"})
     log_prob_max_token_len_per_gpu: int = field(default=16384, metadata={"help": "Max tokens per GPU"})
@@ -668,6 +668,7 @@ class AlgorithmArguments:
     use_kl_in_reward: bool = field(default=False, metadata={"help": "Use KL In-Reward"})
     share_reward_in_agent: bool = field(default=True, metadata={"help": "Shard Reward in Reward"})
     norm_adv_by_std_in_grpo: bool = field(default=True, metadata={"help": "Whether to scale the GRPO advantage"})
+    algorithm_name: str = field(default="grpo", metadata={"help": "Algorithm name, e.g., grpo, ppo, dapo"})
     weight_factor_in_cpgd: str = field(
         default="STD_weight",
         metadata={"help": "The weighting methods for advantage {STD_weight, clip_filter_like_weight, naive}"},

@@ -12,14 +12,48 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Embodied AI environment adapters."""
+# -*- coding: utf-8 -*-
 
-from .base import BaseVLAEnvironment as BaseEmbodiedEnvironment
-from .venv import SubprocVectorEnv
-from .adapters.libero import LIBEROAdapter
+""" 
+This module defines an abstract base class for a Vision-Language-Action (VLA) environment
+"""
 
-__all__ = [
-    "BaseEmbodiedEnvironment",
-    "LIBEROAdapter",
-    "SubprocVectorEnv",
-]
+from abc import ABC, abstractmethod
+from typing import Any, Dict, Tuple
+
+class BaseVLAEnvironment(ABC):
+    """
+    Abstract Base Class for a Vision-Language-Action (VLA) environment.
+    It defines the standard asynchronous interface for resetting the environment
+    and stepping through it.
+    """
+
+    @abstractmethod
+    async def reset(self) -> Dict[str, Any]:
+        """
+        Resets the environment to an initial state.
+
+        Returns:
+            Dict[str, Any]: The initial multi-modal observation,
+                            e.g., {"image": np.array, "text": "task prompt"}.
+        """
+        pass
+
+    @abstractmethod
+    async def step(self, action: Dict[str, Any]) -> Tuple[Dict[str, Any], float, bool, bool, Dict[str, Any]]:
+        """
+        Runs one timestep of the environment's dynamics.
+
+        Args:
+            action (Dict[str, Any]): A dictionary containing the action to be executed.
+                                     For example, {"continuous_action": np.array([...])}.
+
+        Returns:
+            Tuple[Dict, float, bool, bool, Dict]: A tuple containing:
+                - observation (Dict): The next observation.
+                - reward (float): The reward received.
+                - terminated (bool): Whether the episode has ended.
+                - truncated (bool): Whether the episode was truncated.
+                - info (Dict): Auxiliary diagnostic information.
+        """
+        pass

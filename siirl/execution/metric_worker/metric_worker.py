@@ -86,14 +86,9 @@ class MetricClient():
             world_size: Total number of processes in the distributed system
         """
         need_key = ["responses", "attention_mask", "token_level_scores",
-            "token_level_rewards", "advantages", "returns"]
+            "token_level_rewards", "advantages", "returns", "values", "response_mask", "__num_turns__"]
         # Add optional keys if present in data
-        if "values" in data:
-            need_key.append("values")
-        if "response_mask" in data:
-            need_key.append("response_mask")
-        if "__num_turns__" in data:
-            need_key.append("__num_turns__")
+        need_key = [key for key in need_key if key in data.keys()]
         
         need_data = data.select(*need_key)
         self.fut.append(self.metric_worker.submit_metric.remote(
@@ -141,6 +136,8 @@ class MetricClient():
         self.fut.append(self.metric_worker.submit_metric.remote(
             process_validation_metrics(data_sources, sample_inputs, infos_dict, sample_turns), world_size)
         )
+    
+    
     
 
 @ray.remote(num_cpus=1)

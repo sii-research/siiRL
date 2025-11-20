@@ -193,15 +193,15 @@ def dapo_pipeline() -> TaskGraph:
         node_type=NodeType.COMPUTE,
         node_role=NodeRole.REWARD
     ).add_node(
-        "postprocess_sampling",
-        func="siirl.dag_worker.dagworker:DAGWorker.postprocess_sampling",
+        "dynamic_sampling",
+        func="siirl.user_interface.filter_interface.dapo.dynamic_sampling",
         deps=["function_reward"],
         node_type=NodeType.COMPUTE,
-        node_role=NodeRole.POSTPROCESS_SAMPLING
+        node_role=NodeRole.DYNAMIC_SAMPLING
     ).add_node(
         "calculate_advantages",
         func="siirl.dag_worker.dagworker:DAGWorker.compute_advantage",
-        deps=["postprocess_sampling"],
+        deps=["dynamic_sampling"],
         node_type=NodeType.COMPUTE,
         node_role=NodeRole.ADVANTAGE
     ).add_node(
@@ -251,15 +251,20 @@ def embodied_grpo_pipeline() -> TaskGraph:
 
     pipeline.add_node(
         "rollout_actor",
-        func="siirl.dag_worker.dagworker:DAGWorker.generate",  
-        filter_plugin="siirl.user_interface.filter_interface.embodied.embodied_local_rank_sampling",
+        func="siirl.dag_worker.dagworker:DAGWorker.generate",
         deps=[],
         node_type=NodeType.MODEL_INFERENCE,
         node_role=NodeRole.ROLLOUT
     ).add_node(
+        "dynaminc_sampling",
+        func="siirl.user_interface.filter_interface.embodied.embodied_local_rank_sampling",
+        deps=["rollout_actor"], 
+        node_type=NodeType.COMPUTE,
+        node_role=NodeRole.DYNAMIC_SAMPLING      
+    ).add_node(
         "compute_reward",
         func="siirl.dag_worker.dagworker:DAGWorker.compute_reward",
-        deps=["data_rebalance"],
+        deps=["dynaminc_sampling"],
         node_type=NodeType.COMPUTE,
         node_role=NodeRole.REWARD
     ).add_node(

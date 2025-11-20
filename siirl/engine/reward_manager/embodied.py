@@ -14,7 +14,7 @@
 
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-
+from tensordict import TensorDict
 import numpy as np
 import torch
 from loguru import logger
@@ -77,12 +77,12 @@ class EmbodiedRewardManager:
         self.action_token_len = reward_kwargs.get("action_token_len", 7)
         self.reward_coef = reward_kwargs.get("reward_coef", 1.0)
 
-    def __call__(self, data: DataProto, return_dict: bool = False) -> Union[Dict[str, Any], Tuple[Dict[str, torch.Tensor], Dict[str, float]]]:
+    def __call__(self, data: TensorDict, return_dict: bool = False) -> Union[Dict[str, Any], Tuple[Dict[str, torch.Tensor], Dict[str, float]]]:
         """
         Calculates and returns the reward tensors and metrics for a given data batch.
         
         Args:
-            data: DataProto containing batch information
+            data: TensorDict containing batch information
             return_dict: If True, returns format compatible with compute_reward function
                         If False, returns format compatible direct call
         
@@ -90,7 +90,7 @@ class EmbodiedRewardManager:
             If return_dict=True: {"reward_tensor": tensor, "reward_extra_info": dict}
             If return_dict=False: (reward_tensor_dict, reward_metrics) tuple
         """
-        batch_size = data.batch["responses"].shape[0]
+        batch_size = data["responses"].shape[0]
 
         # --- Step 1: Delegate the core reward calculation ---
         if self.compute_score is None:
@@ -122,11 +122,11 @@ class EmbodiedRewardManager:
         # --- Step 4: Populate the reward tensor at the final timestep ---
         # The reward is applied as a terminal reward at the end of the action sequence.
         
-        verifier_rewards = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+        verifier_rewards = torch.zeros_like(data["responses"], dtype=torch.float32)
         
         verifier_rewards = verifier_rewards.view(batch_size, -1)
 
-        valid_response_length = data.batch["finish_step"] * self.action_token_len
+        valid_response_length = data["finish_step"] * self.action_token_len
 
         for i in range(batch_size):
             last_step_idx = valid_response_length[i] - 1
@@ -164,14 +164,14 @@ class EmbodiedRewardManager:
         else:
             return reward_tensor_dict, reward_metrics
 
-    def verify(self, data: DataProto) -> Tuple[List[float], Dict[str, float], Dict[str, float], Dict[str, float]]:
+    def verify(self, data: TensorDict) -> Tuple[List[float], Dict[str, float], Dict[str, float], Dict[str, float]]:
         """
         Verify and compute rewards for validation.
         
         This method directly reads the 'complete' field from data.batch.
         
         Args:
-            data: DataProto containing batch information with embodied task data
+            data: TensorDict containing batch information with embodied task data
             
         Returns:
             tuple: (verifier_scores, reward_metrics, format_metrics, reward_format_metrics)
@@ -181,20 +181,20 @@ class EmbodiedRewardManager:
                 - reward_format_metrics: Dict[str, float] - Same as reward_metrics
         """
         # Step 1: Read complete field directly from batch
-        completes = data.batch['complete'].tolist()
-        batch_size = data.batch['responses'].size(0)
+        completes = data['complete'].tolist()
+        batch_size = data['responses'].size(0)
         assert len(completes) == batch_size
         
         # Convert boolean to float (0.0 or 1.0)
         score = [float(item) for item in completes]
         
         # Step 2: Store to batch tensors
-        device = data.batch['responses'].device
+        device = data['responses'].device
         acc_tensor = torch.tensor(score, dtype=torch.float32, device=device)
         format_tensor = torch.ones(batch_size, dtype=torch.float32, device=device)
         
-        data.batch['acc'] = acc_tensor
-        data.batch['format_correctness'] = format_tensor
+        data['acc'] = acc_tensor
+        data['format_correctness'] = format_tensor
         
         # Step 3: Compute aggregated metrics
         success_rate = acc_tensor.mean().item()

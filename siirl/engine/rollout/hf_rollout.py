@@ -51,15 +51,15 @@ class HFRollout(BaseRollout):
         return output
 
     @torch.no_grad()
-    def _generate_minibatch(self, prompts: DataProto) -> DataProto:
+    def _generate_minibatch(self, prompts: TensorDict) -> TensorDict:
         # make sampling args can be overridden by inputs
-        do_sample = prompts.meta_info.get("do_sample", self.config.do_sample)
-        is_validate = prompts.meta_info.get("validate", False)
+        do_sample = prompts.get("do_sample", self.config.do_sample)
+        is_validate = prompts.get("validate", False)
 
-        temperature = prompts.meta_info.get("temperature", self.config.temperature)
-        response_length = prompts.meta_info.get("response_length", self.config.response_length)
-        top_p = prompts.meta_info.get("top_p", self.config.get("top_p", 1.0))
-        top_k = max(0, prompts.meta_info.get("top_k", self.config.get("top_k", 0)))  # to be compatible with vllm
+        temperature = prompts.get("temperature", self.config.temperature)
+        response_length = prompts.get("response_length", self.config.response_length)
+        top_p = prompts.get("top_p", self.config.get("top_p", 1.0))
+        top_k = max(0, prompts.get("top_k", self.config.get("top_k", 0)))  # to be compatible with vllm
 
         if not do_sample:
             # do_sample==False -> greedy decoding
@@ -85,20 +85,20 @@ class HFRollout(BaseRollout):
                 "top_p": top_p,
                 "top_k": top_k,
                 "temperature": temperature,
-                "num_return_sequences": self.config.n,
+                "num_return_sequences": 1, # already repeat in ray_trainer
             }
 
         # make config according to generate mode
         generation_config = GenerationConfig(**kwargs)
 
-        idx = prompts.batch["input_ids"]  # (bs, prompt_length)
+        idx = prompts["input_ids"]  # (bs, prompt_length)
         prompt_length = idx.size(1)
-        attention_mask = prompts.batch["attention_mask"]  # left-padded attention_mask
-        position_ids = prompts.batch["position_ids"]
+        attention_mask = prompts["attention_mask"]  # left-padded attention_mask
+        position_ids = prompts["position_ids"]
 
         # used to construct attention_mask
-        eos_token_id = prompts.meta_info["eos_token_id"]
-        pad_token_id = prompts.meta_info["pad_token_id"]
+        eos_token_id = prompts["eos_token_id"]
+        pad_token_id = prompts["pad_token_id"]
 
         self.module.eval()
         param_ctx = contextlib.nullcontext()
@@ -170,4 +170,4 @@ class HFRollout(BaseRollout):
         get_torch_device().empty_cache()
 
         self.module.train()
-        return DataProto(batch=batch)
+        return batch

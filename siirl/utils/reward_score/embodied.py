@@ -14,7 +14,7 @@
 
 import re
 from typing import Any, Dict, List
-
+from tensordict import TensorDict
 import numpy as np
 import torch
 from scipy import special
@@ -40,7 +40,7 @@ def _extract_task_name(task_file_name: str) -> str:
 
 
 def compute_embodied_reward(
-    batch_data: DataProto,
+    batch_data: TensorDict,
     **kwargs: Any,
 ) -> List[Dict[str, Any]]:
     """
@@ -61,11 +61,11 @@ def compute_embodied_reward(
     # --- Step 1: Data Extraction and Global Pre-filtering ---
     from loguru import logger
     
-    batch_size = batch_data.batch["responses"].size(0)
-    completes = np.array(batch_data.batch["complete"].tolist())
-    finish_steps = batch_data.batch["finish_step"].cpu().numpy()
-    embeddings = batch_data.batch["vjepa_embedding"].cpu().numpy()
-    task_file_names = _tensor_to_str_list(batch_data.batch["task_file_name"])
+    batch_size = batch_data["responses"].size(0)
+    completes = np.array(batch_data["complete"].tolist())
+    finish_steps = batch_data["finish_step"].cpu().numpy()
+    embeddings = batch_data["vjepa_embedding"].cpu().numpy()
+    task_file_names = _tensor_to_str_list(batch_data["task_file_name"])
 
     # Pre-filtering: Identify all invalid samples (all-zero embeddings) upfront.
     zero_embedding_mask = np.all(embeddings == 0, axis=1)

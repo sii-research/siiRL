@@ -22,12 +22,12 @@ from siirl.dag_worker.data_structures import NodeOutput
 from siirl.data_coordinator import DataProto
 from siirl.data_coordinator.sample import filter_tensordict
 
-def dynamic_sampling(siirl_args: SiiRLArguments, batch: TensorDict, node_config: Dict[str, Any], **kwargs: Any) -> NodeOutput:
+def dynamic_sampling(config: SiiRLArguments, batch: TensorDict, **kwargs: Any) -> NodeOutput:
     """
     Performs dynamic sampling by filtering trajectory groups based on metric variance.
 
     Args:
-        siirl_args (SiiRLArguments): The global training arguments from the configuration.
+        config (SiiRLArguments): The global training arguments from the configuration.
         batch (DataProto): The input data batch for this step, which must contain 'uid'
                            in `non_tensor_batch` and the specified metric for filtering.
         node_config (Dict[str, Any]): The configuration specific to this node (not used here).
@@ -40,7 +40,7 @@ def dynamic_sampling(siirl_args: SiiRLArguments, batch: TensorDict, node_config:
         KeyError: If the specified metric for filtering cannot be found in the batch and
                   cannot be computed from available data.
     """
-    filter_config = siirl_args.algorithm.filter_groups
+    filter_config = config.algorithm.filter_groups
 
     # If filtering is disabled in the main config, bypass the logic and return the original batch.
     if not filter_config.enable:

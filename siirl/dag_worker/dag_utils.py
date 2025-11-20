@@ -249,7 +249,16 @@ def setup_sharding_manager(
     actor_worker = worker_dict[NodeRole.ACTOR]
     rollout_worker = worker_dict[NodeRole.ROLLOUT]
     rollout_pg = agent_group_process_group[agent_group][NodeRole.ROLLOUT]
+    
+    if config.actor_rollout_ref.model.model_type == "embodied":
+        if hasattr(actor_worker, "actor_module_fsdp"):
+            rollout_worker.rollout.model = actor_worker.actor_module_fsdp
+            logger.info(f"[Embodied] Set module for EmbodiedHFRollout for agent group {agent_group}.")
+        else:
+            logger.error(f"[Embodied] Actor worker for agent group {agent_group} does not have 'actor_module_fsdp'.")
 
+    rollout_pg = agent_group_process_group[agent_group][NodeRole.ROLLOUT]
+    
     parallel_config = {
         "rollout_parallel_size": rollout_worker.config.rollout.tensor_model_parallel_size,
         "rollout_world_size": dist.get_world_size(rollout_pg),
@@ -264,6 +273,17 @@ def setup_sharding_manager(
 
     # Lazy import and deferred execution mapping
     sharding_manager_map = {
+        ("fsdp", "hf"): (
+                "siirl.engine.sharding_manager.fsdp_hf.FSDPHFShardingManager",
+                lambda: {
+                    "module": actor_worker.actor_module_fsdp,
+                    "rollout": rollout_worker.rollout,
+                    "offload_param": getattr(actor_worker, "_is_offload_param", False),
+                    "offload_embedding": (
+                        getattr(rollout_worker.config, "embodied", None) is not None and
+                        getattr(rollout_worker.config.embodied, "embedding_model_offload", False)),
+            },
+        ),
         ("fsdp", "vllm"): (
             "siirl.engine.sharding_manager.fsdp_vllm.MultiAgentFSDPVLLMShardingManager",
             lambda: {

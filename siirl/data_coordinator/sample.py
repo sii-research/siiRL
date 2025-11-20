@@ -40,7 +40,11 @@ class Sample(BaseModel):
     returns: Optional[np.ndarray] = Field(default=None)
     old_log_probs: Optional[np.ndarray] = Field(default=None)
     ref_log_prob: Optional[np.ndarray] = Field(default=None)
-
+    
+    # used for vla
+    pixel_values: Optional[np.ndarray] = Field(default=None)
+    finish_step: Optional[np.ndarray] = Field(default=None)
+    
     # from  non_tensor_batch of Dataproto
     raw_prompt: str = Field(default="")
     raw_prompt_ids: List[int] = Field(default_factory=list)
@@ -104,27 +108,28 @@ class SampleManager(BaseModel):
 
 
 def preprocess_dataloader(data:Dict, n:int = 1):
-    batch_size = len(data['input_ids'])
-    
-    # Create integer indices for GRPO grouping
-    # Each prompt gets a unique index (0, 1, 2, ..., batch_size-1)
-    # This will be repeated to [0,0,0,...,1,1,1,...,2,2,2,...] after repeat
-    uid = np.arange(batch_size, dtype=np.int64)
-    data['uid'] = uid
-    
     # Manually repeat all numpy arrays and torch tensors
     # This ensures consistent handling of all fields
+    batch_size = None
     for key, value in data.items():
         if isinstance(value, np.ndarray):
             # Repeat numpy arrays along axis 0
             data[key] = np.repeat(value, n, axis=0)
         elif isinstance(value, torch.Tensor):
             # Repeat torch tensors along dim 0
+            if batch_size is None:
+                batch_size = value.shape[0]
             data[key] = value.repeat_interleave(n, dim=0)
+            
         elif isinstance(value, list):
             # Convert list to numpy array and repeat
             data[key] = np.repeat(np.array(value), n, axis=0)
-    
+            
+    # Create integer indices for GRPO grouping
+    # Each prompt gets a unique index (0, 1, 2, ..., batch_size-1)
+    # This will be repeated to [0,0,0,...,1,1,1,...,2,2,2,...] after repeat
+    uid = np.arange(batch_size, dtype=np.int64)
+    data['uid'] = np.repeat(uid, n, axis=0)
     # Now all fields have batch_size * n
     # Create TensorDict with the expanded batch size
     tensor_dict = TensorDict(data, batch_size=batch_size * n)
@@ -135,11 +140,11 @@ def Dict2Samples(data:TensorDict)-> List[SampleManager]:
     batch_size = data.batch_size[0]
     async def calc_sample(index):
         local_sample = Sample()
-        local_sample.input_ids = data['input_ids'][index].numpy()
-        local_sample.attention_mask = data['attention_mask'][index].numpy()
-        local_sample.position_ids = data['position_ids'][index].numpy()
-        local_sample.data_source = data['data_source'][index]
-        local_sample.reward_model = data['reward_model'][index]
+        local_sample.input_ids = data['input_ids'][index].numpy() if 'input_ids' in data else None
+        local_sample.attention_mask = data['attention_mask'][index].numpy() if 'attention_mask' in data else None
+        local_sample.position_ids = data['position_ids'][index].numpy() if 'position_ids' in data else None
+        local_sample.data_source = data['data_source'][index] if 'data_source' in data else None
+        local_sample.reward_model = data['reward_model'][index] if 'reward_model' in data else None
         local_sample.prompts = data['prompts'][index].numpy() if 'prompts' in data else None
         local_sample.responses = data['responses'][index].numpy() if 'responses' in data else None
         local_sample.response_mask = data['response_mask'][index].numpy() if 'response_mask' in data else None
@@ -153,7 +158,8 @@ def Dict2Samples(data:TensorDict)-> List[SampleManager]:
         local_sample.old_log_probs = data['old_log_probs'][index].numpy() if 'old_log_probs' in data else None
         local_sample.ref_log_prob = data['ref_log_prob'][index].numpy() if 'ref_log_prob' in data else None
         local_sample.extra_info = data['extra_info'][index] if 'extra_info' in data else None
-
+        local_sample.pixel_values = data['pixel_values'][index].numpy() if 'pixel_values' in data else None
+        local_sample.finish_step = data['finish_step'][index].numpy() if 'finish_step' in data else None
         if 'multi_modal_inputs' in data:
             local_sample.multi_modal_inputs = data["multi_modal_inputs"][index]
         local_sample.uid = data['uid'][index]
@@ -205,7 +211,7 @@ def Samples2Dict(samples: List[Sample]) -> TensorDict:
             
             # if internal val is not ""/ {} ...
             if isinstance(first_val, np.ndarray):
-                tensordict_data[key] = np.stack(values, axis=0) if first_val.ndim >= 1 else np.concatenate(values, axis=0)
+                tensordict_data[key] = np.stack(values, axis=0) if first_val.ndim >= 1 else np.array(values)
                 default_type = fields[key].annotation
                 if get_origin(default_type) is Union:
                     args = get_args(default_type)       
@@ -230,7 +236,7 @@ def Samples2Dict(samples: List[Sample]) -> TensorDict:
                 batch_size=batch_size
             )
 
-    tensordict_data["global_token_num"] = NonTensorData((torch.sum(tensordict_data["attention_mask"], dim=-1)).tolist())
+    tensordict_data["global_token_num"] = NonTensorData(torch.sum(tensordict_data["attention_mask"], dim=-1).flatten().tolist())
 
     return TensorDict(tensordict_data, batch_size=batch_size)
 

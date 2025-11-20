@@ -17,14 +17,15 @@ from typing import Any, Dict, List, Tuple
 
 import torch
 from loguru import logger
+from tensordict import TensorDict
 
 from siirl.params import SiiRLArguments
 from siirl.dag_worker.data_structures import NodeOutput
 from siirl.data_coordinator import SampleInfo
-
+from siirl.data_coordinator.protocol import select_idxs
 
 def verify(
-    data: DataProto,
+    data: TensorDict,
 ) -> Tuple[List[float], Dict[str, float], Dict[str, float], Dict[str, float]]:
     """Calculates scores and enriches the batch with accuracy information.
 
@@ -44,8 +45,8 @@ def verify(
         - reward_format_metrics: A dictionary of reward metrics excluding format issues.
     """
     # --- 1. Access Tensors and Metadata ---
-    responses = data.batch["responses"]
-    completes = data.batch["complete"]
+    responses = data["responses"]
+    completes = data["complete"]
     device = responses.device
     batch_size = responses.size(0)
 
@@ -57,8 +58,8 @@ def verify(
     # Assume format is always correct for this verification step.
     format_tensor = torch.ones(batch_size, dtype=torch.float32, device=device)
 
-    data.batch["acc"] = scores_tensor
-    data.batch["format_correctness"] = format_tensor
+    data["acc"] = scores_tensor
+    data["format_correctness"] = format_tensor
 
     # --- 4. Calculate Aggregate Metrics ---
     mean_score = scores_tensor.mean().item()
@@ -69,7 +70,7 @@ def verify(
     return scores_tensor.tolist(), reward_metrics, format_metrics, reward_format_metrics
 
 
-def _filter_batch(batch: DataProto, n_samples: int, siirl_args: SiiRLArguments) -> DataProto:
+def _filter_batch(batch: TensorDict, n_samples: int, config: SiiRLArguments) -> TensorDict:
     """Filters a batch based on accuracy and truncation criteria.
 
     Filtering is performed at the prompt level. If any of the `n_samples`
@@ -77,29 +78,29 @@ def _filter_batch(batch: DataProto, n_samples: int, siirl_args: SiiRLArguments) 
     for that prompt are discarded.
 
     Args:
-        batch: The DataProto object to be filtered. Must contain 'acc' tensor.
+        batch: The TensorDict object to be filtered. Must contain 'acc' tensor.
         n_samples: The number of responses generated per prompt.
-        siirl_args: Configuration object containing filter settings.
+        config: Configuration object containing filter settings.
 
     Returns:
-        A new, potentially smaller, DataProto object containing the filtered data.
+        A new, potentially smaller, TensorDict object containing the filtered data.
     """
-    device = batch.batch["responses"].device
+    device = batch["responses"].device
     num_prompts = len(batch) // n_samples
 
     # Access embodied sampling config (similar to DAPO's filter_groups)
-    embodied_sampling = siirl_args.algorithm.embodied_sampling
+    embodied_sampling = config.algorithm.embodied_sampling
     filter_accuracy = embodied_sampling.filter_accuracy
     
     # --- 1. Accuracy Filtering ---
     if filter_accuracy:
         # Reshape flat accuracy tensor into (num_prompts, n_samples)
-        acc_matrix = batch.batch["acc"].reshape(num_prompts, n_samples)
+        acc_matrix = batch["acc"].reshape(num_prompts, n_samples)
         # Calculate mean accuracy for each prompt
         prompt_mean_acc = acc_matrix.mean(dim=-1)
 
         # Log accuracy distribution when performance monitoring is enabled
-        if siirl_args.dag.enable_perf:
+        if config.dag.enable_perf:
             counts = Counter(prompt_mean_acc.tolist())
             num_prompts_debug = len(prompt_mean_acc)
 
@@ -121,10 +122,10 @@ def _filter_batch(batch: DataProto, n_samples: int, siirl_args: SiiRLArguments) 
     filter_truncated = embodied_sampling.filter_truncated
     if filter_truncated:
         # For Embodied AI: check finish_step instead of response length
-        if "finish_step" in batch.batch:
-            finish_steps = batch.batch["finish_step"].reshape(num_prompts, n_samples)
+        if "finish_step" in batch:
+            finish_steps = batch["finish_step"].reshape(num_prompts, n_samples)
             # Reuse env.max_steps directly (no need to duplicate in embodied_sampling)
-            max_steps = siirl_args.actor_rollout_ref.embodied.env.max_steps
+            max_steps = config.actor_rollout_ref.embodied.env.max_steps
             
             # A prompt is considered truncated if *any* of its samples reached max steps
             has_truncated = (finish_steps >= max_steps).any(dim=-1)
@@ -155,22 +156,22 @@ def _filter_batch(batch: DataProto, n_samples: int, siirl_args: SiiRLArguments) 
     final_mask = combined_mask.repeat_interleave(n_samples)
 
     # Use select_idxs instead of slice for boolean mask filtering
-    filtered_batch = batch.select_idxs(final_mask)
+    filtered_batch = select_idxs(batch, final_mask)
     logger.info(f"Filtered batch size: {len(filtered_batch)} (from original: {len(batch)})")
 
     return filtered_batch
 
 
 def _compute_embodied_verification_metrics(
-    batch: DataProto,
-    siirl_args: SiiRLArguments,
+    batch: TensorDict,
+    config: SiiRLArguments,
 ) -> Dict[str, float]:
     """
     Compute Embodied AI-specific metrics during verification phase.
     
     Args:
         batch: The batch being verified
-        siirl_args: Configuration arguments
+        config: Configuration arguments
     
     Returns:
         Dictionary of Embodied verification metrics
@@ -196,7 +197,7 @@ def _compute_embodied_verification_metrics(
             batch_dict['acc'] = batch.batch['acc']
         
         # Compute rollout metrics
-        rollout_metrics = compute_rollout_metrics(batch_dict, siirl_args)
+        rollout_metrics = compute_rollout_metrics(batch_dict, config)
         for key, value in rollout_metrics.items():
             # Add verify_ prefix to distinguish from actor metrics
             metrics[f"verify_{key}"] = value
@@ -209,9 +210,8 @@ def _compute_embodied_verification_metrics(
 
 
 def embodied_local_rank_sampling(
-    siirl_args: SiiRLArguments,
+    config: SiiRLArguments,
     batch: TensorDict,
-    node_config: Dict[str, Any],
     **kwargs: Any,
 ) -> NodeOutput:
     """Performs verification, metric collection, and optional filtering on a batch.
@@ -221,7 +221,7 @@ def embodied_local_rank_sampling(
     configuration, and finally attaches the calculated metrics to the resulting batch.
 
     Args:
-        siirl_args: Global SiiRL configuration arguments.
+        config: Global SiiRL configuration arguments.
         batch: The input DataProto batch from the generation stage.
         node_config: Configuration specific to this execution node.
         **kwargs: Additional keyword arguments (unused).
@@ -237,24 +237,24 @@ def embodied_local_rank_sampling(
     
     # Step 3: Compute useful Embodied AI-specific verification metrics (if enabled)
     enable_embodied_metrics = True  # Default
-    if hasattr(siirl_args, 'actor_rollout_ref') and hasattr(siirl_args.actor_rollout_ref, 'embodied'):
-        if siirl_args.actor_rollout_ref.embodied is not None:
-            if hasattr(siirl_args.actor_rollout_ref.embodied, 'enable_vla_metrics'):
-                enable_embodied_metrics = siirl_args.actor_rollout_ref.embodied.enable_vla_metrics
+    if hasattr(config, 'actor_rollout_ref') and hasattr(config.actor_rollout_ref, 'embodied'):
+        if config.actor_rollout_ref.embodied is not None:
+            if hasattr(config.actor_rollout_ref.embodied, 'enable_vla_metrics'):
+                enable_embodied_metrics = config.actor_rollout_ref.embodied.enable_vla_metrics
     
     if enable_embodied_metrics:
         embodied_verification_metrics = _compute_embodied_verification_metrics(
             batch=batch,
-            siirl_args=siirl_args,
+            config=config,
         )
         sample_metrics.update(embodied_verification_metrics)
 
     # Step 4: Conditionally filter the batch.
     # Use algorithm.embodied_sampling config (aligned with DAPO's filter_groups approach)
-    embodied_sampling = siirl_args.algorithm.embodied_sampling
+    embodied_sampling = config.algorithm.embodied_sampling
     if embodied_sampling.filter_accuracy or embodied_sampling.filter_truncated:
-        n_samples = siirl_args.actor_rollout_ref.rollout.n
-        processed_batch = _filter_batch(batch, n_samples, siirl_args)
+        n_samples = config.actor_rollout_ref.rollout.n
+        processed_batch = _filter_batch(batch, n_samples, config)
     else:
         # If filtering is disabled, the processed batch is the original batch.
         processed_batch = batch
@@ -262,10 +262,10 @@ def embodied_local_rank_sampling(
     # Step 5: Ensure all tensors are on CPU before data rebalance
     # This fixes device mismatch issues where some tensors (task_id, trial_id) are on CUDA
     # while others (responses, etc.) are on CPU
-    if processed_batch.batch is not None:
-        for key, tensor in processed_batch.batch.items():
+    if processed_batch is not None:
+        for key, tensor in processed_batch.items():
             if isinstance(tensor, torch.Tensor) and tensor.device.type != 'cpu':
-                processed_batch.batch[key] = tensor.cpu()
+                processed_batch[key] = tensor.cpu()
                 logger.debug(f"Moved {key} from {tensor.device} to CPU for data rebalance")
 
     return NodeOutput(batch=processed_batch, metrics=sample_metrics)

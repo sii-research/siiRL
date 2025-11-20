@@ -71,8 +71,7 @@ class NodeRole(Enum):
     REFERENCE = "REFERENCE"  # Reference
     REWARD = "REWARD"  # Reward
 
-    POSTPROCESS_SAMPLING = "POSTPROCESS_SAMPLING"  # Post-process sampling for dapo
-    DATA_REBALANCE = "DATA_REBALANCE"  # distribute data rebalance after any sampling algorithm
+    DYNAMIC_SAMPLING = "DYNAMIC_SAMPLING"  # Dynamic sampling in databuffer
 
 
 class NodeStatus(Enum):

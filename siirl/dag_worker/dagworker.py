@@ -35,7 +35,7 @@ from siirl.execution.dag import TaskGraph
 from siirl.execution.dag.node import NodeRole, NodeType, Node
 from siirl.execution.scheduler.reward import compute_reward, create_reward_manager
 from siirl.execution.scheduler.process_group_manager import ProcessGroupManager
-from siirl.execution.scheduler.enums import AdvantageEstimator
+from siirl.execution.scheduler.enums import AdvantageEstimator, WorkflowType
 from siirl.data_coordinator import preprocess_dataloader, Samples2Dict, Dict2Samples, SampleInfo
 from siirl.data_coordinator import DataProto
 from siirl.data_coordinator.dataloader import DataLoaderNode
@@ -99,6 +99,7 @@ class DAGWorker(Worker):
         self.enable_perf = os.environ.get("SIIRL_ENABLE_PERF", "0") == "1" or config.dag.enable_perf
 
         # State attributes
+        self.timing_raw = {}
         self.global_steps = 0
         self.total_training_steps = 0
         self.workers: Dict[str, Any] = {}
@@ -190,6 +191,9 @@ class DAGWorker(Worker):
             batches_to_skip = self.global_steps % self.dataloader.num_train_batches
 
         for epoch in range(start_epoch, self.config.trainer.total_epochs):
+            is_embodied = self.config.algorithm.workflow_type == WorkflowType.EMBODIED
+            if is_embodied:
+                self._cleanup_step_buffers()
             for batch_idx in range(self.dataloader.num_train_batches):
                 if epoch == start_epoch and batch_idx < batches_to_skip:
                     continue
@@ -246,7 +250,7 @@ class DAGWorker(Worker):
         if self._rank == 0 and last_val_metrics:
             logger.info(f"Final validation metrics:\n{pformat(last_val_metrics)}")
 
-    def _cleanup_step_buffers(self, visited_nodes: Set[str], timing_raw: dict) -> None:
+    def _cleanup_step_buffers(self, timing_raw: dict) -> None:
         """
         Encapsulates the logic for resetting and clearing all step-related buffers.
         This includes the distributed Ray data buffers and the local internal cache.
@@ -254,7 +258,7 @@ class DAGWorker(Worker):
         """
         # Reset the distributed (Ray) buffers for all keys that were used in this step.
         with timer(self.enable_perf, "reset_data_buffer", timing_raw):
-            self.reset_data_buffer(list(visited_nodes))
+            self.reset_data_buffer()
             for ref in self.sample_ref_cache:
                 ray.internal.free(ref)
             self.sample_ref_cache = []
@@ -264,13 +268,12 @@ class DAGWorker(Worker):
 
     def _run_training_step(self, epoch: int, batch_idx: int) -> Optional[List[Tuple[str, Any]]]:
         """Executes a single training step by traversing the computational graph."""
-        timing_raw, ordered_metrics = {}, []
+        timing_raw, ordered_metrics = self.timing_raw, []
 
         with timer(self.enable_perf, "step", timing_raw):
             # --- 1. Data Loading ---
             with timer(self.enable_perf, "get_data_from_dataloader", timing_raw):
                 batch = preprocess_dataloader(self.dataloader.run(epoch=epoch, is_validation_step=False), self.config.actor_rollout_ref.rollout.n)
-
             node_queue = self.taskgraph.get_entry_nodes()
             if not node_queue:
                 logger.error("Taskgraph has no entry nodes. Cannot start execution.")
@@ -294,17 +297,23 @@ class DAGWorker(Worker):
                         with timer(self.enable_perf, "get_data_from_buffer", timing_raw):
                             batch = self.get_data_from_buffers(key=cur_node.node_id, cur_dp_size=cur_dp_size, cur_dp_rank=cur_dp_rank, timing_raw=timing_raw)
                             if batch is None:
-                                logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
-                                return None 
-                            # batch = remove_prefix_from_dataproto(batch, cur_node)
-                            logger.debug(f"current node({cur_node.node_id}) get data from databuffer batch size: {batch.size()}")
+                                if self.config.algorithm.filter_groups.enable:
+                                    if cur_node.node_role == NodeRole.ACTOR:
+                                        logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
+                                        return None 
+                                else:
+                                    logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
+                                    return None 
+                            else:
+                                # batch = remove_prefix_from_dataproto(batch, cur_node)
+                                logger.debug(f"current node({cur_node.node_id}) get data from databuffer batch size: {batch.size()}")
                     if self.enable_perf:
                         with timer(self.enable_perf, "get_data_from_buffer_barrier", timing_raw):
                             dist.barrier(self._gather_group)
                     # --- 4. Node Execution ---
                     node_name_timer = f"{cur_node.node_id}"
                     with timer(self.enable_perf, node_name_timer, timing_raw):
-                        if cur_node.executable:
+                        if cur_node.executable and batch is not None:
                             node_kwargs = {"_dag_worker_instance": self}
                             node_kwargs["process_group"] = self._get_node_process_group(cur_node) if cur_node.node_type != NodeType.COMPUTE else None
                             node_kwargs["agent_group"] = self.multi_agent_group[cur_node.agent_group]
@@ -324,27 +333,25 @@ class DAGWorker(Worker):
                                 else:
                                     node_output = NodeOutput(batch=batch)
                             else:
-                                # import time
-                                # start = time.perf_counter()
                                 node_output = cur_node.run(batch=batch,
                                                            config=self.config,
                                                            **node_kwargs)
-                                # end = time.perf_counter()
-                                # print(f"[hujr] rank_{torch.distributed.get_rank()} rollout time {(end - start):.3f}")
-                                # torch.distributed.barrier()
-                                # assert False
                         else:
                             logger.warning(f"Node {cur_node.node_id} has no executable. Passing data through.")
                             node_output = NodeOutput(batch=batch)
                     
                     # Check if node returned empty batch (e.g., DAPO insufficient samples)
                     # This triggers re-rollout to collect more data
-                    if node_output.batch is not None and len(node_output.batch) == 0:
+                    if  node_output.batch is None or (node_output.batch is not None and len(node_output.batch) == 0):
                         logger.warning(
                             f"Rank {self._rank}: Node '{cur_node.node_id}' returned empty batch. "
-                            f"Aborting current step to trigger re-rollout."
                         )
-                        return None
+                        if not self.config.algorithm.filter_groups.enable:
+                            logger.warning(
+                                f"Rank {self._rank}: Node '{cur_node.node_id}' returned empty batch. "
+                                f"Aborting current step to trigger re-rollout. {node_output.batch is not None and len(node_output.batch) != 0}"
+                            )
+                            return None
                     
                     if self.enable_perf:        
                         with timer(self.enable_perf, f"{node_name_timer}_barrier", timing_raw):
@@ -357,28 +364,30 @@ class DAGWorker(Worker):
 
                     # --- 5. Process Output & Get next node ---
                     with timer(self.enable_perf, "graph_output_handling", timing_raw):
-                        if node_output.metrics and cur_tp_rank == 0 and cur_pp_rank == 0:
-                            self.metric_worker.submit_metric(node_output.metrics, cur_dp_size)
-                        if self._rank == 0 and node_output.metrics:
-                            # if self._multi_agent:
-                            #     node_output.metrics = add_prefix_to_metrics(node_output.metrics, cur_node)
-                            ordered_metrics.extend(sorted(node_output.metrics.items()))
                         if next_nodes := self.taskgraph.get_downstream_nodes(cur_node.node_id):
-                            # Currently supports single downstream node, can be extended to a loop.
-                            next_node = next_nodes[0]
-                            next_dp_size, _, _, _, _, _ = self._get_node_dp_info(next_node)
-                            # node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node)
-                            is_current_last_pp_tp_rank0 = (cur_pp_rank == cur_pp_size - 1 and cur_tp_rank == 0)
-                            if whether_put_data(self._rank, is_current_last_pp_tp_rank0, next_dp_size, cur_dp_size, cur_node, next_node):
-                                with timer(self.enable_perf, "put_data_to_buffer", timing_raw):
-                                    # if self._multi_agent and next_node.node_role == NodeRole.ADVANTAGE:
-                                    #     self.multi_agent_put_log(key=next_node.node_id, data=node_output.batch, next_dp_size = next_dp_size, agent_group = next_node.agent_group, timing_raw = timing_raw)
-                                    # else:
-                                    # enforce_buffer = (self._multi_agent) and (cur_node.node_role == NodeRole.ADVANTAGE)
-                                    self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch,  source_dp_size=cur_dp_size, dest_dp_size=next_dp_size, timing_raw=timing_raw)
+                            if node_output.batch is not None and len(node_output.batch) != 0:
+                                if node_output.metrics and cur_tp_rank == 0 and cur_pp_rank == 0:
+                                    self.metric_worker.submit_metric(node_output.metrics, cur_dp_size)
+                                if self._rank == 0 and node_output.metrics:
+                                    # if self._multi_agent:
+                                    #     node_output.metrics = add_prefix_to_metrics(node_output.metrics, cur_node)
+                                    ordered_metrics.extend(sorted(node_output.metrics.items()))
+                                    # Currently supports single downstream node, can be extended to a loop.
+                                next_node = next_nodes[0]
+                                next_dp_size, _, _, _, _, _ = self._get_node_dp_info(next_node)
+                                # node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node)
+                                is_current_last_pp_tp_rank0 = (cur_pp_rank == cur_pp_size - 1 and cur_tp_rank == 0)
+                                if whether_put_data(self._rank, is_current_last_pp_tp_rank0, next_dp_size, cur_dp_size, cur_node, next_node):
+                                    with timer(self.enable_perf, "put_data_to_buffer", timing_raw):
+                                        # if self._multi_agent and next_node.node_role == NodeRole.ADVANTAGE:
+                                        #     self.multi_agent_put_log(key=next_node.node_id, data=node_output.batch, next_dp_size = next_dp_size, agent_group = next_node.agent_group, timing_raw = timing_raw)
+                                        # else:
+                                        # have filter, must use databuffer to rebalance
+                                        enforce_buffer = (self.config.algorithm.filter_groups.enable) and (cur_node.node_type == NodeType.COMPUTE) and (next_node.node_type == NodeType.MODEL_TRAIN) 
+                                        self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch,  source_dp_size=cur_dp_size, dest_dp_size=next_dp_size, enforce_buffer = enforce_buffer, timing_raw=timing_raw)
                         # elif self._multi_agent:
                         #     # last_node add prefix for metrics
-                        #     node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node)
+                        #     node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node)                        
                         if self.enable_perf:
                             with timer(self.enable_perf, "put_data_to_buffer_barrier", timing_raw):
                                 dist.barrier(self._gather_group)
@@ -400,6 +409,7 @@ class DAGWorker(Worker):
             if self._rank == 0:
                 # only use rank0 time metrics
                 self.metric_worker.compute_local_timing_metrics(batch, timing_raw, 1)  
+        timing_raw.clear()
         self.metric_worker.wait_submit()
         dist.barrier(self._gather_group)
         if self._rank == 0:
@@ -419,7 +429,8 @@ class DAGWorker(Worker):
         gen_output = agent_group[NodeRole.ROLLOUT].generate_sequences(batch)
         if "response_mask" not in batch:
             gen_output["response_mask"] = compute_response_mask(gen_output)
-        return NodeOutput(batch=gen_output, metrics=gen_output["metrics"])
+        batch = batch.update(gen_output)
+        return NodeOutput(batch=batch, metrics=gen_output["metrics"])
 
     @DistProfiler.annotate(role="generate")
     def generate_async_mode(self, batch: TensorDict) -> NodeOutput:
@@ -452,9 +463,59 @@ class DAGWorker(Worker):
         return NodeOutput(batch=batch, metrics={})
 
     @DistProfiler.annotate(role="generate")
+    def generate_embodied_mode(self, agent_group, batch: TensorDict, **kwargs) -> NodeOutput:
+        """
+        Generates embodied episodes for training.
+        
+        This method follows the same pattern as _generate_for_embodied_validation in validation_mixin,
+        but configured for training mode (do_sample=True, validate=False).
+        
+        For embodied tasks, the batch contains task metadata (task_id, trial_id, etc.) from the dataloader.
+        The rollout worker interacts with the environment and generates all required data
+        (input_ids, pixel_values, responses, etc.) during environment rollout.
+        
+        Unlike text generation, we do NOT call _prepare_generation_batch because:
+        1. The input batch doesn't have text-generation keys (input_ids, attention_mask, etc.)
+        2. These keys will be generated by the embodied rollout worker during env interaction
+        """
+        from loguru import logger
+        
+        rollout_worker = agent_group[NodeRole.ROLLOUT]
+        
+        # Set meta_info for embodied training
+        batch["eos_token_id"] = NonTensorData(self.validate_tokenizer.eos_token_id if self.validate_tokenizer else None)
+        batch["n_samples"] = NonTensorData(self.config.actor_rollout_ref.rollout.n)
+        batch["pad_token_id"] = NonTensorData(self.validate_tokenizer.pad_token_id if self.validate_tokenizer else None)        
+        logger.info(
+            f"[Embodied Validation] Batch variables: "
+            f"{batch.batch_size[0]}, "
+            f"eos_token_id={batch['eos_token_id']}, "
+            f"pad_token_id={batch['pad_token_id']}, "
+            f"n_samples={batch['n_samples']}, "
+        )
+        # Generate embodied episodes
+        gen_output = rollout_worker.generate_sequences(batch)
+        metrics = gen_output["metrics"]
+        batch.update(gen_output)
+        # Add unique IDs for tracking
+        # Compute response mask if not already present
+        if "response_mask" not in batch:
+            batch["response_mask"] = compute_response_mask(batch)
+        
+        return NodeOutput(batch=batch, metrics=metrics)
+    
+    
+    
+    @DistProfiler.annotate(role="generate")
     def generate(self, config, batch: TensorDict, **kwargs) -> NodeOutput:
         """Generates sequences for a training batch using the rollout model."""
+        # Check if this is embodied mode
         agent_group = kwargs.pop("agent_group")
+        is_embodied = self.config.actor_rollout_ref.model.model_type == "embodied"
+        
+        if is_embodied:
+            # Use dedicated embodied generation path (mirrors validation logic)
+            return self.generate_embodied_mode(agent_group, batch, **kwargs)
         if self._multi_agent is False:
             if self.rollout_mode == 'sync':
                 return self.generate_sync_mode(agent_group, batch)
@@ -1043,6 +1104,7 @@ class DAGWorker(Worker):
         data: TensorDict,
         source_dp_size:int,
         dest_dp_size: int,
+        enforce_buffer: bool,
         timing_raw: Dict[str, float]
     ):
         """
@@ -1052,7 +1114,7 @@ class DAGWorker(Worker):
         try:
             batch_size = len(data) if data is not None else 0
 
-            if source_dp_size == dest_dp_size:
+            if source_dp_size == dest_dp_size and not enforce_buffer:
                 with timer(self.enable_perf, f"put_intern_data_{key}", timing_raw):
                     self.internal_data_cache[key] = data
             else:
@@ -1125,67 +1187,62 @@ class DAGWorker(Worker):
             cur_dp_rank: Current worker's DP rank
             timing_raw: Timing dict for performance tracking
         """
+        with timer(self.enable_perf, f"get_intern_data_{key}", timing_raw):
+            if key in self.internal_data_cache:
+                cached_data = self.internal_data_cache.pop(key)
+                return cached_data
+        def key_filter(sample_info: SampleInfo) -> bool:
+            return sample_info.dict_info.get('key') == key
+
         try:
-            with timer(self.enable_perf, f"get_intern_data_{key}", timing_raw):
-                if key in self.internal_data_cache:
-                    cached_data = self.internal_data_cache.pop(key)
-                    return cached_data
-            def key_filter(sample_info: SampleInfo) -> bool:
-                return sample_info.dict_info.get('key') == key
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
 
+        with timer(self.enable_perf, f"get_samples_from_coordinator_{key}", timing_raw):
             try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-
-            with timer(self.enable_perf, f"get_samples_from_coordinator_{key}", timing_raw):
-                try:
-                    rollout_n = self.config.actor_rollout_ref.rollout.n if hasattr(self.config, 'actor_rollout_ref') else 1
-                except (AttributeError, KeyError):
-                    rollout_n = 1
-                
-                if rollout_n is None or rollout_n < 1:
-                    rollout_n = 1
-                
-                adjusted_batch_size = int(self.config.data.train_batch_size * rollout_n / cur_dp_size)
-                
-                logger.info(
-                    f"Rank {self._rank}: Requesting from DataCoordinator: "
-                    f"key='{key}', cur_dp={cur_dp_size}, "
-                    f"adjusted_batch_size={adjusted_batch_size} (train_bs={self.config.data.train_batch_size} * rollout_n={rollout_n} / cur_dp={cur_dp_size})"
+                rollout_n = self.config.actor_rollout_ref.rollout.n if hasattr(self.config, 'actor_rollout_ref') else 1
+            except (AttributeError, KeyError):
+                rollout_n = 1
+            
+            if rollout_n is None or rollout_n < 1:
+                rollout_n = 1
+            
+            adjusted_batch_size = int(self.config.data.train_batch_size * rollout_n / cur_dp_size)
+            
+            logger.info(
+                f"Rank {self._rank}: Requesting from DataCoordinator: "
+                f"key='{key}', cur_dp={cur_dp_size}, "
+                f"adjusted_batch_size={adjusted_batch_size} (train_bs={self.config.data.train_batch_size} * rollout_n={rollout_n} / cur_dp={cur_dp_size})"
+            )
+            
+            # Use filter_plugin to get only samples with matching key
+            # Use balance_partitions to optimize sample distribution by length
+            sample_refs = loop.run_until_complete(
+                self.data_coordinator.get_batch.remote(
+                    adjusted_batch_size,
+                    filter_plugin=key_filter,
+                    balance_partitions=cur_dp_size
                 )
-                
-                # Use filter_plugin to get only samples with matching key
-                # Use balance_partitions to optimize sample distribution by length
-                sample_refs = loop.run_until_complete(
-                    self.data_coordinator.get_batch.remote(
-                        adjusted_batch_size,
-                        filter_plugin=key_filter,
-                        balance_partitions=cur_dp_size
-                    )
-                )
+            )
 
-            if not sample_refs:
-                logger.warning(f"Rank {self._rank}: ❌ DataCoordinator returned EMPTY list for key '{key}' (adjusted_batch_size={adjusted_batch_size})")
-                return None
-
-            logger.info(f"Rank {self._rank}: ✅ Retrieved {len(sample_refs)} sample references from DataCoordinator for key '{key}'")
-
-            with timer(self.enable_perf, f"ray_get_samples_{key}", timing_raw):
-                samples = ray.get(sample_refs)
-
-            with timer(self.enable_perf, f"collate_samples_{key}", timing_raw):
-                # Collate the list of Sample objects back into a single DataProto
-                tensordict = Samples2Dict(samples)
-
-            return tensordict
-
-        except Exception as e:
-            logger.error(f"Rank {self._rank}: Unexpected error in get_data_from_buffers for key '{key}': {e}", exc_info=True)
+        if not sample_refs:
+            logger.warning(f"Rank {self._rank}: ❌ DataCoordinator returned EMPTY list for key '{key}' (adjusted_batch_size={adjusted_batch_size})")
             return None
 
-    def reset_data_buffer(self, all_keys: List[str]):
+        logger.info(f"Rank {self._rank}: ✅ Retrieved {len(sample_refs)} sample references from DataCoordinator for key '{key}'")
+
+        with timer(self.enable_perf, f"ray_get_samples_{key}", timing_raw):
+            samples = ray.get(sample_refs)
+
+        with timer(self.enable_perf, f"collate_samples_{key}", timing_raw):
+            # Collate the list of Sample objects back into a single DataProto
+            tensordict = Samples2Dict(samples)
+
+        return tensordict
+
+    def reset_data_buffer(self):
         """
         DEPRECATED with DataCoordinator. The get calls are now consuming.
         This can be a no-op, but for safety, we could implement a clear if needed.

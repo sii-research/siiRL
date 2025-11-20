@@ -21,7 +21,7 @@ from collections import defaultdict
 from datetime import datetime
 
 import numpy as np
-from siirl.utils.params import ActorRolloutRefArguments
+from siirl.params import ActorRolloutRefArguments
 import tensorflow as tf
 import torch
 import torch.distributed
@@ -33,17 +33,16 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from transformers import AutoProcessor, GenerationConfig
 
-from siirl.workers.databuffer.protocol import DataProto
 from siirl.utils.model_utils.torch_functional import get_eos_mask
 import siirl.utils.model_utils.torch_functional as siirl_F
-from siirl.workers.rollout.base import BaseRollout
+from siirl.engine.rollout.base import BaseRollout
 from siirl.utils.embodied.video_emb import VideoEmbeddingModel
 
 
 if multiprocessing.get_start_method(allow_none=True) != "spawn":
     multiprocessing.set_start_method("spawn", force=True)
 
-from siirl.workers.environment.embodied import LIBEROAdapter
+from siirl.environment.embodied import LIBEROAdapter
 
 
 __all__ = ['RobHFRollout']
@@ -214,8 +213,8 @@ class EmbodiedHFRollout(BaseRollout):
 
         tic = time.time()
 
-        total_batch_size = prompts.batch.batch_size[0]
-        n_samples = prompts.meta_info.get('n_samples', 1)
+        total_batch_size = prompts.batch_size[0]
+        n_samples = prompts['n_samples'] if 'n_samples' in prompts else 1
         assert self.num_workers >= n_samples, f"rollout num_workers({self.num_workers}) must be >= n_samples({n_samples})"
         batch_size_per_chunk = self.num_workers // n_samples
         num_chunks = (total_batch_size + batch_size_per_chunk - 1) // batch_size_per_chunk
@@ -233,15 +232,15 @@ class EmbodiedHFRollout(BaseRollout):
             chunk_prompts = prompts[start_idx:end_idx]
             
             logger.info(
-                f"--- Processing chunk {i+1}/{num_chunks}, size = {chunk_prompts.batch.batch_size[0]} ---")
+                f"--- Processing chunk {i+1}/{num_chunks}, size = {chunk_prompts.batch_size[0]} ---")
             
             # Process one chunk and get its DataProto output
             chunk_output = self._generate_chunk_rollout(chunk_prompts)
             all_chunk_outputs.append(chunk_output)
 
         # Concatenate the DataProto objects from all chunks
-        final_output = DataProto.concat(all_chunk_outputs)
-        logger.info(f"RobHFRollout.generate_sequences finished for a single batch of size {final_output.batch.batch_size[0]}"
+        final_output = torch.cat(all_chunk_outputs)
+        logger.info(f"RobHFRollout.generate_sequences finished for a single batch of size {final_output.batch_size[0]}"
                     f", took {time.time() - tic:.2f} seconds")
         return final_output
 
@@ -313,18 +312,17 @@ class EmbodiedHFRollout(BaseRollout):
     def _generate_chunk_rollout(self, prompts):
         generate_tic = time.time()
         self.model.eval()
-        meta_info = prompts.meta_info
-        n_samples = meta_info.get('n_samples', 1)
-        task_id = prompts.batch['task_id'].repeat_interleave(n_samples, dim=0)
-        trial_id = prompts.batch['trial_id'].repeat_interleave(n_samples, dim=0)
-        task_suite_name = np.repeat(prompts.non_tensor_batch['task_suite_name'], n_samples)
+        # n_samples = prompts.get('n_samples', 1)
+        task_id = prompts['task_id']
+        trial_id = prompts['trial_id']
+        task_suite_name = prompts['task_suite_name']
         assert np.all(task_suite_name == self.config.embodied.env.env_name), \
             "All task_suite_name in the batch must match the rollout config"
         max_steps = self.config.embodied.env.max_steps
         chunk_size = task_id.size(0)
 
-        is_valid = meta_info.get('n_samples') is None
-        global_steps = meta_info.get('global_steps', 0) if is_valid else 0
+        is_valid = "n_samples" in prompts
+        global_steps = prompts.get('global_steps', 0) if is_valid else 0
 
         timing_dict = {}
 
@@ -362,6 +360,9 @@ class EmbodiedHFRollout(BaseRollout):
 
         step = 0
         vla_history = []
+        meta_info_keys = ["eos_token_id", "pad_token_id", "recompute_log_prob", "validate", "do_sample", "global_steps"]
+        meta_info_keys = [key for key in meta_info_keys if key in prompts.keys()]
+        meta_info = prompts.select(*meta_info_keys)
         while step < max_steps:
             active_indices = [i for i, r in enumerate(task_records) if r['active']]
             current_inputs = inputs
@@ -483,7 +484,7 @@ class EmbodiedHFRollout(BaseRollout):
         output_batch = TensorDict(
             batch,
             batch_size=chunk_size)
-        return DataProto(batch=output_batch)
+        return output_batch
 
     @torch.no_grad()
     def _generate_one_step(self, prompts: dict):

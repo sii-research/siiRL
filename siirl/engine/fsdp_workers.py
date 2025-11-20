@@ -38,7 +38,6 @@ import siirl.utils.model_utils.torch_functional as F
 from siirl import DataProto
 from typing import Any, Dict, List, Optional, Union, Set
 from siirl.models.loader import load_tokenizer
-from siirl.models.transformers.monkey_patch import apply_monkey_patch
 from siirl.engine.base_worker import Worker
 from siirl.execution.scheduler.enums import Role
 from siirl.execution.scheduler.enums import Role

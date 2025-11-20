@@ -23,8 +23,8 @@ from typing import Any, Dict, List, Tuple, Optional
 
 import numpy as np
 
-from siirl.workers.environment.embodied.base import BaseVLAEnvironment
-from siirl.workers.environment.embodied.venv import SubprocVectorEnv
+from siirl.environment.embodied.base import BaseVLAEnvironment
+from siirl.environment.embodied.venv import SubprocVectorEnv
 
 try:
     from libero.libero import benchmark, get_libero_path

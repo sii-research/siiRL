@@ -16,7 +16,7 @@ import os
 import time
 import ray
 
-from siirl.execution.scheduler.enums import AdvantageEstimator, AlgorithmType
+from siirl.execution.scheduler.enums import AdvantageEstimator, AlgorithmType, WorkflowType
 from siirl.execution.scheduler.graph_updater import display_node_config, update_task_graph_node_configs
 from siirl.execution.scheduler.launch import RayTrainer
 from siirl.execution.scheduler.process_group_manager import ProcessGroupManager, log_process_group_manager_details
@@ -24,7 +24,7 @@ from siirl.execution.scheduler.task_scheduler import TaskScheduler, log_schedule
 from siirl.utils.logger.logging_utils import set_basic_config
 from siirl.params import SiiRLArguments, log_dict_formatted, parse_config
 from siirl.execution.dag import TaskGraph
-from siirl.execution.dag.builtin_pipelines import grpo_pipeline, ppo_pipeline, dapo_pipeline
+from siirl.execution.dag.builtin_pipelines import grpo_pipeline, ppo_pipeline, dapo_pipeline, embodied_grpo_pipeline
 from siirl.data_coordinator.data_buffer import init_data_coordinator
 from siirl.execution.metric_worker.metric_worker import MetricWorker
 
@@ -112,19 +112,33 @@ def load_pipeline(siirl_args: SiiRLArguments) -> TaskGraph:
 
     # Select appropriate built-in pipeline
     # Check algorithm_name first for special variants like DAPO (which may have adv_estimator=grpo)
-    if hasattr(siirl_args.algorithm, 'algorithm_name') and siirl_args.algorithm.algorithm_name == AlgorithmType.DAPO.value:
+    workflow = siirl_args.algorithm.workflow_type
+    if workflow == WorkflowType.EMBODIED:
+        # Embodied AI workflows
+        if siirl_args.algorithm.adv_estimator == AdvantageEstimator.GAE:
+            raise ValueError(
+                f"Unsupported adv_estimator '{siirl_args.algorithm.adv_estimator}' for Embodied AI. "
+                f"Use 'gae' for PPO or 'grpo' for GRPO."
+            )
+        elif siirl_args.algorithm.adv_estimator == AdvantageEstimator.GRPO:
+            return embodied_grpo_pipeline()
+        else:
+            raise ValueError(
+                f"Unsupported adv_estimator '{siirl_args.algorithm.adv_estimator}' for Embodied AI. "
+                f"Use 'gae' for PPO or 'grpo' for GRPO."
+            )
+    elif workflow == WorkflowType.DAPO:
         return dapo_pipeline()
-    elif siirl_args.algorithm.adv_estimator == AdvantageEstimator.GRPO:
-        return grpo_pipeline()
-    elif siirl_args.algorithm.adv_estimator == AdvantageEstimator.CPGD:
-        return grpo_pipeline()  # CPGD uses GRPO structure
-    elif siirl_args.algorithm.adv_estimator == AdvantageEstimator.GAE:
-        return ppo_pipeline()
+    elif workflow == WorkflowType.DEFAULT:
+        if siirl_args.algorithm.adv_estimator == AdvantageEstimator.GAE:
+            return ppo_pipeline()
+        else:  # For GRPO, GSPO, etc.
+            return grpo_pipeline()  # CPGD uses GRPO structure
+
     else:
-        raise NotImplementedError(
-            f"No built-in pipeline for algorithm '{siirl_args.algorithm.adv_estimator}'. "
-            f"Please specify dag.custom_pipeline_fn to use a custom pipeline."
-        )
+        raise ValueError(f"Unknown workflow_type: '{workflow}'")
+    
+
 
 
 @ray.remote(num_cpus=MAIN_RUNNER_CPU_RESERVATION)

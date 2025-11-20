@@ -89,20 +89,41 @@ def get_policy_loss_fn(name):
 
 def compute_response_mask(data: TensorDict):
     """Compute the attention mask for the response part of the sequence.
-
-    This function extracts the portion of the attention mask that corresponds to the model's response,
-    which is used for masking computations that should only apply to response tokens.
-
-    Args:
-        data (DataProto): The data containing batched model outputs and inputs.
-
+    
+    Handles both 2D responses (NLP) and 3D responses (Embodied AI).
+    
     Returns:
-        torch.Tensor: The attention mask for the response tokens.
+        torch.Tensor: The attention mask for the response tokens (always 2D).
     """
     responses = data["responses"]
-    response_length = responses.size(1)
     attention_mask = data["attention_mask"]
-    return attention_mask[:, -response_length:]
+    batch_size = responses.size(0)
+    
+    # Handle 3D responses (Embodied AI): (batch_size, traj_len, action_token_len)
+    if responses.ndim == 3:
+        traj_len = responses.size(1)
+        action_token_len = responses.size(2)
+        
+        # Check if attention_mask is also 3D
+        if attention_mask.ndim == 3:
+            # attention_mask: (batch_size, traj_len, tot_pad_len)
+            # Extract response part from last dimension: (batch_size, traj_len, action_token_len)
+            response_mask = attention_mask[:, :, -action_token_len:]
+            # Flatten to 2D: (batch_size, traj_len * action_token_len)
+            response_mask = response_mask.reshape(batch_size, -1)
+        else:
+            # attention_mask is 2D: (batch_size, total_length)
+            # Calculate flattened response_length and slice
+            response_length = traj_len * action_token_len
+            response_mask = attention_mask[:, -response_length:]
+    # Handle 2D responses (NLP): (batch_size, response_length)
+    elif responses.ndim == 2:
+        response_length = responses.size(1)
+        response_mask = attention_mask[:, -response_length:]
+    else:
+        raise ValueError(f"Unexpected responses shape: {responses.shape}, ndim={responses.ndim}")
+    
+    return response_mask
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
 

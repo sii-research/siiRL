@@ -1078,3 +1078,40 @@ def all_gather_data_proto(data: TensorDict, process_group):
     data = data.to(get_device_id())
     data = allgather_dict_tensors(data.contiguous(), size=group_size, group=process_group, dim=0)
     data = data.to(prev_device)
+
+
+def select_idxs(batch: TensorDict, idxs):
+    """
+    Select specific indices from the DataProto.
+
+    Args:
+        batch (TensorDict): data to be select
+        idxs (torch.Tensor or numpy.ndarray or list): Indices to select
+
+    Returns:
+        TensorDict: A new TensorDict containing only the selected indices
+    """
+    if isinstance(idxs, list):
+        idxs = torch.tensor(idxs)
+        if idxs.dtype != torch.bool:
+            idxs = idxs.type(torch.int32)
+
+    if isinstance(idxs, np.ndarray):
+        idxs_np = idxs
+        idxs_torch = torch.from_numpy(idxs)
+    else:  # torch.Tensor
+        idxs_torch = idxs
+        idxs_np = idxs.detach().cpu().numpy()
+
+    batch_size = int(idxs_np.sum()) if idxs_np.dtype == bool else idxs_np.shape[0]
+    filtered_data = {}
+    for key, value in batch.items():
+        if isinstance(value, torch.Tensor):
+            filtered_data[key] = value[idxs_torch]
+        elif isinstance(value, np.ndarray):
+            filtered_data[key] = value[idxs_np]
+        elif isinstance(value, list):
+            filtered_data[key] = np.ndarray(value)[idxs_np]
+        else:
+            filtered_data[key] = value
+    return TensorDict(filtered_data, batch_size=batch_size)
