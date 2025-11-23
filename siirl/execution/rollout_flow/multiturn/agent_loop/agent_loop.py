@@ -193,7 +193,7 @@ class AgentLoopWorker:
         )
 
         # override sampling params for validation
-        if batch.get("validate", False):
+        if getattr(batch.get("validate"), 'data', False):
             sampling_params["top_p"] = config.val_kwargs.top_p
             sampling_params["temperature"] = config.val_kwargs.temperature
 

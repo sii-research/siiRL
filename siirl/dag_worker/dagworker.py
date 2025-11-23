@@ -317,7 +317,7 @@ class DAGWorker(Worker):
                             node_kwargs = {"_dag_worker_instance": self}
                             node_kwargs["process_group"] = self._get_node_process_group(cur_node) if cur_node.node_type != NodeType.COMPUTE else None
                             node_kwargs["agent_group"] = self.multi_agent_group[cur_node.agent_group]
-
+                            node_kwargs["cur_tp_rank"] = cur_tp_rank
                             if cur_node.node_role == NodeRole.REWARD:
                                 node_kwargs["tp_size"] = cur_tp_size
                             elif cur_node.node_role == NodeRole.ADVANTAGE:
@@ -528,7 +528,7 @@ class DAGWorker(Worker):
     def compute_reward(self, config, batch: TensorDict, **kwargs) -> NodeOutput:
         """Calculates rewards for a batch of generated sequences."""
         
-        if not self.check_mode() and self._rank != 0:
+        if not self.check_mode() and kwargs["cur_tp_rank"] != 0:
             return NodeOutput(batch=batch, metrics={})
         
         tp_size = kwargs.pop("tp_size")
@@ -638,7 +638,7 @@ class DAGWorker(Worker):
     def compute_advantage(self, config, batch: TensorDict, **kwargs) -> NodeOutput:
         """Computes advantages and returns for PPO using GAE."""
         
-        if not self.check_mode() and self._rank != 0:
+        if not self.check_mode() and kwargs["cur_tp_rank"] != 0:
             return NodeOutput(batch=batch, metrics={})
         
         if self._multi_agent:
