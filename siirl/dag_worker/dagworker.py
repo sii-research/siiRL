@@ -364,15 +364,11 @@ class DAGWorker(Worker):
 
                     # --- 5. Process Output & Get next node ---
                     with timer(self.enable_perf, "graph_output_handling", timing_raw):
+                        if node_output.metrics and cur_tp_rank == 0 and cur_pp_rank == 0:
+                            self.metric_worker.submit_metric(node_output.metrics, cur_dp_size)
                         if next_nodes := self.taskgraph.get_downstream_nodes(cur_node.node_id):
                             if node_output.batch is not None and len(node_output.batch) != 0:
-                                if node_output.metrics and cur_tp_rank == 0 and cur_pp_rank == 0:
-                                    self.metric_worker.submit_metric(node_output.metrics, cur_dp_size)
-                                if self._rank == 0 and node_output.metrics:
-                                    # if self._multi_agent:
-                                    #     node_output.metrics = add_prefix_to_metrics(node_output.metrics, cur_node)
-                                    ordered_metrics.extend(sorted(node_output.metrics.items()))
-                                    # Currently supports single downstream node, can be extended to a loop.
+                                # Currently supports single downstream node, can be extended to a loop.
                                 next_node = next_nodes[0]
                                 next_dp_size, _, _, _, _, _ = self._get_node_dp_info(next_node)
                                 # node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node)
