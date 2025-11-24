@@ -1,4 +1,3 @@
-
 # Copyright 2025, Shanghai Innovation Institute. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,8 +15,8 @@
 import gymnasium as gym
 import numpy as np
 import torch
-from PIL import Image
-from typing import Any, Dict, Tuple, Optional, List, Callable
+from typing import Any, Dict, Tuple, Optional, List, Union
+import warnings
 
 try:
     import mani_skill.envs
@@ -25,13 +24,6 @@ except ImportError:
     pass
 
 from siirl.workers.environment.embodied.base import BaseVLAEnvironment
-
-
-def _make_env_fn(task_name: str, kwargs: Dict[str, Any]) -> Callable[[], gym.Env]:
-    """Return a callable that constructs a single environment instance (for vectorized envs)."""
-    def _thunk():
-        return gym.make(task_name, **kwargs)
-    return _thunk
 
 
 class ManiSkillAdapter(BaseVLAEnvironment):
@@ -42,9 +34,7 @@ class ManiSkillAdapter(BaseVLAEnvironment):
       - If num_envs == 1, create a single gym environment via gym.make().
       - If num_envs > 1, create a vectorized environment using SyncVectorEnv.
       - Observations are returned in a VLA-friendly format:
-          * pixel_values: torch.FloatTensor normalized to [0,1], CHW
-            - single env: [3,H,W]
-            - vectorized: [N,3,H,W]
+          * pixel_values: torch.FloatTensor normalized to [0,1], NCHW
           * depth (if available): torch.FloatTensor [1,H,W] or [N,1,H,W]
           * text: instruction (string) or list of strings for vectorized case (length N)
           * proprio: numpy array or None; for vectorized, stacked along axis 0 when possible.
@@ -52,31 +42,32 @@ class ManiSkillAdapter(BaseVLAEnvironment):
       - step(action) accepts batched or single actions (torch or numpy).
     """
 
-    def __init__(self, task_name: str, max_episode_steps: int = 100, num_envs: int = 1, **kwargs):
+    def __init__(self, task_name: str, num_envs: int = 1, **kwargs):
         """
         Args:
-          task_name: name of ManiSkill task, e.g., "PickCube-v1".
-          max_episode_steps: maximum steps per episode (passed to superclass if used).
-          num_envs: number of parallel envs. If 1, use gym.make; otherwise build SyncVectorEnv.
-          **kwargs: forwarded to gym.make for each env (e.g., obs_mode, control_mode).
+          task_name: name of ManiSkill task (e.g., "PickCube-v1").
+          num_envs: number of parallel envs.
+          **kwargs: passed to gym.make.
         """
-        super().__init__(task_name, max_episode_steps, **kwargs)
         self.task_name = task_name
         self.num_envs = int(num_envs)
-        self._env_kwargs = dict(obs_mode="rgbd", control_mode="pd_joint_delta_pos", render_mode="rgb_array", **kwargs)
+        self._env_kwargs = dict(
+            obs_mode="rgbd",
+            control_mode="pd_joint_delta_pos",
+            render_mode="rgb_array",
+            **kwargs,
+        )
 
-        if self.num_envs <= 1:
-            # single environment
-            self.env = gym.make(self.task_name, **self._env_kwargs)
-            self.is_vector_env = False
-        else:
-            # vectorized environments: create a list of callables for SyncVectorEnv
-            env_fns = [_make_env_fn(self.task_name, self._env_kwargs) for _ in range(self.num_envs)]
-            # You may switch to AsyncVectorEnv for true async behavior.
-            self.env = gym.vector.SyncVectorEnv(env_fns)
-            self.is_vector_env = True
+        self.env = gym.make(self.task_name, num_envs=self.num_envs, **self._env_kwargs)
+        
+        self.is_vector_env = self.num_envs > 1
+        
+        try:
+            self.device = self.env.get_wrapper_attr("device")
+        except AttributeError:
+            self.device = getattr(self.env.unwrapped, "device", torch.device("cpu"))
 
-        # Text instruction mapping (can be extended / replaced by dataset annotations)
+        # Text instruction mapping
         self.instruction = self._get_task_instruction(task_name)
 
     def _get_task_instruction(self, task_name: str) -> str:
@@ -87,389 +78,177 @@ class ManiSkillAdapter(BaseVLAEnvironment):
         }
         return mapping.get(task_name, "Complete the task.")
 
-    def reset(self) -> Tuple[Dict[str, Any], Any]:
+    def reset(self, **kwargs) -> Tuple[Dict[str, Any], Any]:
         """
-        Reset env(s) and return (processed_obs, infos).
-        - For single env: processed_obs fields have single examples (pixel_values: [3,H,W]).
-        - For vectorized env: processed_obs fields are batched (pixel_values: [N,3,H,W]).
-        - infos follows gymnasium semantics: single info dict or a list of infos for vectorized env.
+        Returns:
+            processed_obs: Dict with tensors on GPU (pixel_values: [N, 3, H, W]).
+            infos: Dict or List[Dict]
         """
-        # Gymnasium: env.reset() returns (obs, info) for both single and vectorized envs
-        obs, infos = self.env.reset()
-        processed = self._process_obs(obs, batch_mode=self.is_vector_env)
+        obs, infos = self.env.reset(**kwargs)
+        processed = self._process_obs(obs)
         return processed, infos
 
-    def step(self, action: Any) -> Tuple[Dict[str, Any], float, bool, bool, Any]:
+    def step(self, action: Any) -> Tuple[Dict[str, Any], torch.Tensor, torch.Tensor, torch.Tensor, Any]:
         """
-        Step the environment(s) with action.
-        Accepts a single action or batched actions:
-          - If vectorized: action should be shape [N, ...] or broadcastable.
-          - action may be torch.Tensor or numpy array.
+        Step with high-performance I/O.
+        
+        Args:
+            action: torch.Tensor [N, ActionDim] on GPU, or numpy array (will be converted).
+            
         Returns:
-          - processed_obs: batched or single observation dict
-          - reward: scalar if single env, or numpy array of shape [N] for vectorized
-          - terminated: bool or array-like
-          - truncated: bool or array-like
-          - infos: info dict or list of dicts
+            All returns are torch.Tensors on the device (except infos).
         """
-        action_np = self._postprocess_action(action, batch_mode=self.is_vector_env)
-        obs, reward, terminated, truncated, infos = self.env.step(action_np)
-        processed = self._process_obs(obs, batch_mode=self.is_vector_env)
-        # Maintain types: reward/terminated/truncated are returned as-is from the vector env
-        return processed, reward, terminated, truncated, infos
+        # Ensure action is a Tensor on the correct device
+        action_tensor = self._postprocess_action(action)
+        
+        # ManiSkill step returns: obs, reward, terminated, truncated, info
+        # All are Tensors except info.
+        obs, reward, terminated, truncated, infos = self.env.step(action_tensor)
+        
+        processed_obs = self._process_obs(obs)
+        
+        return processed_obs, reward, terminated, truncated, infos
 
-    def _postprocess_action(self, action: Any, batch_mode: bool = False) -> np.ndarray:
-        """
-        Convert action (torch or numpy) to numpy array suitable for env.step().
+    def _postprocess_action(self, action: Any) -> torch.Tensor:
+        """Ensures action is a (N, Dim) tensor on the correct device."""
+        if isinstance(action, np.ndarray):
+            action = torch.from_numpy(action)
+        elif isinstance(action, list):
+            action = torch.tensor(action)
+            
+        # Move to device if needed
+        if action.device != self.device:
+            action = action.to(self.device)
 
-        - If env.action_space is Box and actions appear normalized in [-1,1], automatically map to [low, high].
-        - Works for single or batched actions. For vectorized envs, action shapes should be (N, action_dim) or broadcastable.
-        """
-        # Convert torch Tensor to numpy
-        if isinstance(action, torch.Tensor):
-            action = action.detach().cpu().numpy()
-        action = np.asarray(action)
+        # Ensure float32
+        if action.dtype != torch.float32:
+            action = action.float()
 
-        action_space = getattr(self.env, "action_space", None)
-        # For vectorized envs, the action_space is the same for each env; it may still be a Box
-        if hasattr(action_space, "low") and hasattr(action_space, "high"):
-            low = action_space.low
-            high = action_space.high
-            eps = 1e-6
-
-            # Ensure we handle batch dimension: if batch_mode, low/high shape correspond to single env (action_dim,)
-            # Attempt to broadcast action to match expected shape
-            try:
-                # If vectorized and action lacks batch dim, broadcast it
-                if batch_mode:
-                    if action.ndim == 1:
-                        # single action provided -> tile to all envs
-                        action = np.broadcast_to(action, (self.num_envs,) + action.shape).copy()
-                # Attempt to broadcast to low.shape (works when action shape matches)
-                # If low has shape (action_dim,) and action has shape (N, action_dim), this is fine.
-            except Exception:
-                pass
-
-            # Detect normalized [-1,1] actions: all values in [-1-eps, 1+eps]
-            if np.all(action <= 1.0 + eps) and np.all(action >= -1.0 - eps):
-                mid = (high + low) / 2.0
-                half_range = (high - low) / 2.0
-                try:
-                    # If batched: action shape (N, action_dim), mid shape (action_dim,) -> broadcast OK
-                    action = mid + action * half_range
-                except Exception:
-                    # Fall back to elementwise safe mapping
-                    action = np.clip(action, -1.0, 1.0)
-
-            # Clip to bounds
-            action = np.clip(action, low, high)
-
-        # Cast to float32 for most continuous control envs
-        if np.issubdtype(action.dtype, np.floating):
-            action = action.astype(np.float32)
-        else:
-            # convert ints to floats if necessary
-            action = action.astype(np.float32)
-
+        # Handle Broadcasting if necessary (e.g., single action for all envs)
+        # ManiSkill expects [N, Action_Dim]
+        if action.ndim == 1 and self.num_envs > 1:
+            # Broadcast: [Action_Dim] -> [N, Action_Dim]
+            action = action.unsqueeze(0).expand(self.num_envs, -1)
+            
         return action
 
-    def _process_obs(self, obs: Any, batch_mode: bool = False) -> Dict[str, Any]:
+    def _process_obs(self, obs: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Process raw observation(s) into the VLA-friendly format.
-        Supports:
-          - Single observation (np.ndarray, tensor, or dict)
-          - Batched observation returned by vectorized envs (dict of arrays or array with leading dim)
-        Returns:
-          - For single env: pixel_values torch.Tensor [3,H,W]
-          - For vectorized env: pixel_values torch.Tensor [N,3,H,W]
+        Process observations keeping everything on GPU.
+        Expects `obs` to be a dict of Tensors (standard ManiSkill output).
         """
-        if batch_mode:
-            # obs from vectorized env is typically a dict of arrays with leading batch dim
-            return self._process_obs_batch(obs)
-        else:
-            # single observation
-            return self._process_obs_single(obs)
-
-    def _process_obs_single(self, obs: Any) -> Dict[str, Any]:
-        """Process a single observation into pixel_values (torch CHW), depth (optional), text, proprio."""
-        rgb = None
-        depth = None
-        proprio = None
-
-        # Extract rgb/depth/proprio similar to previous robust logic
-        if isinstance(obs, np.ndarray):
-            rgb = obs
-        elif isinstance(obs, torch.Tensor):
-            rgb = obs.cpu().numpy()
-        elif isinstance(obs, dict):
-            # obs['image'] as dict of cameras
-            if "image" in obs and isinstance(obs["image"], dict):
-                cams = obs["image"]
-                preferred = ["base_camera", "hand_camera", "agent_camera", "camera"]
-                for name in preferred:
-                    cam = cams.get(name)
-                    if cam is None:
-                        continue
-                    if isinstance(cam, dict) and "rgb" in cam:
-                        rgb = cam["rgb"]
-                        depth = cam.get("depth", depth)
-                        break
-                    elif isinstance(cam, (np.ndarray, torch.Tensor)):
-                        rgb = cam
-                        break
-                if rgb is None:
-                    for cam_val in cams.values():
-                        if isinstance(cam_val, dict) and "rgb" in cam_val:
-                            rgb = cam_val["rgb"]
-                            depth = cam_val.get("depth", depth)
-                            break
-                        if isinstance(cam_val, (np.ndarray, torch.Tensor)):
-                            rgb = cam_val
-                            break
-
-            # top-level keys
-            if rgb is None:
-                for k in ("rgb", "image_rgb", "visual"):
-                    if k in obs:
-                        rgb = obs[k]
-                        break
-
-            if depth is None:
-                for k in ("depth", "image_depth"):
-                    if k in obs:
-                        depth = obs[k]
-                        break
-
-            # proprio
-            for root in ("agent", "robot", "state", "proprio", "robot_state"):
-                if root in obs and isinstance(obs[root], dict):
-                    qpos = (
-                        obs[root].get("qpos")
-                        or obs[root].get("joint_positions")
-                        or obs[root].get("joint_pos")
-                    )
-                    if qpos is not None:
-                        proprio = np.asarray(qpos, dtype=np.float32)
-                        break
-            if proprio is None:
-                for k in ("qpos", "joint_positions", "joint_pos"):
-                    if k in obs:
-                        proprio = np.asarray(obs[k], dtype=np.float32)
-                        break
-
-        # fallback render
-        if rgb is None:
-            rgb = self.env.render()
-
-        rgb = self._to_numpy(rgb)
-
-        # CHW->HWC if necessary
-        if rgb.ndim == 3 and rgb.shape[0] in (1, 3) and rgb.shape[0] != rgb.shape[2]:
-            rgb = np.transpose(rgb, (1, 2, 0))
-
-        # normalize to float32 [0,1]
-        if rgb.dtype != np.float32:
-            if rgb.max() <= 1.0:
-                rgb = rgb.astype(np.float32)
-            else:
-                rgb = (rgb.astype(np.float32) / 255.0)
-
-        # convert to CHW tensor
-        rgb_chw = torch.from_numpy(rgb).permute(2, 0, 1).contiguous()
-
+        rgb_tensor = None
         depth_tensor = None
-        if depth is not None:
-            depth = self._to_numpy(depth).astype(np.float32)
-            if depth.ndim == 3 and depth.shape[0] == 1:
-                depth = np.squeeze(depth, 0)
-            if depth.ndim == 3 and depth.shape[2] == 1:
-                depth = np.squeeze(depth, 2)
-            depth_tensor = torch.from_numpy(depth).unsqueeze(0)
+        proprio_tensor = None
 
-        processed = {
-            "pixel_values": rgb_chw,
-            "text": self.instruction,
-            "proprio": proprio,
-        }
+        # ManiSkill 3 structure: obs['sensor_data']['<camera_name>']['rgb'] or obs['image']...
+        # We search for the first available RGB sensor.
+        
+        # Helper to find sensor data in nested dicts
+        candidates = [obs]
+        if "sensor_data" in obs: candidates.append(obs["sensor_data"])
+        if "image" in obs: candidates.append(obs["image"])
+        
+        # Preferred camera order
+        cam_names = ["base_camera", "hand_camera", "agent_camera", "camera"]
+        
+        found_cam = False
+        for source in candidates:
+            if found_cam: break
+            # Try preferred names first
+            for name in cam_names:
+                if name in source and isinstance(source[name], dict) and "rgb" in source[name]:
+                    rgb_tensor = source[name]["rgb"] # Shape: [N, H, W, C]
+                    depth_tensor = source[name].get("depth")
+                    found_cam = True
+                    break
+            
+            # If not found, iterate all keys
+            if not found_cam:
+                for k, v in source.items():
+                    if isinstance(v, dict) and "rgb" in v:
+                        rgb_tensor = v["rgb"]
+                        depth_tensor = v.get("depth")
+                        found_cam = True
+                        break
+        
+        # Fallback for flat structure
+        if rgb_tensor is None:
+             if "rgb" in obs: rgb_tensor = obs["rgb"]
+             if "pixel_values" in obs: rgb_tensor = obs["pixel_values"]
+
+        if rgb_tensor is None:
+            # Extreme fallback: render() (Warning: this might be slow if not utilizing GPU render correctly)
+            # In native vectorization, env.render() usually returns a CPU numpy array or list.
+            try:
+                rgb_cpu = self.env.render()
+                if rgb_cpu is not None:
+                    rgb_tensor = torch.tensor(rgb_cpu, device=self.device)
+                else:
+                    raise ValueError("Render returned None")
+            except Exception:
+                raise RuntimeError("Could not find 'rgb' in observation and render() failed.")
+
+        # Expected incoming shape: [N, H, W, C] (ManiSkill standard)
+        # Target shape: [N, C, H, W]
+        
+        # Sanity check for dimensions
+        if rgb_tensor.ndim == 3: 
+            # Case: [H, W, C] (Single env w/o batch dim, rare in native vec but possible)
+            rgb_tensor = rgb_tensor.unsqueeze(0) # -> [1, H, W, C]
+            
+        # Permute: [N, H, W, C] -> [N, C, H, W]
+        if rgb_tensor.shape[-1] == 3:
+            rgb_tensor = rgb_tensor.permute(0, 3, 1, 2)
+            
+        # Normalize: [0, 255] (uint8) -> [0, 1] (float)
+        if rgb_tensor.dtype == torch.uint8:
+            rgb_tensor = rgb_tensor.float() / 255.0
+        elif rgb_tensor.max() > 1.0 + 1e-6: # Add small epsilon for float comparison
+            rgb_tensor = rgb_tensor.float() / 255.0
+            
+        processed_rgb = rgb_tensor.contiguous() # Ensure memory layout is efficient
+
+        processed_depth = None
         if depth_tensor is not None:
-            processed["depth"] = depth_tensor
+            # Expected: [N, H, W, 1] or [N, H, W]
+            if depth_tensor.ndim == 3:
+                depth_tensor = depth_tensor.unsqueeze(-1) # -> [N, H, W, 1]
+            
+            # Permute -> [N, 1, H, W]
+            processed_depth = depth_tensor.permute(0, 3, 1, 2).float().contiguous()
 
-        return processed
+        # ManiSkill: obs['agent']['qpos']
+        agent_data = obs.get("agent")
+        if agent_data is not None:
+            proprio_tensor = agent_data.get("qpos")
+        
+        if proprio_tensor is None:
+             # Try other common keys
+             for k in ["qpos", "joint_positions", "joint_pos"]:
+                 if k in obs:
+                     proprio_tensor = obs[k]
+                     break
+        
+        if proprio_tensor is not None:
+             if proprio_tensor.ndim == 1:
+                 proprio_tensor = proprio_tensor.unsqueeze(0)
+             proprio_tensor = proprio_tensor.float()
 
-    def _process_obs_batch(self, obs: Any) -> Dict[str, Any]:
-        """
-        Process batched observations returned by vectorized envs.
+        # Text is still list of strings (on CPU), as tokenizers usually run on CPU 
+        # or handle lists specifically.
+        texts = [self.instruction] * self.num_envs
 
-        Typical obs forms:
-          - numpy array with leading dim N (image frames)
-          - dict where each value is an array with leading dim N
-        """
-        # If obs is a dict: values are arrays with leading dim N
-        if isinstance(obs, dict):
-            # Try to build per-env single obs and call single-processor to reuse logic
-            # But for efficiency, we'll try to vectorize image conversion.
-            # Primary target: extract rgb batch and depth batch if available.
-            rgb_batch = None
-            depth_batch = None
-            proprio_batch = None
+        result = {
+            "pixel_values": processed_rgb, # torch.Tensor(GPU)
+            "text": texts,                 # List[str]
+            "proprio": proprio_tensor,     # torch.Tensor(GPU)
+        }
+        
+        if processed_depth is not None:
+            result["depth"] = processed_depth
 
-            # 1) obs['image'] case
-            if "image" in obs and isinstance(obs["image"], dict):
-                cams = obs["image"]
-                # Try preferred cameras in order; pick first camera that exists and has rgb
-                for name in ("base_camera", "hand_camera", "agent_camera", "camera"):
-                    cam = cams.get(name)
-                    if cam is None:
-                        continue
-                    # cam could be dict with 'rgb' array
-                    if isinstance(cam, dict) and "rgb" in cam:
-                        rgb_batch = self._to_numpy(cam["rgb"])
-                        if "depth" in cam:
-                            depth_batch = self._to_numpy(cam["depth"])
-                        break
-                    elif isinstance(cam, (np.ndarray, torch.Tensor)):
-                        rgb_batch = self._to_numpy(cam)
-                        break
-                # fallback: try any camera that contains 'rgb'
-                if rgb_batch is None:
-                    for cam_val in cams.values():
-                        if isinstance(cam_val, dict) and "rgb" in cam_val:
-                            rgb_batch = self._to_numpy(cam_val["rgb"])
-                            depth_batch = self._to_numpy(cam_val.get("depth")) if cam_val.get("depth") is not None else None
-                            break
-                        if isinstance(cam_val, (np.ndarray, torch.Tensor)):
-                            rgb_batch = self._to_numpy(cam_val)
-                            break
-
-            # 2) top-level rgb/depth keys
-            if rgb_batch is None:
-                for k in ("rgb", "image_rgb", "visual"):
-                    if k in obs:
-                        rgb_batch = self._to_numpy(obs[k])
-                        break
-
-            if depth_batch is None:
-                for k in ("depth", "image_depth"):
-                    if k in obs:
-                        depth_batch = self._to_numpy(obs[k])
-                        break
-
-            # 3) proprio stacking
-            # attempt to gather per-env proprio vectors into an array [N, ...]
-            proprio_candidates = []
-            for root in ("agent", "robot", "state", "proprio", "robot_state"):
-                if root in obs and isinstance(obs[root], dict):
-                    # obs[root] is dict-of-arrays (batched)
-                    qpos_arr = obs[root].get("qpos") or obs[root].get("joint_positions") or obs[root].get("joint_pos")
-                    if qpos_arr is not None:
-                        try:
-                            proprio_batch = np.asarray(qpos_arr, dtype=np.float32)
-                            break
-                        except Exception:
-                            continue
-            if proprio_batch is None:
-                for k in ("qpos", "joint_positions", "joint_pos"):
-                    if k in obs:
-                        try:
-                            proprio_batch = np.asarray(obs[k], dtype=np.float32)
-                            break
-                        except Exception:
-                            pass
-
-            # If rgb_batch is still None, fallback: env.render() per env is expensive; try single render (may return image for single env)
-            if rgb_batch is None:
-                # Try env.render() which for vector env may return a list/array
-                try:
-                    rgb_batch = self.env.render()
-                except Exception:
-                    raise RuntimeError("Unable to obtain batched RGB frames from vectorized observation or env.render().")
-
-            # rgb_batch should now be ndarray with leading dim N
-            rgb_batch = self._to_numpy(rgb_batch)
-            if rgb_batch.ndim == 4 and rgb_batch.shape[1] in (1, 3) and rgb_batch.shape[1] != rgb_batch.shape[3]:
-                # CHWWB? some shapes may be (N, C, H, W) -> convert to (N, H, W, C)
-                rgb_batch = np.transpose(rgb_batch, (0, 2, 3, 1))
-
-            # Normalize rgb batch to float32 [0,1]
-            if rgb_batch.dtype != np.float32:
-                if rgb_batch.max() <= 1.0:
-                    rgb_batch = rgb_batch.astype(np.float32)
-                else:
-                    rgb_batch = (rgb_batch.astype(np.float32) / 255.0)
-
-            # Convert to torch tensor [N, C, H, W]
-            # Ensure HWC -> CHW per sample
-            if rgb_batch.ndim == 4:
-                # assume (N, H, W, C)
-                rgb_t = torch.from_numpy(rgb_batch).permute(0, 3, 1, 2).contiguous()
-            elif rgb_batch.ndim == 3:
-                # single image repeated? add batch dim
-                rgb_t = torch.from_numpy(rgb_batch).permute(2, 0, 1).unsqueeze(0).contiguous()
-            else:
-                raise RuntimeError(f"Unexpected rgb_batch shape: {rgb_batch.shape}")
-
-            depth_t = None
-            if depth_batch is not None:
-                depth_batch = self._to_numpy(depth_batch).astype(np.float32)
-                # handle shapes like (N,H,W,1) or (N,1,H,W)
-                if depth_batch.ndim == 4 and depth_batch.shape[-1] == 1:
-                    depth_batch = np.squeeze(depth_batch, axis=-1)
-                if depth_batch.ndim == 4 and depth_batch.shape[1] == 1:
-                    depth_batch = np.squeeze(depth_batch, axis=1)
-                # Now expect (N,H,W)
-                if depth_batch.ndim == 3:
-                    depth_t = torch.from_numpy(depth_batch).unsqueeze(1).contiguous()
-                else:
-                    # attempt to reshape
-                    try:
-                        depth_t = torch.from_numpy(depth_batch).unsqueeze(1).contiguous()
-                    except Exception:
-                        depth_t = None
-
-            # Build texts: either a single instruction or replicate per env
-            texts = [self.instruction] * self.num_envs
-
-            # Build output dict
-            processed = {
-                "pixel_values": rgb_t,  # [N,3,H,W]
-                "text": texts,
-                "proprio": proprio_batch,
-            }
-            if depth_t is not None:
-                processed["depth"] = depth_t  # [N,1,H,W]
-
-            return processed
-
-        else:
-            # obs is an ndarray with leading batch dim (N,H,W,C) or (N,C,H,W)
-            rgb_batch = self._to_numpy(obs)
-            if rgb_batch.ndim == 4 and rgb_batch.shape[1] in (1, 3) and rgb_batch.shape[1] != rgb_batch.shape[3]:
-                # (N,C,H,W) -> (N,H,W,C)
-                rgb_batch = np.transpose(rgb_batch, (0, 2, 3, 1))
-
-            if rgb_batch.dtype != np.float32:
-                if rgb_batch.max() <= 1.0:
-                    rgb_batch = rgb_batch.astype(np.float32)
-                else:
-                    rgb_batch = (rgb_batch.astype(np.float32) / 255.0)
-
-            rgb_t = torch.from_numpy(rgb_batch).permute(0, 3, 1, 2).contiguous()
-            processed = {
-                "pixel_values": rgb_t,
-                "text": [self.instruction] * rgb_t.shape[0],
-                "proprio": None,
-            }
-            return processed
-
-    def _to_numpy(self, x):
-        """Convert common image-like types to numpy array."""
-        if isinstance(x, np.ndarray):
-            return x
-        if isinstance(x, torch.Tensor):
-            return x.detach().cpu().numpy()
-        if isinstance(x, Image.Image):
-            return np.array(x)
-        return np.asarray(x)
+        return result
 
     def close(self):
         """Close underlying env(s)."""

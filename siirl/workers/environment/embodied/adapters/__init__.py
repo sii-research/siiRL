@@ -15,5 +15,6 @@
 """Embodied environment adapters."""
 
 from .libero import LIBEROAdapter
+from .maniskill import ManiSkillAdapter
 
-__all__ = ["LIBEROAdapter"]
+__all__ = ["LIBEROAdapter", "ManiSkillAdapter"]

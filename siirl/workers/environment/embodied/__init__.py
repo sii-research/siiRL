@@ -17,9 +17,11 @@
 from .base import BaseVLAEnvironment as BaseEmbodiedEnvironment
 from .venv import SubprocVectorEnv
 from .adapters.libero import LIBEROAdapter
+from .adapters.maniskill import ManiSkillAdapter
 
 __all__ = [
     "BaseEmbodiedEnvironment",
     "LIBEROAdapter",
+    "ManiSkillAdapter",
     "SubprocVectorEnv",
 ]
