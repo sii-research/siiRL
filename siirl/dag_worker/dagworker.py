@@ -1218,6 +1218,7 @@ class DAGWorker(Worker):
             sample_refs = loop.run_until_complete(
                 self.data_coordinator.get_batch.remote(
                     adjusted_batch_size,
+                    cur_dp_rank,
                     filter_plugin=key_filter,
                     balance_partitions=cur_dp_size
                 )

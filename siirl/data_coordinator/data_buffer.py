@@ -251,6 +251,7 @@ class DataCoordinator:
     async def get_batch(
         self, 
         batch_size: int, 
+        dp_rank: int, 
         filter_plugin: Optional[Callable[[SampleInfo], bool]] = None,
         balance_partitions: Optional[int] = None
     ) -> List[ray.ObjectRef]:
@@ -274,7 +275,7 @@ class DataCoordinator:
         async with self.lock:
             # No filter plugin, use efficient FIFO
             if len(self._cache) > 0:
-                res = self._cache.pop()
+                res = self._cache[dp_rank]
                 return res
             if not filter_plugin:
                 if len(self._sample_queue) < batch_size * balance_partitions:
@@ -323,7 +324,7 @@ class DataCoordinator:
                     batch_refs = [item[1] for item in potential_items]
                 for dp_rank in range(balance_partitions):
                     self._cache.append(batch_refs[dp_rank * batch_size: (dp_rank + 1) * batch_size])
-                res = self._cache.pop()
+                res = self._cache[dp_rank]
                 
                 return res
 
