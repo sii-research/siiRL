@@ -25,6 +25,9 @@ extensions = [
 napoleon_google_docstring = True
 napoleon_numpy_docstring = False
 
+# Make autosectionlabel use document name as prefix to avoid duplicate label warnings
+autosectionlabel_prefix_document = True
+
 # The suffix(es) of source filenames.
 # You can specify multiple suffix as a list of string:
 source_suffix = {

@@ -20,6 +20,13 @@ siiRL documentation
    guide
 
 .. toctree::
+   :maxdepth: 2
+   :caption: Code Explained
+
+   code_explained/siiRL_code_explained
+   code_explained/srpo_code_explained
+
+.. toctree::
    :maxdepth: 1
    :caption: Data Preparation
 

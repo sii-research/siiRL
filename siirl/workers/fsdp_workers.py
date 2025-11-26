@@ -1148,7 +1148,7 @@ class ActorRolloutRefWorker(Worker):
         return rollout, None
 
     def init_model(self):
-        from siirl.workers.actor import DataParallelPPOActor, RobDataParallelPPOActor
+        from siirl.workers.actor import DataParallelPPOActor
 
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.external_lib)
@@ -1199,15 +1199,17 @@ class ActorRolloutRefWorker(Worker):
             self.config.actor.use_remove_padding = use_remove_padding
             self.config.actor.use_fused_kernels = use_fused_kernels
             
-            # Pass embodied parameters to Actor for embodied models
+            # Select appropriate Actor class based on model type and pass embodied parameters
             is_embodied_model = self.config.model.model_type == "embodied"
             if is_embodied_model:
                 self.config.actor.embodied_type = self.config.embodied.embodied_type
                 self.config.actor.action_token_len = self.config.embodied.action_token_len
                 self.config.actor.action_chunks_len = self.config.embodied.action_chunks_len
-            
-            # Select appropriate Actor class based on model type
-            ActorClass = RobDataParallelPPOActor if is_embodied_model else DataParallelPPOActor
+                
+                from siirl.workers.actor.embodied_actor import RobDataParallelPPOActor
+                ActorClass = RobDataParallelPPOActor
+            else:
+                ActorClass = DataParallelPPOActor
             
             self.actor = ActorClass(
                 config=self.config.actor,
@@ -1239,15 +1241,17 @@ class ActorRolloutRefWorker(Worker):
             self.config.ref.use_remove_padding = use_remove_padding
             self.config.ref.use_fused_kernels = use_fused_kernels
             
-            # Pass embodied parameters to RefPolicy for embodied models
+            # Pass embodied parameters to RefPolicy for embodied models and select class
             is_embodied_model = self.config.model.model_type == "embodied"
             if is_embodied_model:
                 self.config.ref.embodied_type = self.config.embodied.embodied_type
                 self.config.ref.action_token_len = self.config.embodied.action_token_len
                 self.config.ref.action_chunks_len = self.config.embodied.action_chunks_len
-            
-            # Select appropriate Actor class for reference policy
-            RefPolicyClass = RobDataParallelPPOActor if is_embodied_model else DataParallelPPOActor
+                
+                from siirl.workers.actor.embodied_actor import RobDataParallelPPOActor
+                RefPolicyClass = RobDataParallelPPOActor
+            else:
+                RefPolicyClass = DataParallelPPOActor
             
             self.ref_policy = RefPolicyClass(
                 config=self.config.ref,

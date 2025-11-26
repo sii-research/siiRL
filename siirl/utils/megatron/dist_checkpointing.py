@@ -12,6 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import numpy as np
+
+# Monkey patch np.product to np.prod for compatibility with newer numpy versions
+if not hasattr(np, "product"):
+    np.product = np.prod
+
 from megatron.core import dist_checkpointing, mpu
 from megatron.core.dist_checkpointing.serialization import (
     get_default_load_sharded_strategy,
