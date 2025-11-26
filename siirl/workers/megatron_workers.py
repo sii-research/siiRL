@@ -89,9 +89,7 @@ class ActorRolloutRefWorker(MegatronWorker):
     def __init__(self, config: DictConfig, role: str, process_group=None):
         super().__init__()
         self.config = config
-        if repatch is not None:
-            # NPU MindSpeed patch, will be refactored with MindSpeedEngine.
-            repatch(self.config.actor.megatron.get("override_transformer_config", {}))
+        global_mindspeed_repatch(self.config.actor.megatron.get("override_transformer_config", {}))
         # self.process_group = process_group
 
         # NOTE(sgm): We utilize colocate WorkerGroup by default.
@@ -572,6 +570,7 @@ class CriticWorker(MegatronWorker):
         # To utilize different parallel startegy in different models:
         # 1, users should disable WorkerDict; 2.assign different ResourcePool to different models,
         # 3. and apply the following patch in ray==2.10, https://github.com/ray-project/ray/pull/44385
+        global_mindspeed_repatch(self.config.actor.megatron.get("override_transformer_config", {}))
         if not torch.distributed.is_initialized():
             # Use LOCAL_RANK for device setting, but respect process group for distributed ops
             rank = int(os.environ["LOCAL_RANK"])
@@ -802,6 +801,7 @@ class RewardModelWorker(MegatronWorker):
         # To utilize different parallel startegy in different models:
         # 1, users should disable WorkerDict; 2.assign different ResourcePool to different models,
         # 3. and apply the following patch in ray==2.10, https://github.com/ray-project/ray/pull/44385
+        global_mindspeed_repatch(self.config.actor.megatron.get("override_transformer_config", {}))
         if not torch.distributed.is_initialized():
             rank = int(os.environ["LOCAL_RANK"])
             torch.distributed.init_process_group(backend=get_nccl_backend())
@@ -960,6 +960,20 @@ def global_initialize_model_parallel(config: ActorRolloutRefArguments):
     IS_ACTOR_ROLLOUT_REF_INITIALIZED = True
 
 
+IS_MINDSPEED_REPATCH = False
+
+def global_mindspeed_repatch(config):
+    """
+    Use for Mindspeed repatch global once
+    """
+
+    global IS_MINDSPEED_REPATCH
+    if repatch is not None and not IS_MINDSPEED_REPATCH:
+        # NPU MindSpeed patch, will be refactored with MindSpeedEngine.
+        repatch(config)
+        IS_MINDSPEED_REPATCH = True
+
+
 class ActorWorker(MegatronWorker):
     """
     Dedicated worker for actor training
@@ -971,9 +985,7 @@ class ActorWorker(MegatronWorker):
         assert isinstance(config, ActorRolloutRefArguments), "config of ActorWorker must be ActorRolloutRefArguments"
         super().__init__()
         self.config = config
-        if repatch is not None:
-            # NPU MindSpeed patch, will be refactored with MindSpeedEngine.
-            repatch(self.config.actor.megatron.to_dict().get("override_transformer_config", {}))
+        global_mindspeed_repatch(self.config.actor.megatron.to_dict().get("override_transformer_config", {}))
         global_initialize_model_parallel(self.config)
 
         self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
@@ -1216,6 +1228,7 @@ class RolloutWorker(MegatronWorker):
         assert isinstance(config, ActorRolloutRefArguments), "config of RolloutWorker must be ActorRolloutRefArguments"
         super().__init__()
         self.config = config
+        global_mindspeed_repatch(self.config.actor.megatron.to_dict().get("override_transformer_config", {}))
 
         # normalize rollout config
         global_initialize_model_parallel(self.config)
@@ -1349,9 +1362,7 @@ class ReferenceWorker(MegatronWorker):
         assert isinstance(config, ActorRolloutRefArguments), "config must be ActorRolloutRefArguments"
         super().__init__()
         self.config = config
-        if repatch is not None:
-            # NPU MindSpeed patch, will be refactored with MindSpeedEngine.
-            repatch(self.config.actor.megatron.to_dict().get("override_transformer_config", {}))
+        global_mindspeed_repatch(self.config.actor.megatron.to_dict().get("override_transformer_config", {}))
         global_initialize_model_parallel(self.config)
 
         # normalize ref config
