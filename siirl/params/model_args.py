@@ -180,7 +180,7 @@ class ModelArguments(ProcessorArguments):
         metadata={"help": "The specific model version to use (can be a branch name, tag name or commit id)."},
     )
     trust_remote_code: bool = field(
-        default=True,
+        default=False,
         metadata={"help": "Whether to trust the execution of code from datasets/models defined on the Hub or not."},
     )
     hf_hub_token: Optional[str] = field(
