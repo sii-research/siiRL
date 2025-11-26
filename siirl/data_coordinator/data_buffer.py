@@ -322,8 +322,8 @@ class DataCoordinator:
                     batch_refs = self._apply_length_balancing(potential_items, balance_partitions)
                 else:
                     batch_refs = [item[1] for item in potential_items]
-                for dp_rank in range(balance_partitions):
-                    self._cache.append(batch_refs[dp_rank * batch_size: (dp_rank + 1) * batch_size])
+                for rank in range(balance_partitions):
+                    self._cache.append(batch_refs[rank * batch_size: (rank + 1) * batch_size])
                 res = self._cache[dp_rank]
                 
                 return res
