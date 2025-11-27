@@ -44,7 +44,7 @@ siiRL: Shanghai Innovation Institute RL Framework for Advanced LLMs and Multi-Ag
 
 ## 📰 最新动态
 
-* **[2025/11]**: siiRL 现已支持视觉-语言-动作（VLA）模型训练，基于 [SRPO (Self-Referential Policy Optimization for Vision-Language-Action Models)](https://arxiv.org/pdf/2511.15605) 算法，实现了机器人任务的具身强化学习训练。详细使用方法请参考[文档](/docs/examples/embodied_grpo_example.rst)。
+* **[2025/11]**: siiRL 现已支持视觉-语言-动作（VLA）模型训练，基于 [SRPO (Self-Referential Policy Optimization for Vision-Language-Action Models)](https://arxiv.org/pdf/2511.15605) 算法，实现了机器人任务的具身强化学习训练。详细使用方法请参考[文档](/docs/examples/embodied_srpo_example.rst)。
 
 * **[2025/09]**: siiRL 现已集成 Megatron 训练后端，并支持MoE模型训练。其性能已在 Qwen3-MoE 模型（30B、235B）上得到验证。
 

@@ -27,8 +27,8 @@ Code Architecture Overview
    ├── siirl/
    │   ├── client/
    │   │   ├── config/
-   │   │   │   ├── workflow_embodied_grpo.yaml    # DAG workflow definition
-   │   │   │   └── embodied_grpo_trainer.yaml     # Training configuration
+   │   │   │   ├── workflow_embodied_srpo.yaml    # DAG workflow definition
+   │   │   │   └── embodied_srpo_trainer.yaml     # Training configuration
    │   │   └── main_dag.py                        # Entry point
    │   ├── algorithm/
    │   │   └── embodied/
@@ -50,18 +50,18 @@ Code Architecture Overview
    │       └── embodied/
    │           └── video_emb.py                   # V-JEPA embedding model
    └── examples/
-       └── embodied_grpo_trainer/
+       └── embodied_srpo_trainer/
            └── run_openvla_oft_libero_*.sh        # Training scripts
 
 
 Training Pipeline (DAG Workflow)
 --------------------------------
 
-The SRPO training pipeline is defined in ``workflow_embodied_grpo.yaml``:
+The SRPO training pipeline is defined in ``workflow_embodied_srpo.yaml``:
 
 .. code-block:: yaml
 
-   dag_id: "embodied_grpo_training_pipeline"
+   dag_id: "embodied_srpo_training_pipeline"
    nodes:
      # Step 1: Environment rollout
      - node_id: "rollout_actor"
@@ -723,10 +723,10 @@ Key Configuration Parameters
      - Location
      - Description
    * - ``algorithm.adv_estimator``
-     - ``embodied_grpo_trainer.yaml``
+     - ``embodied_srpo_trainer.yaml``
      - Set to ``grpo`` for SRPO
    * - ``algorithm.workflow_type``
-     - ``embodied_grpo_trainer.yaml``
+     - ``embodied_srpo_trainer.yaml``
      - Set to ``embodied``
    * - ``actor_rollout_ref.rollout.n``
      - Training script
@@ -757,7 +757,7 @@ Quick Reference: File Locations
    * - Training Entry
      - ``siirl/client/main_dag.py``
    * - DAG Workflow
-     - ``siirl/client/config/workflow_embodied_grpo.yaml``
+     - ``siirl/client/config/workflow_embodied_srpo.yaml``
    * - Rollout Dispatcher
      - ``siirl/workers/dag_worker/mixins/node_executors_mixin.py``
    * - **Embodied Rollout**
@@ -775,7 +775,7 @@ Quick Reference: File Locations
    * - VLA Actor
      - ``siirl/workers/actor/embodied_actor.py``
    * - Example Scripts
-     - ``examples/embodied_grpo_trainer/run_openvla_oft_*.sh``
+     - ``examples/embodied_srpo_trainer/run_openvla_oft_*.sh``
 
 
 References
