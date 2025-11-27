@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ===================================================================================
-# ===    Embodied AI GRPO Training with OpenVLA-OFT on LIBERO-SPATIAL             ===
+# ===    Embodied AI GRPO Training with OpenVLA-OFT on LIBERO-OBJECT               ===
 # ===================================================================================
 # 
 
@@ -11,7 +11,7 @@ export SIIRL_DIR="${SIIRL_DIR:your_siirl_path}"
 export PYTHONPATH="$SIIRL_DIR:/root/LIBERO/:your_vjepa2_path:$PYTHONPATH"
 
 # --- Experiment and Model Definition ---
-export DATASET=libero_spatial
+export DATASET=libero_object
 export ALG=grpo
 export MODEL_NAME=openvla-oft-7b
 export MODEL_TYPE=openvla-oft
@@ -20,7 +20,7 @@ export MODEL_TYPE=openvla-oft
 export HOME_PATH=${HOME_PATH:your_home_path}
 export TRAIN_DATA_PATH=$HOME_PATH/datasets/vla-oft/libero/$DATASET/train.parquet
 export TEST_DATA_PATH=$HOME_PATH/datasets/vla-oft/libero/$DATASET/test.parquet
-export MODEL_PATH=$HOME_PATH/models/Sylvest/OpenVLA-AC-PD-1traj-libero-spatial
+export MODEL_PATH=$HOME_PATH/models/Sylvest/OpenVLA-AC-PD-1traj-libero-object
 export VJEPA_MODEL_PATH=$HOME_PATH/models/vjepa2/vitg-384.pt
 
 # Base output paths
@@ -67,7 +67,7 @@ export GRAD_CLIP=1.0
 export IMG_SIZE=384              # actor_rollout_ref.embodied.img_size
 export ENABLE_FP16=True          # actor_rollout_ref.embodied.enable_fp16
 export EMBEDDING_MODEL_OFFLOAD=False  # actor_rollout_ref.embodied.embedding_model_offload
-export CENTER_CROP=True          # ctor_rollout_ref.embodied.center_crop
+export CENTER_CROP=True          # actor_rollout_ref.embodied.center_crop
 export NUM_IMAGES_IN_INPUT=1     
 export NUM_STEPS_WAIT=10           # Environment stabilization steps
 
@@ -101,7 +101,7 @@ export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${ALG}_${DATASET}_${timestamp}
 # --- Define the Training Command ---
 TRAINING_CMD=(
     python3 -m siirl.client.main_dag
-    --config-name=embodied_grpo_trainer
+    --config-name=embodied_srpo_trainer
     
     # Data configuration
     data.train_files=\$TRAIN_DATA_PATH

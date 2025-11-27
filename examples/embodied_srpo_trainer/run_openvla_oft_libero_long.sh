@@ -101,7 +101,7 @@ export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${ALG}_${DATASET}_${timestamp}
 # --- Define the Training Command ---
 TRAINING_CMD=(
     python3 -m siirl.client.main_dag
-    --config-name=embodied_grpo_trainer
+    --config-name=embodied_srpo_trainer
     
     # Data configuration
     data.train_files=\$TRAIN_DATA_PATH

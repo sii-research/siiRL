@@ -21,8 +21,8 @@ siiRL/
 ├── siirl/
 │   ├── client/
 │   │   ├── config/
-│   │   │   ├── workflow_embodied_grpo.yaml    # DAG workflow definition
-│   │   │   └── embodied_grpo_trainer.yaml     # Training configuration
+│   │   │   ├── workflow_embodied_srpo.yaml    # DAG workflow definition
+│   │   │   └── embodied_srpo_trainer.yaml     # Training configuration
 │   │   └── main_dag.py                        # Entry point
 │   ├── algorithm/
 │   │   └── embodied/
@@ -44,16 +44,16 @@ siiRL/
 │       └── embodied/
 │           └── video_emb.py                   # V-JEPA embedding model
 └── examples/
-    └── embodied_grpo_trainer/
+    └── embodied_srpo_trainer/
         └── run_openvla_oft_libero_*.sh        # Training scripts
 ```
 
 ## 3. Training Pipeline (DAG Workflow)
 
-The SRPO training pipeline is defined in `workflow_embodied_grpo.yaml`:
+The SRPO training pipeline is defined in `workflow_embodied_srpo.yaml`:
 
 ```yaml
-dag_id: "embodied_grpo_training_pipeline"
+dag_id: "embodied_srpo_training_pipeline"
 nodes:
   # Step 1: Environment rollout
   - node_id: "rollout_actor"
@@ -712,8 +712,8 @@ def compute_policy_loss_vanilla(...):
 
 | Parameter | Location | Description |
 |-----------|----------|-------------|
-| `algorithm.adv_estimator` | `embodied_grpo_trainer.yaml` | Set to `grpo` for SRPO |
-| `algorithm.workflow_type` | `embodied_grpo_trainer.yaml` | Set to `embodied` |
+| `algorithm.adv_estimator` | `embodied_srpo_trainer.yaml` | Set to `grpo` for SRPO |
+| `algorithm.workflow_type` | `embodied_srpo_trainer.yaml` | Set to `embodied` |
 | `actor_rollout_ref.rollout.n` | Training script | Group size (samples per prompt) |
 | `algorithm.embodied_sampling.filter_accuracy` | Training script | Enable accuracy-based filtering |
 | `algorithm.embodied_sampling.accuracy_lower_bound` | Training script | Min success rate (default: 0.1) |
@@ -725,7 +725,7 @@ def compute_policy_loss_vanilla(...):
 | Component | File Path |
 |-----------|-----------|
 | Training Entry | `siirl/client/main_dag.py` |
-| DAG Workflow | `siirl/client/config/workflow_embodied_grpo.yaml` |
+| DAG Workflow | `siirl/client/config/workflow_embodied_srpo.yaml` |
 | Rollout Dispatcher | `siirl/workers/dag_worker/mixins/node_executors_mixin.py` |
 | **Embodied Rollout** | `siirl/workers/rollout/embodied_rollout.py` |
 | Environment Adapter | `siirl/workers/environment/embodied.py` |
@@ -734,7 +734,7 @@ def compute_policy_loss_vanilla(...):
 | VJEPA Reward | `siirl/utils/reward_score/embodied.py` |
 | GRPO Advantage | `siirl/workers/dag_worker/core_algos.py` |
 | VLA Actor | `siirl/workers/actor/embodied_actor.py` |
-| Example Scripts | `examples/embodied_grpo_trainer/run_openvla_oft_*.sh` |
+| Example Scripts | `examples/embodied_srpo_trainer/run_openvla_oft_*.sh` |
 
 ## References
 

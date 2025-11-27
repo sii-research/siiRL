@@ -51,7 +51,7 @@ def determine_workflow_config(self, siirl_args: SiiRLArguments) -> str:
         if siirl_args.algorithm.adv_estimator == AdvantageEstimator.GAE:
             return os.path.join(current_dir, "config/workflow_embodied_ppo.yaml")
         elif siirl_args.algorithm.adv_estimator == AdvantageEstimator.GRPO:
-            return os.path.join(current_dir, "config/workflow_embodied_grpo.yaml")
+            return os.path.join(current_dir, "config/workflow_embodied_srpo.yaml")
         else:
             raise ValueError(
                 f"Unsupported adv_estimator '{siirl_args.algorithm.adv_estimator}' for Embodied AI. "

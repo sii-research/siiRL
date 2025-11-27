@@ -106,7 +106,7 @@ reward_model:
 
 # Algorithm configuration - Standard GRPO with embodied sampling (aligned with DAPO architecture)
 algorithm:
-  workflow_type: embodied         # Uses workflow_embodied_grpo.yaml
+  workflow_type: embodied         # Uses workflow_embodied_srpo.yaml
   adv_estimator: grpo             # Standard GRPO for embodied tasks
   norm_adv_by_std_in_grpo: true   # Normalize advantages by std in GRPO
   gamma: 1.0

@@ -48,7 +48,7 @@ siiRL documentation
    examples/cpgd_example
    examples/multi_agent
    examples/megatron_backend_example
-   examples/embodied_grpo_example
+   examples/embodied_srpo_example
 
 .. toctree::
    :maxdepth: 1

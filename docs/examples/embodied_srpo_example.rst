@@ -82,9 +82,9 @@ Key Configuration Parameters
 Complete Training Script
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-Below is an example script `run_embodied_grpo.sh` to run GRPO training on `libero_long`.
+Below is an example script `run_embodied_srpo.sh` to run SRPO training on `libero_long`.
 
-**Note**: The siiRL repository provides ready-to-use training scripts for all four LIBERO tasks in the `examples/embodied_grpo_trainer/` directory:
+**Note**: The siiRL repository provides ready-to-use training scripts for all four LIBERO tasks in the `examples/embodied_srpo_trainer/` directory:
 
 -   ``run_openvla_oft_libero_10.sh``
 -   ``run_openvla_oft_libero_goal.sh``
@@ -206,7 +206,7 @@ To train on a specific task, modify the following paths in the script to match y
     # --- Define the Training Command ---
     TRAINING_CMD=(
         python3 -m siirl.client.main_dag
-        --config-name=embodied_grpo_trainer
+        --config-name=embodied_srpo_trainer
         
         # Data configuration
         data.train_files=$TRAIN_DATA_PATH
