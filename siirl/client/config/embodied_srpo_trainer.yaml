@@ -92,23 +92,23 @@ actor_rollout_ref:
     fsdp_config:
       param_offload: false
 
-# Critic configuration - DISABLED for GRPO
+# Critic configuration - DISABLED for SRPO
 critic:
   use_critic_model: false
 
 # Reward model configuration for Embodied AI
 reward_model:
-  enable: false                       # No separate reward model in GRPO
+  enable: false                       # No separate reward model in SRPO
   reward_manager: embodied            # Use EmbodiedRewardManager for validation
   reward_kwargs:                      # Embodied-specific reward kwargs
     action_token_len: 7               # Number of action tokens (must match model)
     reward_coef: 5.0                  # Reward coefficient for scaling
 
-# Algorithm configuration - Standard GRPO with embodied sampling (aligned with DAPO architecture)
+# Algorithm configuration - Standard SRPO with embodied sampling (aligned with DAPO architecture)
 algorithm:
   workflow_type: embodied         # Uses workflow_embodied_srpo.yaml
-  adv_estimator: grpo             # Standard GRPO for embodied tasks
-  norm_adv_by_std_in_grpo: true   # Normalize advantages by std in GRPO
+  adv_estimator: grpo             # Standard SRPO for embodied tasks
+  norm_adv_by_std_in_grpo: true   # Normalize advantages by std in SRPO
   gamma: 1.0
   lam: 1.0
   
@@ -126,7 +126,7 @@ trainer:
     - console
     - tensorboard
   project_name: siirl_embodied_libero_10
-  experiment_name: openvla_oft_grpo_fsdp
+  experiment_name: openvla_oft_srpo_fsdp
   n_gpus_per_node: 8
   nnodes: 1
   save_freq: 4                    
@@ -134,7 +134,7 @@ trainer:
   total_epochs: 1000
   resume_mode: auto
   max_actor_ckpt_to_keep: 5
-  default_local_dir: ckpts/openvla_oft_grpo_fsdp_libero_10
+  default_local_dir: ckpts/openvla_oft_srpo_fsdp_libero_10
   val_before_train: true
   val_only: false
 

@@ -43,7 +43,7 @@ nodes:
     dependencies:
       - "data_rebalance"
 
-  # Step 5: Calculate advantages (GRPO group-based)
+  # Step 5: Calculate advantages (SRPO group-based)
   - node_id: "calculate_advantages"
     node_type: "COMPUTE"
     node_role: "ADVANTAGE"
@@ -65,7 +65,7 @@ nodes:
     dependencies:
       - "actor_old_log_prob"
 
-  # Step 8: Actor training with GRPO
+  # Step 8: Actor training with SRPO
   - node_id: "actor_train"
     node_type: "MODEL_TRAIN"
     node_role: "ACTOR"
