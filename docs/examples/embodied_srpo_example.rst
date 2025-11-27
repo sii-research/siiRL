@@ -1,12 +1,12 @@
-Embodied GRPO Training
+Embodied SRPO Training
 ======================
 
 Introduction
 ------------
 
-This guide explains how to perform Embodied AI training using the GRPO algorithm with OpenVLA-oft models on tasks such as LIBERO. Embodied AI training involves an agent interacting with an environment, where the rewards are often based on task success.
+This guide explains how to perform Embodied AI training using the SRPO algorithm with OpenVLA-oft models on tasks such as LIBERO. Embodied AI training involves an agent interacting with an environment, where the rewards are often based on task success.
 
-This example demonstrates how to perform RL training on an `OpenVLA-oft-7B` model using the GRPO algorithm on the `libero_long` benchmark.
+This example demonstrates how to perform RL training on an `OpenVLA-oft-7B` model using the SRPO algorithm on the `libero_long` benchmark.
 
 Step 1: Prepare the Environment
 -------------------------------
@@ -105,7 +105,7 @@ To train on a specific task, modify the following paths in the script to match y
 
     #!/usr/bin/env bash
     # ===================================================================================
-    # ===    Embodied AI GRPO Training with OpenVLA-OFT on LIBERO-LONG               ===
+    # ===    Embodied AI SRPO Training with OpenVLA-OFT on LIBERO-LONG               ===
     # ===================================================================================
     # 
 
@@ -117,7 +117,7 @@ To train on a specific task, modify the following paths in the script to match y
 
     # --- Experiment and Model Definition ---
     export DATASET=libero_long
-    export ALG=grpo
+    export ALG=srpo
     export MODEL_NAME=openvla-oft-7b
     export MODEL_TYPE=openvla-oft
 
@@ -199,7 +199,7 @@ To train on a specific task, modify the following paths in the script to match y
     timestamp=$(date +%Y%m%d_%H%M%S)
     export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_${NNODES}nodes
     export PROJECT_NAME=siirl_embodied_${DATASET}
-    export EXPERIMENT_NAME=openvla_oft_grpo_fsdp
+    export EXPERIMENT_NAME=openvla_oft_srpo_fsdp
     export TENSORBOARD_DIR=${BASE_TENSORBOARD_PATH}/${MODEL_NAME}_${ALG}_${DATASET}/${timestamp}
     export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${ALG}_${DATASET}_${timestamp}
 
@@ -278,7 +278,7 @@ To train on a specific task, modify the following paths in the script to match y
         actor_rollout_ref.embodied.env.num_trials_per_task=50
         actor_rollout_ref.embodied.env.model_family=openvla
         
-        # Critic configuration (GRPO doesn't use critic)
+        # Critic configuration (SRPO doesn't use critic)
         critic.use_critic_model=False
         
         # Trainer configuration

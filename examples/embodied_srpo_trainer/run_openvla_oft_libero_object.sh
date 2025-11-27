@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ===================================================================================
-# ===    Embodied AI GRPO Training with OpenVLA-OFT on LIBERO-OBJECT               ===
+# ===    Embodied AI SRPO Training with OpenVLA-OFT on LIBERO-OBJECT               ===
 # ===================================================================================
 # 
 
@@ -12,7 +12,7 @@ export PYTHONPATH="$SIIRL_DIR:/root/LIBERO/:your_vjepa2_path:$PYTHONPATH"
 
 # --- Experiment and Model Definition ---
 export DATASET=libero_object
-export ALG=grpo
+export ALG=srpo
 export MODEL_NAME=openvla-oft-7b
 export MODEL_TYPE=openvla-oft
 
@@ -94,7 +94,7 @@ export GLOO_SOCKET_TIMEOUT=600
 timestamp=$(date +%Y%m%d_%H%M%S)
 export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_${NNODES}nodes
 export PROJECT_NAME=siirl_embodied_${DATASET}
-export EXPERIMENT_NAME=openvla_oft_grpo_fsdp
+export EXPERIMENT_NAME=openvla_oft_srpo_fsdp
 export TENSORBOARD_DIR=${BASE_TENSORBOARD_PATH}/${MODEL_NAME}_${ALG}_${DATASET}/${timestamp}
 export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${ALG}_${DATASET}_${timestamp}
 
@@ -180,7 +180,7 @@ TRAINING_CMD=(
     actor_rollout_ref.embodied.env.num_trials_per_task=50
     actor_rollout_ref.embodied.env.model_family=openvla
     
-    # Critic configuration (GRPO doesn't use critic)
+    # Critic configuration (SRPO doesn't use critic)
     critic.use_critic_model=False
     
     # Trainer configuration
