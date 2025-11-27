@@ -782,5 +782,5 @@ References
 ----------
 
 1. SRPO Paper: `Self-Referential Policy Optimization for Vision-Language-Action Models <https://arxiv.org/pdf/2511.15605>`_
-2. V-JEPA: `V-JEPA: Latent Video Prediction for Visual Representation Learning <https://ai.meta.com/research/publications/v-jepa-latent-video-prediction-for-visual-representation-learning/>`_
+2. V-JEPA: `Video Joint Embedding Predictive Architecture 2 <https://ai.meta.com/vjepa/>`_
 
