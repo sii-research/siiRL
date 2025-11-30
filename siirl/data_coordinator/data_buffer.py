@@ -15,7 +15,7 @@
 import asyncio
 from typing import Dict, List, Optional, Tuple, Callable, Any
 import heapq
-
+import random
 import ray
 import loguru
 import time
@@ -23,114 +23,152 @@ from collections import deque
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from siirl.data_coordinator.sample import SampleInfo
 
+def chunk(lst, size):
+    return [lst[i:i+size] for i in range(0, len(lst), size)]
 
-def get_seqlen_balanced_partitions_constrained_lpt(seqlen_list: List[int], k_partitions: int) -> List[List[int]]:
-    """Partitions items into k subsets of equal item count with balanced sums.
+def karmarkar_karp(seqlen_list: List[int], k_partitions: int, equal_size: bool):
+    # see: https://en.wikipedia.org/wiki/Largest_differencing_method
+    class Set:
+        def __init__(self) -> None:
+            self.sum = 0
+            self.items = []
 
-    This function implements a constrained version of the LPT (Longest
-    Processing Time) heuristic. It strictly adheres to the constraint that each
-    partition must have a nearly equal number of items, and then uses the LPT
-    principle to balance the sum of sequence lengths within that constraint.
-    This is the recommended approach when a fixed number of items per worker
-    is a hard requirement.
+        def add(self, idx: int, val: int):
+            self.items.append((idx, val))
+            self.sum += val
 
-    Args:
-        seqlen_list: A list of integers representing the "size" of each item.
-        k_partitions: The desired number of partitions.
+        def merge(self, other):
+            for idx, val in other.items:
+                self.items.append((idx, val))
+                self.sum += val
 
-    Returns:
-        A list of lists, where each inner list contains the original indices
-        of the items assigned to that partition. Each list will have a size of
-        len(seqlen_list) // k or len(seqlen_list) // k + 1.
-    """
-    if k_partitions <= 0:
-        raise ValueError("Number of partitions (k_partitions) must be positive.")
-    num_items = len(seqlen_list)
-    
-    # Ensure the data size is perfectly divisible.
-    # If this fails, it indicates an unexpected issue in the data pipeline.
-    if num_items % k_partitions != 0:
-        loguru.logger.warning(
-            f"Data size ({num_items}) is not evenly divisible by the number of partitions ({k_partitions}). "
-            f"This may lead to uneven partition sizes."
-        )
-    
-    # 1. Sort items by length in descending order, preserving original indices.
-    indexed_lengths = sorted(enumerate(seqlen_list), key=lambda x: x[1], reverse=True)
-    
-    # 2. Determine the target number of items for each partition.
-    base_size = num_items // k_partitions
-    rem = num_items % k_partitions
-    partition_target_sizes = [base_size + 1] * rem + [base_size] * (k_partitions - rem)
-    
-    # 3. Initialize partitions and a min-heap to track partition sums.
-    #    The heap stores tuples of (current_sum, partition_index).
-    partitions = [[] for _ in range(k_partitions)]
-    partition_heap = [(0, i) for i in range(k_partitions)]
-    heapq.heapify(partition_heap)
-    
-    # 4. Iterate through sorted items and assign each to a non-full partition
-    #    with the smallest current sum.
-    for original_idx, length in indexed_lengths:
-        # Find the smallest, non-full partition.
-        # Pop from the heap until we find a partition that is not yet full.
-        while True:
-            smallest_sum, smallest_idx = heapq.heappop(partition_heap)
-            
-            # Check if the selected partition is already full.
-            if len(partitions[smallest_idx]) < partition_target_sizes[smallest_idx]:
-                # This partition is not full, so we can assign the item.
-                partitions[smallest_idx].append(original_idx)
-                new_sum = smallest_sum + length
-                
-                # If the partition is still not full after adding, push it back.
-                if len(partitions[smallest_idx]) < partition_target_sizes[smallest_idx]:
-                    heapq.heappush(partition_heap, (new_sum, smallest_idx))
-                break
-    
+        def __lt__(self, other):
+            if self.sum != other.sum:
+                return self.sum < other.sum
+            if len(self.items) != len(other.items):
+                return len(self.items) < len(other.items)
+            return self.items < other.items
+
+    class State:
+        def __init__(self, items: List[Tuple[int, int]], k: int) -> None:
+            self.k = k
+            # sets should always be decreasing order
+            self.sets = [Set() for _ in range(k)]
+            assert len(items) in [1, k], f"{len(items)} not in [1, {k}]"
+            for i, (idx, seqlen) in enumerate(items):
+                self.sets[i].add(idx=idx, val=seqlen)
+            self.sets = sorted(self.sets, reverse=True)
+
+        def get_partitions(self):
+            partitions = []
+            for i in range(len(self.sets)):
+                cur_partition = []
+                for idx, _ in self.sets[i].items:
+                    cur_partition.append(idx)
+                partitions.append(cur_partition)
+            return partitions
+
+        def merge(self, other):
+            for i in range(self.k):
+                self.sets[i].merge(other.sets[self.k - 1 - i])
+            self.sets = sorted(self.sets, reverse=True)
+
+        @property
+        def spread(self) -> int:
+            return self.sets[0].sum - self.sets[-1].sum
+
+        def __lt__(self, other):
+            # least heap, let the state with largest spread to be popped first,
+            # if the spread is the same, let the state who has the largest set
+            # to be popped first.
+            if self.spread != other.spread:
+                return self.spread > other.spread
+            return self.sets[0] > other.sets[0]
+
+        def __repr__(self) -> str:
+            repr_str = "["
+            for i in range(self.k):
+                if i > 0:
+                    repr_str += ","
+                repr_str += "{"
+                for j, (_, seqlen) in enumerate(self.sets[i].items):
+                    if j > 0:
+                        repr_str += ","
+                    repr_str += str(seqlen)
+                repr_str += "}"
+            repr_str += "]"
+            return repr_str
+
+    sorted_seqlen_list = sorted([(seqlen, i) for i, seqlen in enumerate(seqlen_list)])
+    states_pq = []
+    if equal_size:
+        assert len(seqlen_list) % k_partitions == 0, f"{len(seqlen_list)} % {k_partitions} != 0"
+        for offset in range(0, len(sorted_seqlen_list), k_partitions):
+            items = []
+            for i in range(k_partitions):
+                seqlen, idx = sorted_seqlen_list[offset + i]
+                items.append((idx, seqlen))
+            heapq.heappush(states_pq, State(items=items, k=k_partitions))
+    else:
+        for seqlen, idx in sorted_seqlen_list:
+            heapq.heappush(states_pq, State(items=[(idx, seqlen)], k=k_partitions))
+
+    while len(states_pq) > 1:
+        state0 = heapq.heappop(states_pq)
+        state1 = heapq.heappop(states_pq)
+        # merge states
+        state0.merge(state1)
+        heapq.heappush(states_pq, state0)
+
+    final_state = states_pq[0]
+    partitions = final_state.get_partitions()
+    if equal_size:
+        for i, partition in enumerate(partitions):
+            assert len(partition) * k_partitions == len(seqlen_list), f"{len(partition)} * {k_partitions} != {len(seqlen_list)}"
     return partitions
 
-
-@ray.remote
-class DataBuffer:
+def get_seqlen_balanced_partitions(seqlen_list: List[int], k_partitions: int, equal_size: bool):
     """
-    A lightweight, distributed Actor, with each instance typically located on a physical node.
-    Its sole responsibility is to hold object references (ObjectRef) of samples created by
-    RolloutWorkers via `ray.put` on the local node, to prevent them from being prematurely
-    garbage collected by Ray's GC.
+    Calculates partitions of indices from seqlen_list such that the sum of sequence lengths
+    in each partition is balanced. Uses the Karmarkar-Karp differencing method.
+
+    This is useful for balancing workload across devices or batches, especially when
+    dealing with variable sequence lengths.
+
+    Args:
+        seqlen_list (List[int]): A list of sequence lengths for each item.
+        k_partitions (int): The desired number of partitions.
+        equal_size (bool): If True, ensures that each partition has the same number of items.
+                           Requires len(seqlen_list) to be divisible by k_partitions.
+                           If False, partitions can have varying numbers of items, focusing
+                           only on balancing the sum of sequence lengths.
+
+    Returns:
+        List[List[int]]: A list containing k_partitions lists. Each inner list contains the
+                         original indices of the items assigned to that partition. The indices
+                         within each partition list are sorted.
+
+    Raises:
+        AssertionError: If len(seqlen_list) < k_partitions.
+        AssertionError: If equal_size is True and len(seqlen_list) is not divisible by k_partitions.
+        AssertionError: If any resulting partition is empty.
     """
-    def __init__(self, buffer_id: int):
-        self.buffer_id = buffer_id
-        # Stores only ObjectRefs, not the actual data
-        self._ref_store: List[ray.ObjectRef] = []
-        loguru.logger.info(f"DataBuffer (ID: {self.buffer_id}) initialized on node {ray.get_runtime_context().get_node_id()}.")
+    assert len(seqlen_list) >= k_partitions, f"number of items:[{len(seqlen_list)}] < k_partitions:[{k_partitions}]"
 
-    def put_ref(self, sample_ref: ray.ObjectRef):
-        """Receives and holds the ObjectRef of a sample."""
-        self._ref_store.append(sample_ref)
+    def _check_and_sort_partitions(partitions):
+        assert len(partitions) == k_partitions, f"{len(partitions)} != {k_partitions}"
+        seen_idx = set()
+        sorted_partitions = [None] * k_partitions
+        for i, partition in enumerate(partitions):
+            assert len(partition) > 0, f"the {i}-th partition is empty"
+            for idx in partition:
+                seen_idx.add(idx)
+            sorted_partitions[i] = sorted(partition)
+        assert seen_idx == set(range(len(seqlen_list)))
+        return sorted_partitions
 
-    def put_refs(self, sample_refs: List[ray.ObjectRef]):
-        """Receives and holds a list of ObjectRefs."""
-        self._ref_store.extend(sample_refs)
-
-    def get_ref_count(self) -> int:
-        """Returns the current number of held references."""
-        return len(self._ref_store)
-    
-    def clear(self):
-        """Clears all stored references."""
-        self._ref_store.clear()
-        # Note: After clearing this list, if the corresponding references are also
-        # removed from the DataCoordinator, Ray GC will be able to reclaim the
-        # memory occupied by these objects.
-
-    def __repr__(self) -> str:
-        return f"<DataBuffer(id={self.buffer_id}, stored_ref_count={len(self._ref_store)})>"
-
-    def get_node_id(self) -> str:
-        """Returns the node ID where the current actor is located."""
-        return ray.get_runtime_context().get_node_id()
-
+    partitions = karmarkar_karp(seqlen_list=seqlen_list, k_partitions=k_partitions, equal_size=equal_size)
+    return _check_and_sort_partitions(partitions)
 
 @ray.remote
 class DataCoordinator:
@@ -140,24 +178,15 @@ class DataCoordinator:
     metadata (SampleInfo) and object references (ObjectRef). This allows it to implement
     complex global sampling strategies at a very low cost.
     """
-    def __init__(self):
+    def __init__(self, nnodes:int):
+        self.nnodes = nnodes
         # Use a deque to store tuples of metadata and references for efficient FIFO operations
         self._sample_queue: deque[Tuple[SampleInfo, ray.ObjectRef]] = deque()
-        # A map from node_id to a list of DataBuffer actor handles
-        self._buffer_map: Dict[str, List[ray.actor.ActorHandle]] = {}
         self._put_counter = 0  # Used for round-robin buffer selection
         self.lock = asyncio.Lock()
         loguru.logger.info("Global DataCoordinator initialized.")
         self._cache = []
-    def register_buffers(self, buffer_info: Dict[str, List[ray.actor.ActorHandle]]):
-        """
-        Called by the initialization logic to register all DataBuffers and their
-        corresponding node IDs.
-        """
-        self._buffer_map = buffer_info
-        for node_id, buffers in self._buffer_map.items():
-            loguru.logger.info(f"Registered {len(buffers)} DataBuffers for node {node_id}.")
-
+        
     async def put(self, sample_info: SampleInfo, sample_ref: Any, caller_node_id: Optional[str] = None):
         """
         Called by a RolloutWorker to register a new sample reference and its metadata.
@@ -191,16 +220,6 @@ class DataCoordinator:
         #    Only inject if node_id has not been manually set, to facilitate testing.
         if sample_info.node_id is None:
             sample_info.node_id = caller_node_id
-        
-        # 3. Find the list of DataBuffers on the corresponding node and delegate the ref holding
-        local_buffers = self._buffer_map.get(caller_node_id)
-        if local_buffers:
-            # Use round-robin to distribute references evenly among the buffers on the node
-            buffer_to_use = local_buffers[self._put_counter % len(local_buffers)]
-            buffer_to_use.put_ref.remote(sample_ref)
-            self._put_counter += 1
-        else:
-            loguru.logger.warning(f"No DataBuffer found for node {caller_node_id}. The sample reference will not be held, which may lead to premature garbage collection.")
 
         # 4. Register the metadata and reference to the global queue
         async with self.lock:
@@ -237,14 +256,6 @@ class DataCoordinator:
             if sample_infos[i].node_id is None:
                 sample_infos[i].node_id = caller_node_id
         
-        local_buffers = self._buffer_map.get(caller_node_id)
-        if local_buffers:
-            buffer_to_use = local_buffers[self._put_counter % len(local_buffers)]
-            buffer_to_use.put_refs.remote(sample_refs)
-            self._put_counter += 1
-        else:
-            loguru.logger.warning(f"No DataBuffer found for node {caller_node_id}. The sample reference will not be held, which may lead to premature garbage collection.")
-
         async with self.lock:
             self._sample_queue.extend(zip(sample_infos, sample_refs))
 
@@ -353,7 +364,7 @@ class DataCoordinator:
         
         try:
             # Use the LPT algorithm to calculate the optimal partitions.
-            partitions = get_seqlen_balanced_partitions_constrained_lpt(seqlen_list, k_partitions)
+            partitions = get_seqlen_balanced_partitions(seqlen_list, k_partitions)
             
             # Reorder the samples based on the partitioning result.
             # Concatenate the partitions in order: [all samples from partition_0, all from partition_1, ...]
@@ -433,7 +444,7 @@ class DataCoordinator:
 # Initialization Logic
 # ====================================================================
 
-def init_data_coordinator(num_buffers: int, force_local: bool = False) -> ray.actor.ActorHandle:
+def init_data_coordinator(num_buffers: int) -> ray.actor.ActorHandle:
     """
     Initializes the data coordination system, which includes a global DataCoordinator
     and multiple distributed DataBuffers. Returns a single, unified DataCoordinator
@@ -459,76 +470,6 @@ def init_data_coordinator(num_buffers: int, force_local: bool = False) -> ray.ac
         loguru.logger.info(f"Connected to existing DataCoordinator actor '{coordinator_name}'.")
     except ValueError:
         loguru.logger.info(f"Creating new DataCoordinator actor with global name '{coordinator_name}'.")
-        coordinator = DataCoordinator.options(name=coordinator_name, lifetime="detached").remote()
-
-    if force_local:
-        # --- Local testing mode ---
-        loguru.logger.warning("force_local=True. Creating all DataBuffers on the local node for testing purposes.")
-        data_buffers = [DataBuffer.remote(buffer_id=i) for i in range(num_buffers)]
-        # In local mode, all buffers are on the same node, so put them all in one list
-        local_node_id = ray.get_runtime_context().get_node_id()
-        buffer_info = {local_node_id: data_buffers}
-    else:
-        # --- Distributed deployment mode ---
-        # 2. Wait for and create the distributed DataBuffers
-        wait_timeout = 300  # seconds
-        poll_interval = 2  # seconds
-        start_time = time.time()
-        
-        loguru.logger.debug(f"Waiting for at least {num_buffers} nodes to be available for DataBuffers (timeout: {wait_timeout}s).")
-        alive_nodes = []
-        while time.time() - start_time < wait_timeout:
-            alive_nodes = [node for node in ray.nodes() if node.get("Alive", False)]
-            if len(alive_nodes) >= num_buffers:
-                loguru.logger.success(f"Found {len(alive_nodes)} nodes. Proceeding to create {num_buffers} DataBuffers.")
-                break
-            loguru.logger.warning(f"Waiting for more nodes... Available: {len(alive_nodes)}/{num_buffers}. Retrying in {poll_interval}s.")
-            time.sleep(poll_interval)
-        else: # This else belongs to the while loop, it executes if the loop finishes without break
-            alive_nodes = [node for node in ray.nodes() if node.get("Alive", False)]
-            raise TimeoutError(f"Timed out after {wait_timeout}s. Cannot create {num_buffers} buffers on {len(alive_nodes)} available nodes.")
-
-        # 3. Explicitly create one DataBuffer per node to ensure proper distribution
-        # Use NodeAffinitySchedulingStrategy to pin each buffer to a specific node
-        data_buffers = []
-        buffer_info: Dict[str, List[ray.actor.ActorHandle]] = {}
-        
-        for i in range(num_buffers):
-            # Select a node in round-robin fashion
-            target_node = alive_nodes[i % len(alive_nodes)]
-            node_id = target_node.get("NodeID")
-            
-            # Create buffer with explicit node affinity scheduling
-            scheduling_strategy = NodeAffinitySchedulingStrategy(
-                node_id=node_id,
-                soft=False  # Hard constraint: must be on this node
-            )
-            buffer = DataBuffer.options(
-                scheduling_strategy=scheduling_strategy
-            ).remote(buffer_id=i)
-            data_buffers.append(buffer)
-            
-            loguru.logger.debug(f"Created DataBuffer {i} targeting node {node_id[:8]}...")
-        
-        # Get the actual node ID for each buffer to verify placement
-        buffer_nodes = ray.get([b.get_node_id.remote() for b in data_buffers])
-        
-        # Group buffers by their actual node
-        for node_id, buffer in zip(buffer_nodes, data_buffers):
-            if node_id not in buffer_info:
-                buffer_info[node_id] = []
-            buffer_info[node_id].append(buffer)
-        
-        # Log the distribution
-        loguru.logger.info(f"DataBuffer distribution across {len(buffer_info)} nodes:")
-        for node_id, buffers in buffer_info.items():
-            loguru.logger.info(f"  Node {node_id[:16]}...: {len(buffers)} buffer(s)")
-    
-    # 4. Register all DataBuffers with the Coordinator
-    # Use ray.get to wait for registration to complete, ensuring the map is
-    # populated for subsequent operations
-    ray.get(coordinator.register_buffers.remote(buffer_info))
-
-    loguru.logger.success(f"Successfully created and registered {len(data_buffers)} DataBuffer actors.")
-    
+        coordinator = DataCoordinator.options(name=coordinator_name, lifetime="detached").remote(nnodes=num_buffers)
+   
     return coordinator

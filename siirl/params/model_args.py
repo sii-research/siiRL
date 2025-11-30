@@ -470,7 +470,7 @@ class RolloutArguments:
     log_prob_use_dynamic_bsz: bool = field(default=False, metadata={"help": "Dynamic log prob batch size"})
     disable_log_stats: bool = field(default=True, metadata={"help": "Whether or not disable log stats"})
     enable_chunked_prefill: bool = field(default=True, metadata={"help": "Whether or not enable chunked prefill"})
-    trust_remote_code: bool = field(default=False, metadata={"help": "trust the code or not."})
+    trust_remote_code: bool = field(default=True, metadata={"help": "trust the code or not."})
     val_kwargs: EvalSamplingArguments = field(default_factory=EvalSamplingArguments)
     layer_name_map: LayerNameMapArguments = field(default_factory=LayerNameMapArguments)
     seed: int = field(default=0, metadata={"help": "The random seed"})
@@ -641,7 +641,7 @@ class KLCtrlArguments:
     type: str = field(default="fixed", metadata={"help": "Type of KL Ctrl, fixed or adaptive"})
     kl_coef: float = field(default=0.001, metadata={"help": "Coef of KL"})
     target_kl: Optional[float] = field(default=0.1, metadata={"help": "Target KL value"})
-    horizon: Optional[float] = field(default=1000, metadata={"help": "Horizon of KL"})
+    horizon: Optional[float] = field(default=10000, metadata={"help": "Horizon of KL"})
 
 
 @dataclass
