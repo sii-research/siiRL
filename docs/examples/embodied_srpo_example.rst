@@ -38,7 +38,11 @@ You need the following models:
 
 2.  **Visual Encoder**: A visual encoder model V-JEPA is **required** for processing visual observations.
 
-    - You can find the V-JEPA 2 model and instructions at: `https://github.com/facebookresearch/vjepa2 <https://github.com/facebookresearch/vjepa2>`_
+    - Download the V-JEPA 2 model from Hugging Face: `Sylvest/vjepa2-vit-g <https://huggingface.co/Sylvest/vjepa2-vit-g>`_
+    
+      .. code:: bash
+
+         huggingface-cli download Sylvest/vjepa2-vit-g --local-dir $HOME/models/vjepa2
 
 Set the paths to these resources in your environment or script:
 
