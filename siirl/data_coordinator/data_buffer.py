@@ -23,8 +23,74 @@ from collections import deque
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from siirl.data_coordinator.sample import SampleInfo
 
-def chunk(lst, size):
-    return [lst[i:i+size] for i in range(0, len(lst), size)]
+
+
+
+def get_seqlen_balanced_partitions_constrained_lpt(seqlen_list: List[int], k_partitions: int) -> List[List[int]]:
+    """Partitions items into k subsets of equal item count with balanced sums.
+
+    This function implements a constrained version of the LPT (Longest
+    Processing Time) heuristic. It strictly adheres to the constraint that each
+    partition must have a nearly equal number of items, and then uses the LPT
+    principle to balance the sum of sequence lengths within that constraint.
+    This is the recommended approach when a fixed number of items per worker
+    is a hard requirement.
+
+    Args:
+        seqlen_list: A list of integers representing the "size" of each item.
+        k_partitions: The desired number of partitions.
+
+    Returns:
+        A list of lists, where each inner list contains the original indices
+        of the items assigned to that partition. Each list will have a size of
+        len(seqlen_list) // k or len(seqlen_list) // k + 1.
+    """
+    if k_partitions <= 0:
+        raise ValueError("Number of partitions (k_partitions) must be positive.")
+    num_items = len(seqlen_list)
+    
+    # Ensure the data size is perfectly divisible.
+    # If this fails, it indicates an unexpected issue in the data pipeline.
+    if num_items % k_partitions != 0:
+        loguru.logger.warning(
+            f"Data size ({num_items}) is not evenly divisible by the number of partitions ({k_partitions}). "
+            f"This may lead to uneven partition sizes."
+        )
+    
+    # 1. Sort items by length in descending order, preserving original indices.
+    indexed_lengths = sorted(enumerate(seqlen_list), key=lambda x: x[1], reverse=True)
+    
+    # 2. Determine the target number of items for each partition.
+    base_size = num_items // k_partitions
+    rem = num_items % k_partitions
+    partition_target_sizes = [base_size + 1] * rem + [base_size] * (k_partitions - rem)
+    
+    # 3. Initialize partitions and a min-heap to track partition sums.
+    #    The heap stores tuples of (current_sum, partition_index).
+    partitions = [[] for _ in range(k_partitions)]
+    partition_heap = [(0, i) for i in range(k_partitions)]
+    heapq.heapify(partition_heap)
+    
+    # 4. Iterate through sorted items and assign each to a non-full partition
+    #    with the smallest current sum.
+    for original_idx, length in indexed_lengths:
+        # Find the smallest, non-full partition.
+        # Pop from the heap until we find a partition that is not yet full.
+        while True:
+            smallest_sum, smallest_idx = heapq.heappop(partition_heap)
+            
+            # Check if the selected partition is already full.
+            if len(partitions[smallest_idx]) < partition_target_sizes[smallest_idx]:
+                # This partition is not full, so we can assign the item.
+                partitions[smallest_idx].append(original_idx)
+                new_sum = smallest_sum + length
+                
+                # If the partition is still not full after adding, push it back.
+                if len(partitions[smallest_idx]) < partition_target_sizes[smallest_idx]:
+                    heapq.heappush(partition_heap, (new_sum, smallest_idx))
+                break
+
+
 
 def karmarkar_karp(seqlen_list: List[int], k_partitions: int, equal_size: bool):
     # see: https://en.wikipedia.org/wiki/Largest_differencing_method
@@ -364,7 +430,7 @@ class DataCoordinator:
         
         try:
             # Use the LPT algorithm to calculate the optimal partitions.
-            partitions = get_seqlen_balanced_partitions(seqlen_list, k_partitions)
+            partitions = get_seqlen_balanced_partitions(seqlen_list, k_partitions, True)
             
             # Reorder the samples based on the partitioning result.
             # Concatenate the partitions in order: [all samples from partition_0, all from partition_1, ...]

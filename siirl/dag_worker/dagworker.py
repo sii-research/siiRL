@@ -401,7 +401,7 @@ class DAGWorker(Worker):
         ordered_metrics = {}
         if cur_tp_rank == 0 and cur_pp_rank == 0:
             self.metric_worker.compute_local_data_metric(batch, cur_dp_size)
-            self.metric_worker.compute_local_throughout_metrics(batch, timing_raw, 1, cur_dp_size)
+            self.metric_worker.compute_local_throughout_metrics(batch, timing_raw, cur_pp_size * cur_tp_size , cur_dp_size)
             if self._rank == 0:
                 # only use rank0 time metrics
                 self.metric_worker.compute_local_timing_metrics(batch, timing_raw, 1)  
