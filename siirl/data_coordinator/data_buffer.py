@@ -22,219 +22,8 @@ import time
 from collections import deque
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from siirl.data_coordinator.sample import SampleInfo
+from siirl.utils.model_utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions
 
-
-
-
-def get_seqlen_balanced_partitions_constrained_lpt(seqlen_list: List[int], k_partitions: int) -> List[List[int]]:
-    """Partitions items into k subsets of equal item count with balanced sums.
-
-    This function implements a constrained version of the LPT (Longest
-    Processing Time) heuristic. It strictly adheres to the constraint that each
-    partition must have a nearly equal number of items, and then uses the LPT
-    principle to balance the sum of sequence lengths within that constraint.
-    This is the recommended approach when a fixed number of items per worker
-    is a hard requirement.
-
-    Args:
-        seqlen_list: A list of integers representing the "size" of each item.
-        k_partitions: The desired number of partitions.
-
-    Returns:
-        A list of lists, where each inner list contains the original indices
-        of the items assigned to that partition. Each list will have a size of
-        len(seqlen_list) // k or len(seqlen_list) // k + 1.
-    """
-    if k_partitions <= 0:
-        raise ValueError("Number of partitions (k_partitions) must be positive.")
-    num_items = len(seqlen_list)
-    
-    # Ensure the data size is perfectly divisible.
-    # If this fails, it indicates an unexpected issue in the data pipeline.
-    if num_items % k_partitions != 0:
-        loguru.logger.warning(
-            f"Data size ({num_items}) is not evenly divisible by the number of partitions ({k_partitions}). "
-            f"This may lead to uneven partition sizes."
-        )
-    
-    # 1. Sort items by length in descending order, preserving original indices.
-    indexed_lengths = sorted(enumerate(seqlen_list), key=lambda x: x[1], reverse=True)
-    
-    # 2. Determine the target number of items for each partition.
-    base_size = num_items // k_partitions
-    rem = num_items % k_partitions
-    partition_target_sizes = [base_size + 1] * rem + [base_size] * (k_partitions - rem)
-    
-    # 3. Initialize partitions and a min-heap to track partition sums.
-    #    The heap stores tuples of (current_sum, partition_index).
-    partitions = [[] for _ in range(k_partitions)]
-    partition_heap = [(0, i) for i in range(k_partitions)]
-    heapq.heapify(partition_heap)
-    
-    # 4. Iterate through sorted items and assign each to a non-full partition
-    #    with the smallest current sum.
-    for original_idx, length in indexed_lengths:
-        # Find the smallest, non-full partition.
-        # Pop from the heap until we find a partition that is not yet full.
-        while True:
-            smallest_sum, smallest_idx = heapq.heappop(partition_heap)
-            
-            # Check if the selected partition is already full.
-            if len(partitions[smallest_idx]) < partition_target_sizes[smallest_idx]:
-                # This partition is not full, so we can assign the item.
-                partitions[smallest_idx].append(original_idx)
-                new_sum = smallest_sum + length
-                
-                # If the partition is still not full after adding, push it back.
-                if len(partitions[smallest_idx]) < partition_target_sizes[smallest_idx]:
-                    heapq.heappush(partition_heap, (new_sum, smallest_idx))
-                break
-
-
-
-def karmarkar_karp(seqlen_list: List[int], k_partitions: int, equal_size: bool):
-    # see: https://en.wikipedia.org/wiki/Largest_differencing_method
-    class Set:
-        def __init__(self) -> None:
-            self.sum = 0
-            self.items = []
-
-        def add(self, idx: int, val: int):
-            self.items.append((idx, val))
-            self.sum += val
-
-        def merge(self, other):
-            for idx, val in other.items:
-                self.items.append((idx, val))
-                self.sum += val
-
-        def __lt__(self, other):
-            if self.sum != other.sum:
-                return self.sum < other.sum
-            if len(self.items) != len(other.items):
-                return len(self.items) < len(other.items)
-            return self.items < other.items
-
-    class State:
-        def __init__(self, items: List[Tuple[int, int]], k: int) -> None:
-            self.k = k
-            # sets should always be decreasing order
-            self.sets = [Set() for _ in range(k)]
-            assert len(items) in [1, k], f"{len(items)} not in [1, {k}]"
-            for i, (idx, seqlen) in enumerate(items):
-                self.sets[i].add(idx=idx, val=seqlen)
-            self.sets = sorted(self.sets, reverse=True)
-
-        def get_partitions(self):
-            partitions = []
-            for i in range(len(self.sets)):
-                cur_partition = []
-                for idx, _ in self.sets[i].items:
-                    cur_partition.append(idx)
-                partitions.append(cur_partition)
-            return partitions
-
-        def merge(self, other):
-            for i in range(self.k):
-                self.sets[i].merge(other.sets[self.k - 1 - i])
-            self.sets = sorted(self.sets, reverse=True)
-
-        @property
-        def spread(self) -> int:
-            return self.sets[0].sum - self.sets[-1].sum
-
-        def __lt__(self, other):
-            # least heap, let the state with largest spread to be popped first,
-            # if the spread is the same, let the state who has the largest set
-            # to be popped first.
-            if self.spread != other.spread:
-                return self.spread > other.spread
-            return self.sets[0] > other.sets[0]
-
-        def __repr__(self) -> str:
-            repr_str = "["
-            for i in range(self.k):
-                if i > 0:
-                    repr_str += ","
-                repr_str += "{"
-                for j, (_, seqlen) in enumerate(self.sets[i].items):
-                    if j > 0:
-                        repr_str += ","
-                    repr_str += str(seqlen)
-                repr_str += "}"
-            repr_str += "]"
-            return repr_str
-
-    sorted_seqlen_list = sorted([(seqlen, i) for i, seqlen in enumerate(seqlen_list)])
-    states_pq = []
-    if equal_size:
-        assert len(seqlen_list) % k_partitions == 0, f"{len(seqlen_list)} % {k_partitions} != 0"
-        for offset in range(0, len(sorted_seqlen_list), k_partitions):
-            items = []
-            for i in range(k_partitions):
-                seqlen, idx = sorted_seqlen_list[offset + i]
-                items.append((idx, seqlen))
-            heapq.heappush(states_pq, State(items=items, k=k_partitions))
-    else:
-        for seqlen, idx in sorted_seqlen_list:
-            heapq.heappush(states_pq, State(items=[(idx, seqlen)], k=k_partitions))
-
-    while len(states_pq) > 1:
-        state0 = heapq.heappop(states_pq)
-        state1 = heapq.heappop(states_pq)
-        # merge states
-        state0.merge(state1)
-        heapq.heappush(states_pq, state0)
-
-    final_state = states_pq[0]
-    partitions = final_state.get_partitions()
-    if equal_size:
-        for i, partition in enumerate(partitions):
-            assert len(partition) * k_partitions == len(seqlen_list), f"{len(partition)} * {k_partitions} != {len(seqlen_list)}"
-    return partitions
-
-def get_seqlen_balanced_partitions(seqlen_list: List[int], k_partitions: int, equal_size: bool):
-    """
-    Calculates partitions of indices from seqlen_list such that the sum of sequence lengths
-    in each partition is balanced. Uses the Karmarkar-Karp differencing method.
-
-    This is useful for balancing workload across devices or batches, especially when
-    dealing with variable sequence lengths.
-
-    Args:
-        seqlen_list (List[int]): A list of sequence lengths for each item.
-        k_partitions (int): The desired number of partitions.
-        equal_size (bool): If True, ensures that each partition has the same number of items.
-                           Requires len(seqlen_list) to be divisible by k_partitions.
-                           If False, partitions can have varying numbers of items, focusing
-                           only on balancing the sum of sequence lengths.
-
-    Returns:
-        List[List[int]]: A list containing k_partitions lists. Each inner list contains the
-                         original indices of the items assigned to that partition. The indices
-                         within each partition list are sorted.
-
-    Raises:
-        AssertionError: If len(seqlen_list) < k_partitions.
-        AssertionError: If equal_size is True and len(seqlen_list) is not divisible by k_partitions.
-        AssertionError: If any resulting partition is empty.
-    """
-    assert len(seqlen_list) >= k_partitions, f"number of items:[{len(seqlen_list)}] < k_partitions:[{k_partitions}]"
-
-    def _check_and_sort_partitions(partitions):
-        assert len(partitions) == k_partitions, f"{len(partitions)} != {k_partitions}"
-        seen_idx = set()
-        sorted_partitions = [None] * k_partitions
-        for i, partition in enumerate(partitions):
-            assert len(partition) > 0, f"the {i}-th partition is empty"
-            for idx in partition:
-                seen_idx.add(idx)
-            sorted_partitions[i] = sorted(partition)
-        assert seen_idx == set(range(len(seqlen_list)))
-        return sorted_partitions
-
-    partitions = karmarkar_karp(seqlen_list=seqlen_list, k_partitions=k_partitions, equal_size=equal_size)
-    return _check_and_sort_partitions(partitions)
 
 @ray.remote
 class DataCoordinator:
@@ -244,8 +33,10 @@ class DataCoordinator:
     metadata (SampleInfo) and object references (ObjectRef). This allows it to implement
     complex global sampling strategies at a very low cost.
     """
-    def __init__(self, nnodes:int):
+    def __init__(self, nnodes:int, ppo_mini_batch_size: int, world_size: int):
         self.nnodes = nnodes
+        self.ppo_mini_batch_size = ppo_mini_batch_size
+        self.world_size = world_size
         # Use a deque to store tuples of metadata and references for efficient FIFO operations
         self._sample_queue: deque[Tuple[SampleInfo, ray.ObjectRef]] = deque()
         self._put_counter = 0  # Used for round-robin buffer selection
@@ -409,7 +200,8 @@ class DataCoordinator:
     def _apply_length_balancing(
         self, 
         batch_items: List[Tuple[SampleInfo, ray.ObjectRef]], 
-        k_partitions: int
+        k_partitions: int,
+        keep_mini_batch = False
     ) -> List[ray.ObjectRef]:
         """Applies the length balancing algorithm to reorder samples.
         
@@ -428,29 +220,46 @@ class DataCoordinator:
         # Use sum_tokens as the length metric (includes prompt + response).
         seqlen_list = [item[0].sum_tokens for item in batch_items]
         
-        try:
-            # Use the LPT algorithm to calculate the optimal partitions.
-            partitions = get_seqlen_balanced_partitions(seqlen_list, k_partitions, True)
+        # Use the karmarkar_karp balance
+        workload_lst = calculate_workload(seqlen_list)
+        # Decouple the DP balancing and mini-batching.
+        if keep_mini_batch:
+            minibatch_size = self.ppo_mini_batch_size
+            minibatch_num = len(workload_lst) // minibatch_size
+            global_partition_lst = [[] for _ in range(self.world_size)]
+            for i in range(minibatch_num):
+                rearrange_minibatch_lst = get_seqlen_balanced_partitions(
+                    workload_lst[i * minibatch_size : (i + 1) * minibatch_size],
+                    k_partitions=self.world_size,
+                    equal_size=True,
+                )
+                for j, part in enumerate(rearrange_minibatch_lst):
+                    global_partition_lst[j].extend([x + minibatch_size * i for x in part])
+        else:
+            global_partition_lst = get_seqlen_balanced_partitions(
+                workload_lst, k_partitions=self.world_size, equal_size=True
+            )    
             
-            # Reorder the samples based on the partitioning result.
-            # Concatenate the partitions in order: [all samples from partition_0, all from partition_1, ...]
-            reordered_refs = []
-            for partition in partitions:
-                for original_idx in partition:
-                    reordered_refs.append(batch_items[original_idx][1])
             
-            loguru.logger.debug(
-                f"Applied length balancing: {len(batch_items)} samples reordered into {k_partitions} partitions"
-            )
-            
-            return reordered_refs
-            
-        except Exception as e:
-            loguru.logger.warning(
-                f"Failed to apply length balancing: {e}. Falling back to original order."
-            )
-            # If length balancing fails, return the original order.
-            return [item[1] for item in batch_items]
+        # Place smaller micro-batches at both ends to reduce the bubbles in pipeline parallel.
+        for idx, partition in enumerate(global_partition_lst):
+            partition.sort(key=lambda x: (workload_lst[x], x))
+            ordered_partition = partition[::2] + partition[1::2][::-1]
+            global_partition_lst[idx] = ordered_partition
+        
+        # Reorder the samples based on the partitioning result.
+        # Concatenate the partitions in order: [all samples from partition_0, all from partition_1, ...]
+        reordered_refs = []
+        for partition in global_partition_lst:
+            for original_idx in partition:
+                reordered_refs.append(batch_items[original_idx][1])
+        
+        loguru.logger.debug(
+            f"Applied length balancing: {len(batch_items)} samples reordered into {k_partitions} partitions"
+        )
+        
+        return reordered_refs
+        
 
     async def get_all_by_filter(self, filter_plugin: Callable[[SampleInfo], bool]) -> List[ray.ObjectRef]:
         """
@@ -510,7 +319,7 @@ class DataCoordinator:
 # Initialization Logic
 # ====================================================================
 
-def init_data_coordinator(num_buffers: int) -> ray.actor.ActorHandle:
+def init_data_coordinator(num_buffers: int, ppo_mini_batch_size: int, world_size: int) -> ray.actor.ActorHandle:
     """
     Initializes the data coordination system, which includes a global DataCoordinator
     and multiple distributed DataBuffers. Returns a single, unified DataCoordinator
@@ -536,6 +345,6 @@ def init_data_coordinator(num_buffers: int) -> ray.actor.ActorHandle:
         loguru.logger.info(f"Connected to existing DataCoordinator actor '{coordinator_name}'.")
     except ValueError:
         loguru.logger.info(f"Creating new DataCoordinator actor with global name '{coordinator_name}'.")
-        coordinator = DataCoordinator.options(name=coordinator_name, lifetime="detached").remote(nnodes=num_buffers)
+        coordinator = DataCoordinator.options(name=coordinator_name, lifetime="detached").remote(nnodes=num_buffers, ppo_mini_batch_size=ppo_mini_batch_size, world_size=world_size)
    
     return coordinator
