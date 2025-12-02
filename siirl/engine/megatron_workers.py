@@ -88,7 +88,7 @@ class ActorRolloutRefWorker(MegatronWorker):
     def __init__(self, config: DictConfig, role: str, process_group=None):
         super().__init__()
         self.config = config
-        global_mindspeed_repatch(self.config.actor.megatron.get("override_transformer_config", {}))
+        global_mindspeed_repatch(self.config.megatron.override_transformer_config)
         # self.process_group = process_group
 
         # NOTE(sgm): We utilize colocate WorkerGroup by default.
@@ -525,7 +525,7 @@ class CriticWorker(MegatronWorker):
         # To utilize different parallel startegy in different models:
         # 1, users should disable WorkerDict; 2.assign different ResourcePool to different models,
         # 3. and apply the following patch in ray==2.10, https://github.com/ray-project/ray/pull/44385
-        global_mindspeed_repatch(self.config.actor.megatron.get("override_transformer_config", {}))
+        global_mindspeed_repatch(self.config.megatron.override_transformer_config)
         if not torch.distributed.is_initialized():
             # Use LOCAL_RANK for device setting, but respect process group for distributed ops
             rank = int(os.environ["LOCAL_RANK"])

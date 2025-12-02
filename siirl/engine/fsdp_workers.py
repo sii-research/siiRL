@@ -1208,7 +1208,7 @@ class ActorRolloutRefWorker(Worker):
                 self.config.actor.action_token_len = self.config.embodied.action_token_len
                 self.config.actor.action_chunks_len = self.config.embodied.action_chunks_len
                 
-                from siirl.workers.actor.embodied_actor import RobDataParallelPPOActor
+                from siirl.engine.actor.embodied_actor import RobDataParallelPPOActor
                 ActorClass = RobDataParallelPPOActor
             else:
                 ActorClass = DataParallelPPOActor
@@ -1250,7 +1250,7 @@ class ActorRolloutRefWorker(Worker):
                 self.config.ref.action_token_len = self.config.embodied.action_token_len
                 self.config.ref.action_chunks_len = self.config.embodied.action_chunks_len
                 
-                from siirl.workers.actor.embodied_actor import RobDataParallelPPOActor
+                from siirl.engine.actor.embodied_actor import RobDataParallelPPOActor
                 RefPolicyClass = RobDataParallelPPOActor
             else:
                 RefPolicyClass = DataParallelPPOActor
