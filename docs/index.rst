@@ -17,14 +17,23 @@ siiRL documentation
    :maxdepth: 2
    :caption: Programming guide
 
-   guide
+   programming_guide/guide
+   programming_guide/code_structure
 
-.. toctree::
+.. toctree::ji
    :maxdepth: 1
    :caption: Data Preparation
 
    preparation/prepare_data
    preparation/reward_function
+
+.. toctree::
+   :maxdepth: 2
+   :caption: User interface
+
+   user_interface/filter_interface
+   user_interface/reward_interface
+   user_interface/pipeline_interface
 
 .. toctree::
    :maxdepth: 2
