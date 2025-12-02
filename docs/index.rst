@@ -41,6 +41,7 @@ siiRL documentation
    user_interface/filter_interface
    user_interface/reward_interface
    user_interface/pipeline_interface
+   user_interface/metrics_interface
 
 .. toctree::
    :maxdepth: 2
