@@ -12,11 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .batch import BatchRewardManager
 from .dapo import DAPORewardManager
 from .naive import NaiveRewardManager
-from .prime import PrimeRewardManager
-from .parallel import ParallelRewardManager
 
 # Lazy import for embodied reward manager to avoid loading embodied dependencies for LLM/VLM tasks
 def __getattr__(name):
@@ -25,4 +22,4 @@ def __getattr__(name):
         return EmbodiedRewardManager
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
-__all__ = ["BatchRewardManager", "DAPORewardManager", "NaiveRewardManager", "PrimeRewardManager", "ParallelRewardManager", "EmbodiedRewardManager"]
+__all__ = ["DAPORewardManager", "NaiveRewardManager", "EmbodiedRewardManager"]
