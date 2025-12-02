@@ -14,7 +14,8 @@
 
 from .dapo import DAPORewardManager
 from .naive import NaiveRewardManager
-
+from .embodied import EmbodiedRewardManager
+from .parallel import ParallelRewardManager
 # Lazy import for embodied reward manager to avoid loading embodied dependencies for LLM/VLM tasks
 def __getattr__(name):
     if name == "EmbodiedRewardManager":
@@ -22,4 +23,4 @@ def __getattr__(name):
         return EmbodiedRewardManager
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
-__all__ = ["DAPORewardManager", "NaiveRewardManager", "EmbodiedRewardManager"]
+__all__ = ["DAPORewardManager", "NaiveRewardManager", "EmbodiedRewardManager","ParallelRewardManager"]

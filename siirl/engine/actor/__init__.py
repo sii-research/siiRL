@@ -14,5 +14,6 @@
 
 from .base import BasePPOActor
 from .dp_actor import DataParallelPPOActor
+from .embodied_actor import RobDataParallelPPOActor
 
-__all__ = ["BasePPOActor", "DataParallelPPOActor"]
+__all__ = ["BasePPOActor", "DataParallelPPOActor","RobDataParallelPPOActor"]

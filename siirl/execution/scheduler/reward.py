@@ -31,16 +31,14 @@ from siirl.params import SiiRLArguments
 from siirl.utils.reward_score import default_compute_score
 from siirl.engine.reward_manager import (
     DAPORewardManager,
-    BatchRewardManager,
     NaiveRewardManager,
-    PrimeRewardManager,
     ParallelRewardManager,
     EmbodiedRewardManager
 )
 
 Tokenizer = Any
 RewardTensor = Any
-AnyRewardManager = Union[NaiveRewardManager, PrimeRewardManager, BatchRewardManager, DAPORewardManager, ParallelRewardManager]
+AnyRewardManager = Union[NaiveRewardManager, DAPORewardManager, ParallelRewardManager, EmbodiedRewardManager]
 
 
 def load_custom_reward_function(config: SiiRLArguments) -> Optional[Callable]:
@@ -129,8 +127,6 @@ def create_reward_manager(
     # Map manager names to their respective classes for clean, extensible selection.
     manager_map = {
         "naive": NaiveRewardManager,
-        "prime": PrimeRewardManager,
-        "batch": BatchRewardManager,
         "dapo": DAPORewardManager,
         "parallel": ParallelRewardManager,
         "embodied": EmbodiedRewardManager
