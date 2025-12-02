@@ -35,7 +35,6 @@ from torch.distributed.device_mesh import DeviceMesh
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData
 import siirl.utils.model_utils.torch_functional as F
-from siirl import DataProto
 from typing import Any, Dict, List, Optional, Union, Set
 from siirl.models.loader import load_tokenizer
 from siirl.engine.base_worker import Worker
@@ -1749,7 +1748,7 @@ class CriticWorker(Worker):
             offload_fsdp_model_to_cpu(self.critic_module)
         return processed_data
 
-    def update_critic(self, data: DataProto):
+    def update_critic(self, data: TensorDict):
         # Support all hardwares
         data = data.to(get_device_id())
         if self._is_offload_param:
@@ -1976,7 +1975,7 @@ class RewardModelWorker(Worker):
             rm_score = rm_score[torch.arange(batch_size), eos_mask_idx]
             return rm_score
 
-    def _expand_to_token_level(self, data: DataProto, scores: torch.Tensor):
+    def _expand_to_token_level(self, data: TensorDict, scores: torch.Tensor):
         batch_size = data.batch.batch_size[0]
         # expand as token_level_reward
         attention_mask = data.batch["attention_mask"]
@@ -1991,7 +1990,7 @@ class RewardModelWorker(Worker):
 
         return token_level_scores
 
-    def _switch_chat_template(self, data: DataProto):
+    def _switch_chat_template(self, data: TensorDict):
         src_max_length = data.batch["attention_mask"].shape[-1]
 
         src_tokenizer = self.input_tokenizer
@@ -2050,9 +2049,9 @@ class RewardModelWorker(Worker):
 
         rm_inputs = {"input_ids": rm_input_ids, "attention_mask": rm_attention_mask, "position_ids": rm_position_ids}
 
-        return DataProto.from_dict(rm_inputs)
+        return TensorDict.from_dict(rm_inputs)
 
-    def compute_rm_score(self, data: DataProto):
+    def compute_rm_score(self, data: TensorDict):
         import itertools
 
         from siirl.utils.model_utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
@@ -2070,7 +2069,7 @@ class RewardModelWorker(Worker):
                 "attention_mask": rm_attention_mask,
                 "position_ids": rm_position_ids,
             }
-            rm_data = DataProto.from_dict(rm_inputs)
+            rm_data = TensorDict.from_dict(rm_inputs)
 
         # Support all hardwares
         rm_data.batch = rm_data.batch.to(get_device_id())
@@ -2129,7 +2128,7 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
 
         return rollout, rollout_sharding_manager
 
-    def generate_sequences(self, prompts: DataProto):
+    def generate_sequences(self, prompts: TensorDict):
         raise NotImplementedError("AsyncActorRolloutRefWorker does not support generate_sequences")
 
     def execute_method(self, method: Union[str, bytes], *args, **kwargs):

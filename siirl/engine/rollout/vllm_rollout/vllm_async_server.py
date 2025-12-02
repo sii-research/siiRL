@@ -32,7 +32,7 @@ from vllm.worker.worker_base import WorkerWrapperBase
 from siirl.utils.debug import GPUMemoryLogger
 from siirl.utils.extras.fs import copy_to_local
 from siirl.engine.rollout.async_server import AsyncServerBase
-from siirl import DataProto
+from tensordict import TensorDict
 from siirl.params.model_args import ActorRolloutRefArguments
 import torch
 logger = logging.getLogger(__file__)
@@ -189,7 +189,7 @@ class AsyncvLLMServer(AsyncServerBase):
     
     
     @GPUMemoryLogger(role="vllm rollout spmd", logger=logger)
-    def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
+    def generate_sequences(self, prompts: TensorDict, **kwargs) -> TensorDict:
         assert False
         
     async def chat_completion(self, raw_request: Request):

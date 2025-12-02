@@ -19,7 +19,7 @@ from abc import ABC, abstractmethod
 
 import torch
 
-from siirl import DataProto
+from tensordict import TensorDict
 
 __all__ = ["BasePPOCritic"]
 
@@ -30,11 +30,11 @@ class BasePPOCritic(ABC):
         self.config = config
 
     @abstractmethod
-    def compute_values(self, data: DataProto) -> torch.Tensor:
+    def compute_values(self, data: TensorDict) -> torch.Tensor:
         """Compute values"""
         pass
 
     @abstractmethod
-    def update_critic(self, data: DataProto):
+    def update_critic(self, data: TensorDict):
         """Update the critic"""
         pass

@@ -234,11 +234,11 @@ class EmbodiedHFRollout(BaseRollout):
             logger.info(
                 f"--- Processing chunk {i+1}/{num_chunks}, size = {chunk_prompts.batch_size[0]} ---")
             
-            # Process one chunk and get its DataProto output
+            # Process one chunk and get its TensorDict output
             chunk_output = self._generate_chunk_rollout(chunk_prompts)
             all_chunk_outputs.append(chunk_output)
 
-        # Concatenate the DataProto objects from all chunks
+        # Concatenate the TensorDict objects from all chunks
         final_output = torch.cat(all_chunk_outputs)
         logger.info(f"RobHFRollout.generate_sequences finished for a single batch of size {final_output.batch_size[0]}"
                     f", took {time.time() - tic:.2f} seconds")

@@ -19,7 +19,6 @@ import torch
 from loguru import logger
 from torch import distributed as dist
 
-from siirl import DataProto
 from siirl.utils.reward_score import default_compute_score
 
 

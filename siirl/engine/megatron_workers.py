@@ -37,7 +37,6 @@ except ImportError:
 
 from megatron.core import parallel_state as mpu
 
-from siirl import DataProto
 from siirl.engine.base_worker.megatron.worker import MegatronWorker
 from siirl.models.loader import load_tokenizer
 from siirl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpointManager
@@ -388,7 +387,7 @@ class ActorRolloutRefWorker(MegatronWorker):
         log_gpu_memory_usage("After init_model finish", logger=logger)
 
     @GPUMemoryLogger(role="update_actor", logger=logger)
-    def update_actor(self, data: DataProto):
+    def update_actor(self, data: TensorDict):
         assert self._is_actor
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module)
@@ -408,7 +407,7 @@ class ActorRolloutRefWorker(MegatronWorker):
         metrics["perf/mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
 
         # TODO: here, we should return all metrics
-        output = DataProto(meta_info={"metrics": metrics})
+        output = TensorDict(meta_info={"metrics": metrics})
         output = output.to("cpu")
 
         if self._is_offload_param:
@@ -422,7 +421,7 @@ class ActorRolloutRefWorker(MegatronWorker):
         return output
 
     @GPUMemoryLogger(role="generate_sequences", logger=logger)
-    def generate_sequences(self, prompts: DataProto):
+    def generate_sequences(self, prompts: TensorDict):
         assert self._is_rollout
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module)
@@ -1067,7 +1066,7 @@ class ActorWorker(MegatronWorker):
         log_gpu_memory_usage("After init_model finish", logger=logger)
 
     @GPUMemoryLogger(role="update_actor", logger=logger)
-    def update_actor(self, data: DataProto):
+    def update_actor(self, data: TensorDict):
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module)
             log_gpu_memory_usage("After load actor params and grad during update_actor", logger=logger)
@@ -1391,7 +1390,7 @@ class ReferenceWorker(MegatronWorker):
         log_gpu_memory_usage("After finish ref model init", logger=logger)
 
     @GPUMemoryLogger(role="compute_ref_log_prob", logger=logger)
-    def compute_ref_log_prob(self, data: DataProto):
+    def compute_ref_log_prob(self, data: TensorDict):
         if self._ref_is_offload_param:
             load_megatron_model_to_gpu(self.ref_module, load_grad=False)
             log_gpu_memory_usage("After load ref params and grad during compute_ref_log_prob", logger=logger)

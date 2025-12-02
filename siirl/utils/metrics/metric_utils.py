@@ -29,7 +29,6 @@ import logging
 import os
 from pathlib import Path
 from datetime import datetime
-from siirl import DataProto
 from tensordict import TensorDict
 from functools import partial
 import json
@@ -42,7 +41,7 @@ def _compute_response_info(batch: TensorDict) -> Dict[str, Any]:
     This is an internal helper function that extracts masks and lengths for prompts and responses.
 
     Args:
-        batch: A DataProto object containing batch data with responses and attention masks.
+        batch: A TensorDict object containing batch data with responses and attention masks.
 
     Returns:
         A dictionary containing:
@@ -75,7 +74,7 @@ def compute_data_metric(data: TensorDict):
         and sequence lengths from a batch of data. It provides statistical information (mean, max, min)
         for each metric category.
         Args:
-            batch: A DataProto object containing batch data with token-level scores, rewards, advantages, etc.
+            batch: A TensorDict object containing batch data with token-level scores, rewards, advantages, etc.
             use_critic: Whether to include critic-specific metrics. Defaults to True.
 
         Returns:
@@ -232,7 +231,7 @@ def compute_throughout_metrics(batch: TensorDict, timing_raw: Dict[str, float], 
     (tokens per second per GPU).
 
     Args:
-        batch: A DataProto object containing batch data with meta information about token counts.
+        batch: A TensorDict object containing batch data with meta information about token counts.
         timing_raw: A dictionary mapping stage names to their execution times in seconds.
                    Must contain a "step" key with the total step time.
         n_gpus: Number of GPUs used for training.

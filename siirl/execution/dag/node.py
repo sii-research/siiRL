@@ -97,6 +97,8 @@ class AgentProcess:
         if intern_config is None:
             return
         # init tokenizer for each node
+        if hasattr(intern_config.model, 'trust_remote_code'):
+            intern_config.model.trust_remote_code = True
         tokenizer_module = load_tokenizer(model_args=intern_config.model)
         self.tokenizer = tokenizer_module.get("tokenizer")
         if agent_options is None:

@@ -20,7 +20,6 @@ import torch
 from loguru import logger
 from transformers import PreTrainedTokenizer
 
-from siirl import DataProto
 
 
 class EmbodiedRewardManager:
@@ -28,7 +27,7 @@ class EmbodiedRewardManager:
     Manages the reward calculation process for Embodied AI tasks.
 
     This class acts as an orchestrator. It receives the framework-specific
-    `DataProto` object and delegates the complex reward computation to an
+    `TensorDict` object and delegates the complex reward computation to an
     injected `compute_score` function.
     """
 

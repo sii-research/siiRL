@@ -22,7 +22,6 @@ import torch.distributed
 from torch import nn, optim
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from tensordict import TensorDict
-from siirl import DataProto
 from siirl.dag_worker import core_algos
 from siirl.utils.extras.device import get_device_id, get_device_name, is_cuda_available, is_npu_available
 from siirl.utils.model_utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
@@ -150,9 +149,6 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         values_lst = []
         for micro_batch in micro_batches:
-            if isinstance(micro_batch, DataProto):
-                micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
-
             with torch.no_grad():
                 values = self._forward_micro_batch(micro_batch)
             values_lst.append(values)

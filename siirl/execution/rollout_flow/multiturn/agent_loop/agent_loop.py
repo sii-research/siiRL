@@ -28,7 +28,6 @@ from pydantic import BaseModel
 from tensordict import TensorDict, NonTensorData
 from transformers import AutoTokenizer
 
-from siirl import DataProto
 from siirl.models.loader import load_tokenizer
 from siirl.utils.extras.fs import copy_to_local
 from siirl.engine.rollout.async_server import async_server_class
@@ -168,10 +167,10 @@ class AgentLoopWorker:
         """Generate sequences from agent loop.
 
         Args:
-            batch (DataProto): Input batch.
+            batch (TensorDict): Input batch.
 
         Returns:
-            DataProto: Output batch.
+            TensorDict: Output batch.
             - prompts: [bsz, prompt_length], prompt token ids from dataset.
             - responses: [bsz, response_length], output token ids include response tokens
               from LLM generation and observation tokens from tool_calls.

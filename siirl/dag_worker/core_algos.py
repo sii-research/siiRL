@@ -33,7 +33,6 @@ import siirl.utils.model_utils.torch_functional as siirl_F
 from siirl.params.model_args import AlgorithmArguments, ActorArguments
 from siirl.execution.scheduler.enums import AdvantageEstimator
 from tensordict import TensorDict 
-from siirl import DataProto
 
 
 PolicyLossFn = Callable[
@@ -350,14 +349,14 @@ def compute_grpo_outcome_advantage(
 
 
 def compute_marft_gae_advantage_return(
-    data: DataProto,
+    data: TensorDict,
     pre_agent_group_ids,
     gamma: torch.Tensor,
     lam: torch.Tensor,
 ):
     """
     Args:
-        data: `DataProto`
+        data: `TensorDict`
         pre_agent_group_ids: `List`
             pre agent id
         gamma: `(float)`
@@ -1285,7 +1284,7 @@ def compute_pf_ppo_reweight_data(
     """Reweight the data based on the token_level_scores.
 
     Args:
-        data: DataProto object, containing batch, non_tensor_batch and meta_info
+        data: TensorDict object, containing batch, non_tensor_batch and meta_info
         reweight_method: str, choices: "pow", "max_min", "max_random"
         weight_pow: float, the power of the weight
 
@@ -1356,14 +1355,14 @@ def compute_pf_ppo_reweight_data(
     return resampled_data
 
 
-def apply_kl_penalty(data: DataProto, kl_ctrl: AdaptiveKLController, kl_penalty="kl", multi_turn=False):
+def apply_kl_penalty(data: TensorDict, kl_ctrl: AdaptiveKLController, kl_penalty="kl", multi_turn=False):
     """Apply KL penalty to the token-level rewards.
 
     This function computes the KL divergence between the reference policy and current policy,
     then applies a penalty to the token-level rewards based on this divergence.
 
     Args:
-        data (DataProto): The data containing batched model outputs and inputs.
+        data (TensorDict): The data containing batched model outputs and inputs.
         kl_ctrl (core_algos.AdaptiveKLController): Controller for adaptive KL penalty.
         kl_penalty (str, optional): Type of KL penalty to apply. Defaults to "kl".
         multi_turn (bool, optional): Whether the data is from a multi-turn conversation. Defaults to False.
@@ -1398,14 +1397,14 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: AdaptiveKLController, kl_penalty=
     return data, metrics
 
 
-def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, norm_adv_by_std_in_grpo=True, weight_factor_in_cpgd="STD_weight", **kwargs):
+def compute_advantage(data: TensorDict, adv_estimator, gamma=1.0, lam=1.0, norm_adv_by_std_in_grpo=True, weight_factor_in_cpgd="STD_weight", **kwargs):
     """Compute advantage estimates for policy optimization.
 
     This function computes advantage estimates using various estimators like GAE, GRPO, REINFORCE++, CPGD, etc.
     The advantage estimates are used to guide policy optimization in RL algorithms.
 
     Args:
-        data (DataProto): The data containing batched model outputs and inputs.
+        data (TensorDict): The data containing batched model outputs and inputs.
         adv_estimator: The advantage estimator to use (e.g., GAE, GRPO, REINFORCE++, CPGD).
         gamma (float, optional): Discount factor for future rewards. Defaults to 1.0.
         lam (float, optional): Lambda parameter for GAE. Defaults to 1.0.
@@ -1415,7 +1414,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, norm_a
         weight_factor_in_cpgd (str, optional): whether to use the STD weight as GRPO or clip_filter_like_weight. choices: {STD_weight, clip_filter_like_weight, naive}
 
     Returns:
-        DataProto: The updated data with computed advantages and returns.
+        TensorDict: The updated data with computed advantages and returns.
     """
     # Back-compatible with trainers that do not compute response mask in fit
     if "response_mask" not in data.keys():

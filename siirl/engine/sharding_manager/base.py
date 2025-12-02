@@ -15,7 +15,7 @@
 Sharding manager to implement HybridEngine
 """
 
-from siirl import DataProto
+from tensordict import TensorDict
 
 
 class BaseShardingManager:
@@ -25,8 +25,8 @@ class BaseShardingManager:
     def __exit__(self, exc_type, exc_value, traceback):
         pass
 
-    def preprocess_data(self, data: DataProto) -> DataProto:
+    def preprocess_data(self, data: TensorDict) -> TensorDict:
         return data
 
-    def postprocess_data(self, data: DataProto) -> DataProto:
+    def postprocess_data(self, data: TensorDict) -> TensorDict:
         return data

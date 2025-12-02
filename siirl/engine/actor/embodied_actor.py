@@ -329,7 +329,7 @@ class RobDataParallelPPOActor(BasePPOActor):
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
 
         Args:
-            data (DataProto): a DataProto containing keys
+            data (TensorDict): a TensorDict containing keys
 
                 ``input_ids``: tensor of shape [batch_size, sequence_length]. torch.int64. Note that input_ids is the
                 concatenation of prompt and response. Note that ``sequence_length = prompt_length + response_length``.

@@ -35,7 +35,6 @@ from megatron.core.pipeline_parallel import get_forward_backward_func
 from torch import nn
 from tensordict import TensorDict
 
-from siirl import DataProto
 from siirl.utils.debug import GPUMemoryLogger
 from siirl.utils.debug.profile import Profiler
 from siirl.utils.extras.device import get_device_id, get_torch_device

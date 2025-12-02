@@ -14,7 +14,7 @@
 
 from abc import ABC, abstractmethod
 
-from siirl import DataProto
+from tensordict import TensorDict
 
 __all__ = ["BaseRollout"]
 
@@ -23,6 +23,6 @@ class BaseRollout(ABC):
     """Base class for rollout."""
 
     @abstractmethod
-    def generate_sequences(self, prompts: DataProto) -> DataProto:
+    def generate_sequences(self, prompts: TensorDict) -> TensorDict:
         """Generate sequences"""
         pass

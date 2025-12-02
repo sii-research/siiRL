@@ -20,7 +20,7 @@ from typing import Dict
 
 import torch
 
-from siirl import DataProto
+from tensordict import TensorDict
 
 __all__ = ["BasePPOActor"]
 
@@ -37,26 +37,26 @@ class BasePPOActor(ABC):
         self.config = config
 
     @abstractmethod
-    def compute_log_prob(self, data: DataProto) -> torch.Tensor:
+    def compute_log_prob(self, data: TensorDict) -> torch.Tensor:
         """Compute logits given a batch of data.
 
         Args:
-            data (DataProto): a batch of data represented by DataProto. It must contain key ```input_ids```,
+            data (TensorDict): a batch of data represented by TensorDict. It must contain key ```input_ids```,
                 ```attention_mask``` and ```position_ids```.
 
         Returns:
-            DataProto: a DataProto containing the key ```log_probs```
+            TensorDict: a TensorDict containing the key ```log_probs```
 
 
         """
         pass
 
     @abstractmethod
-    def update_policy(self, data: DataProto) -> Dict:
-        """Update the policy with an iterator of DataProto
+    def update_policy(self, data: TensorDict) -> Dict:
+        """Update the policy with an iterator of TensorDict
 
         Args:
-            data (DataProto): an iterator over the DataProto that returns by
+            data (TensorDict): an iterator over the TensorDict that returns by
                 ```make_minibatch_iterator```
 
         Returns:

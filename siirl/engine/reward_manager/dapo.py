@@ -19,7 +19,6 @@ import torch
 from tensordict import TensorDict
 
 from loguru import logger
-from siirl import DataProto
 from siirl.utils.reward_score import default_compute_score
 
 
@@ -62,7 +61,7 @@ class DAPORewardManager:
         already_print_data_sources = {}
 
         for i in range(len(data)):
-            data_item = data[i]  # DataProtoItem
+            data_item = data[i]  # TensorDictItem
 
             prompt_ids = data_item["prompts"]
 

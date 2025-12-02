@@ -34,7 +34,7 @@ def verify(
     correctness tensor back into the input `data` object for downstream use.
 
     Args:
-        data: The DataProto object containing batch data, including 'responses'
+        data: The TensorDict object containing batch data, including 'responses'
             and 'complete' tensors.
 
     Returns:
@@ -222,7 +222,7 @@ def embodied_local_rank_sampling(
 
     Args:
         config: Global SiiRL configuration arguments.
-        batch: The input DataProto batch from the generation stage.
+        batch: The input TensorDict batch from the generation stage.
         node_config: Configuration specific to this execution node.
         **kwargs: Additional keyword arguments (unused).
 

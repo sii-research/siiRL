@@ -269,7 +269,7 @@ class Validator:
             batch_proto: Input batch containing prompts
 
         Returns:
-            DataProto: Batch with generated sequences added
+            TensorDict: Batch with generated sequences added
         """
         rollout_worker = self.multi_agent_group[0][NodeRole.ROLLOUT]
         val_kwargs = self.config.actor_rollout_ref.rollout.val_kwargs
@@ -459,7 +459,7 @@ class Validator:
         because running embodied episodes is expensive.
         
         Returns:
-            DataProto: The validation batch
+            TensorDict: The validation batch
         """
         test_batch = self.dataloader.run(is_validation_step=True)
         test_batch_proto = preprocess_dataloader(test_batch)
@@ -478,7 +478,7 @@ class Validator:
             batch: The input batch containing task information
             
         Returns:
-            DataProto: The batch with generated episode data (actions, observations, rewards, etc.)
+            TensorDict: The batch with generated episode data (actions, observations, rewards, etc.)
         """
         rollout_worker = self.multi_agent_group[0][NodeRole.ROLLOUT]
         

@@ -22,7 +22,7 @@ using the new Pipeline API. All functions are explicitly visible in the code.
 import numpy as np
 from siirl.execution.dag.pipeline import Pipeline, NodeConfig
 from siirl.execution.dag.task_graph import TaskGraph
-from siirl.data_coordinator import DataProto
+from tensordict import TensorDict
 from siirl.dag_worker.data_structures import NodeOutput
 
 
@@ -94,7 +94,7 @@ def grpo_with_custom_reward() -> TaskGraph:
     return pipeline.build()
 
 
-def my_custom_reward_fn(batch: DataProto, **kwargs) -> NodeOutput:
+def my_custom_reward_fn(batch: TensorDict, **kwargs) -> NodeOutput:
     """
     User's custom reward function.
 
@@ -103,7 +103,7 @@ def my_custom_reward_fn(batch: DataProto, **kwargs) -> NodeOutput:
     arbitrarily complex reward computations.
 
     Args:
-        batch: DataProto containing prompts and responses
+        batch: TensorDict containing prompts and responses
         **kwargs: Additional arguments (config, etc.)
 
     Returns:

@@ -42,7 +42,7 @@ from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConf
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
 from torch.distributed.tensor import DTensor
 
-from siirl import DataProto
+from tensordict import TensorDict
 from siirl.data_coordinator.protocol import all_gather_data_proto
 from siirl.utils.debug import log_gpu_memory_usage
 from siirl.utils.extras.device import get_device_id, get_device_name, get_torch_device
@@ -222,7 +222,7 @@ class MultiAgentFSDPSGLangShardingManager(BaseShardingManager):
             self.gen_random_states = torch.cuda.get_rng_state()
             torch.cuda.set_rng_state(self.torch_random_states)
 
-    def preprocess_data(self, data: DataProto) -> DataProto:
+    def preprocess_data(self, data: TensorDict) -> TensorDict:
         """All gather across tp group to make each rank has identical input."""
         if self.tp_size == 1:
             return data
@@ -233,7 +233,7 @@ class MultiAgentFSDPSGLangShardingManager(BaseShardingManager):
         all_gather_data_proto(data=data, process_group=group)
         return data
 
-    def postprocess_data(self, data: DataProto) -> DataProto:
+    def postprocess_data(self, data: TensorDict) -> TensorDict:
         """Get chunk data of this tp rank since we do all gather in preprocess."""
         if self.tp_size == 1:
             return data

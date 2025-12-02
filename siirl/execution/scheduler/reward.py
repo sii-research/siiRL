@@ -27,7 +27,6 @@ from tensordict import TensorDict
 import ray
 from loguru import logger
 
-from siirl import DataProto
 from siirl.params import SiiRLArguments
 from siirl.utils.reward_score import default_compute_score
 from siirl.engine.reward_manager import (
@@ -203,7 +202,7 @@ def compute_reward(data: TensorDict, reward_fn: Callable) -> Tuple[RewardTensor,
     crashing.
 
     Args:
-        data: A DataProto object containing the batch of input data.
+        data: A TensorDict object containing the batch of input data.
         reward_fn: The reward function or manager method to call.
 
     Returns:

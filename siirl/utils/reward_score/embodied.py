@@ -22,7 +22,6 @@ from scipy.spatial.distance import cdist
 from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import StandardScaler
 
-from siirl import DataProto
 
 
 def _tensor_to_str_list(tensor: torch.Tensor) -> List[str]:
@@ -53,7 +52,7 @@ def compute_embodied_reward(
     The results are logically and mathematically identical to the original implementation.
 
     Args:
-        batch_data: The DataProto object containing all batch information.
+        batch_data: The TensorDict object containing all batch information.
 
     Returns:
         A list of dictionaries, each containing detailed score information.

@@ -5,7 +5,6 @@ import ray
 import uuid
 from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional, Union, Set
-from siirl.data_coordinator.protocol import DataProto
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData
 from typing import get_args, get_origin

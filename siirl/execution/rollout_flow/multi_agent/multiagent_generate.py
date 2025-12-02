@@ -33,7 +33,6 @@ from loguru import logger
 from siirl.engine.rollout.sglang_rollout.async_sglang_server import AsyncSglangServer
 from siirl.engine.fsdp_workers import ActorRolloutRefWorker
 from siirl.execution.dag import TaskGraph, Node, NodeRole, NodeType
-from siirl.data_coordinator.protocol import DataProto
 from siirl.params import RolloutArguments, ActorRolloutRefArguments
 from siirl.dag_worker.dag_utils import remove_prefix_from_dataproto
 
@@ -84,7 +83,7 @@ class MultiAgentLoop():
     # used in spread mode to judge agent node if in current gpu_worker
         pass
 
-    def _preprocess(self, batch:DataProto) -> List[str]:
+    def _preprocess(self, batch:TensorDict) -> List[str]:
         '''Preprocess data from dataloader and return prompt to generate task'''
         n = 1 if batch.meta_info.get("validate", False) else self.rollout_config.n
         batch = batch.repeat(n, interleave=True)
@@ -484,9 +483,9 @@ class MultiAgentLoop():
                     global_running = True
                 
         return agent_res   
-    def _postprocess(self, agent_outputs: Dict[str, List[AgentOutput]], metrics: Dict) -> DataProto:
+    def _postprocess(self, agent_outputs: Dict[str, List[AgentOutput]], metrics: Dict) -> TensorDict:
         """
-        Postprocesses generated agent outputs into a structured DataProto object.
+        Postprocesses generated agent outputs into a structured TensorDict object.
         
         Combines prompts and responses into formatted tensors (input_ids, attention_mask, etc.)
         with proper padding and metadata, handling multiple nodes in the DAG.
@@ -496,7 +495,7 @@ class MultiAgentLoop():
                         generated responses, prompts, and metadata for each sample.
         
         Returns:
-            DataProto object containing concatenated batch data (tensors) and metadata from all nodes.
+            TensorDict object containing concatenated batch data (tensors) and metadata from all nodes.
         """
         # NOTE: Consistent with batch version of generate_sequences in vllm_rollout_spmd.py
         # - prompts: Left-padded to fixed length
@@ -515,7 +514,7 @@ class MultiAgentLoop():
                 node: Current DAG node (contains agent processor and tokenizer).
             
             Returns:
-                DataProto with processed tensors for the current node.
+                TensorDict with processed tensors for the current node.
             """
             # Sort agent outputs by batch ID to maintain original order
             cur_agent_outputs = list(agent_outputs.values())
@@ -636,7 +635,7 @@ class MultiAgentLoop():
             for step_id in range(self.rollout_config.multi_turn.max_assistant_turns):
                 step_key = f'agent_{node.agent_group}_critic/step_{step_id}_rewards/mean'
                 metrics[f"agent_{node.agent_group}_critic/step_{step_id}_rewards/mean"] = np.mean(metrics[f"agent_{node.agent_group}_critic/step_{step_id}_rewards/mean"]) / (step_id + 1)
-            return DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info={"metrics": {}})
+            return TensorDict(batch=batch, non_tensor_batch=non_tensor_batch, meta_info={"metrics": {}})
         
         tasks = []
         for i in range(len(self.node_queue)):
@@ -656,14 +655,14 @@ class MultiAgentLoop():
                 dataproto = data
         return dataproto
 
-    def generate_sequence(self, batch:DataProto, timing_raw: Dict[str, float] = {}):
+    def generate_sequence(self, batch:TensorDict, timing_raw: Dict[str, float] = {}):
         """
-        Generate model output sequences based on the input DataProto batch, handling both colocated and spread placement modes.
+        Generate model output sequences based on the input TensorDict batch, handling both colocated and spread placement modes.
         Args:
-            batch: Input DataProto object containing raw data (e.g., prompts, ground truth) for sequence generation.
+            batch: Input TensorDict object containing raw data (e.g., prompts, ground truth) for sequence generation.
             timing_raw: Dictionary to record raw timing metrics (e.g., data transfer, generation latency). Defaults to empty dict.
         Returns:
-            Processed DataProto object with generated sequences, metadata (including metrics), and prefix removed for downstream DAG worker.
+            Processed TensorDict object with generated sequences, metadata (including metrics), and prefix removed for downstream DAG worker.
         """
         prompts = None
         metrics = {}

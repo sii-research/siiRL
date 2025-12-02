@@ -29,7 +29,6 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.tensor import DTensor
 
 import siirl.utils.model_utils.torch_functional as F
-from siirl import DataProto
 from siirl.dag_worker.core_algos import agg_loss, compute_policy_loss, kl_penalty, get_policy_loss_fn
 from siirl.utils.debug import GPUMemoryLogger
 from siirl.utils.extras.device import get_device_id, get_device_name, is_cuda_available, is_npu_available

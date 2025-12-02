@@ -17,7 +17,7 @@ The base class for reward model
 
 from abc import ABC, abstractmethod
 
-from siirl import DataProto
+from tensordict import TensorDict
 
 
 class BasePPORewardModel(ABC):
@@ -25,7 +25,7 @@ class BasePPORewardModel(ABC):
         self.config = config
 
     @abstractmethod
-    def compute_reward(self, data: DataProto) -> DataProto:
+    def compute_reward(self, data: TensorDict) -> TensorDict:
         """Computing reward given input_ids. The transformers should output a tensor with shape
            [batch_size, sequence_length], and the value at [EOS] mask should be gathered.
 

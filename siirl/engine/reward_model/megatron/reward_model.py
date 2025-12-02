@@ -23,7 +23,6 @@ from megatron.core import parallel_state as mpu
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from tensordict import TensorDict
 
-from siirl import DataProto
 from siirl.utils.extras.device import get_device_id, get_device_name, get_torch_device
 from siirl.utils.megatron.pipeline_parallel import make_batch_generator
 from siirl.utils.model_utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
@@ -57,7 +56,7 @@ class MegatronRewardModel(BasePPORewardModel):
         if self.config.megatron.param_offload:
             self.offload_params_to_cpu()
 
-    def re_encode_by_rm_tokenizer(self, data: DataProto) -> DataProto:
+    def re_encode_by_rm_tokenizer(self, data: TensorDict) -> TensorDict:
         assert self.use_different_tokenizer, "re-encode need rm tokenizer not be None!"
         # need to use rm tokenizer to re-generate input_ids, attention_mask and position_ids
         # 1. remove pad for each sequence
@@ -122,7 +121,7 @@ class MegatronRewardModel(BasePPORewardModel):
         return data, ori_values
 
     @torch.no_grad()
-    def compute_reward(self, data: DataProto) -> DataProto:
+    def compute_reward(self, data: TensorDict) -> TensorDict:
         if self.config.megatron.param_offload:
             self.load_params_to_cuda()
 
@@ -199,9 +198,9 @@ class MegatronRewardModel(BasePPORewardModel):
 
         batch = TensorDict({"rm_scores": token_level_rewards}, batch_size=input_ids.shape[0])
 
-        return DataProto(batch=batch)
+        return TensorDict(batch=batch)
 
-    def forward_batch(self, data: DataProto, use_dynamic_bsz=False, micro_batch_size=None, max_token_len=None):
+    def forward_batch(self, data: TensorDict, use_dynamic_bsz=False, micro_batch_size=None, max_token_len=None):
         """
         We assume:
         - The model takes input: (input_ids, attention_mask, position_ids). No rmpad for the input

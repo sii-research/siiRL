@@ -27,7 +27,6 @@ from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from transformers import GenerationConfig
 
-from siirl import DataProto
 from siirl.utils.extras.device import get_device_name, get_torch_device
 from siirl.utils.model_utils.torch_functional import get_response_mask
 
@@ -42,12 +41,12 @@ class HFRollout(BaseRollout):
         self.config = config
         self.module = module
 
-    def generate_sequences(self, prompts: DataProto) -> DataProto:
+    def generate_sequences(self, prompts: TensorDict) -> TensorDict:
         batch_size = prompts.batch.batch_size[0]
         num_chunks = max(batch_size // self.config.get("micro_batch_size", batch_size), 1)
         batch_prompts = prompts.chunk(chunks=num_chunks)
         output = [self._generate_minibatch(p) for p in batch_prompts]
-        output = DataProto.concat(output)
+        output = TensorDict.concat(output)
         return output
 
     @torch.no_grad()

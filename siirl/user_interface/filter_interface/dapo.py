@@ -19,7 +19,6 @@ import numpy as np
 from tensordict import TensorDict
 from siirl.params import SiiRLArguments
 from siirl.dag_worker.data_structures import NodeOutput
-from siirl.data_coordinator import DataProto
 from siirl.data_coordinator.sample import filter_tensordict
 
 def dynamic_sampling(config: SiiRLArguments, batch: TensorDict, **kwargs: Any) -> NodeOutput:
@@ -28,7 +27,7 @@ def dynamic_sampling(config: SiiRLArguments, batch: TensorDict, **kwargs: Any) -
 
     Args:
         config (SiiRLArguments): The global training arguments from the configuration.
-        batch (DataProto): The input data batch for this step, which must contain 'uid'
+        batch (TensorDict): The input data batch for this step, which must contain 'uid'
                            in `non_tensor_batch` and the specified metric for filtering.
         node_config (Dict[str, Any]): The configuration specific to this node (not used here).
         **kwargs (Any): Additional keyword arguments (not used here).
@@ -94,7 +93,7 @@ def dynamic_sampling(config: SiiRLArguments, batch: TensorDict, **kwargs: Any) -
         ]
 
     # Filter the original batch by slicing it with the collected indices.
-    # The DataProto object natively supports this slicing operation.
+    # The TensorDict object natively supports this slicing operation.
     filtered_batch = filter_tensordict(batch, kept_traj_indices)
 
     # Calculate and return metrics about the filtering process for logging and analysis.

@@ -58,8 +58,6 @@ from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.nn.utils.rnn import pad_sequence
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin
 
-from siirl import DataProto
-
 from siirl.execution.rollout_flow.multiturn.interactions.base import BaseInteraction
 from siirl.execution.rollout_flow.multiturn.interactions.utils.interaction_registry import initialize_interactions_from_config
 from siirl.third_party.sglang import parallel_state as sglang_ps
@@ -561,10 +559,10 @@ class SGLangRollout(BaseRollout):
         """Generate sequences for a batch of prompts.
 
         Args:
-            batch (DataProto): Input batch.
+            batch (TensorDict): Input batch.
 
         Returns:
-            DataProto: Output batch.
+            TensorDict: Output batch.
             - prompts: [bsz, prompt_length], prompt token ids from dataset.
             - responses: [bsz, response_length], output token ids include response tokens
               from LLM generation and observation tokens from tool_calls.
@@ -607,7 +605,7 @@ class SGLangRollout(BaseRollout):
         8.  If `self.config.free_cache_engine` is true, the SGLang engine's
             KV cache is flushed after generation on the master TP rank.
         Args:
-            prompts: A `DataProto` object containing the batch of
+            prompts: A `TensorDict` object containing the batch of
               input prompts, including tensor data (like `input_ids`,
               `attention_mask`) and meta-information (like `eos_token_id`,
               `do_sample`).
@@ -616,7 +614,7 @@ class SGLangRollout(BaseRollout):
               `max_new_tokens`). These are temporarily applied using
               `update_sampling_params`.
         Returns:
-            DataProto: A `DataProto` object containing the batch of
+            TensorDict: A `TensorDict` object containing the batch of
               generated sequences. This includes tensors for `prompts`
               (original input IDs), `responses` (generated token IDs),
               `input_ids` (concatenated prompt and response),
@@ -1025,7 +1023,7 @@ class SGLangRollout(BaseRollout):
 
     @GPUMemoryLogger(role="sglang rollout", logger=logger)
     @torch.no_grad()
-    def generate_sequences_with_tools(self, prompts: DataProto, **kwargs) -> DataProto:
+    def generate_sequences_with_tools(self, prompts: TensorDict, **kwargs) -> TensorDict:
         logger.warning(
             "`generate_sequences_with_tools` is deprecated, please use `generate_sequences(...)`",
             DeprecationWarning,

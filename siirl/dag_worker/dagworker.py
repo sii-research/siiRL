@@ -37,7 +37,6 @@ from siirl.execution.scheduler.reward import compute_reward, create_reward_manag
 from siirl.execution.scheduler.process_group_manager import ProcessGroupManager
 from siirl.execution.scheduler.enums import AdvantageEstimator, WorkflowType
 from siirl.data_coordinator import preprocess_dataloader, Samples2Dict, Dict2Samples, SampleInfo
-from siirl.data_coordinator import DataProto
 from siirl.data_coordinator.dataloader import DataLoaderNode
 from siirl.dag_worker.data_structures import NodeOutput
 from siirl.dag_worker.constants import DAGConstants, DAGInitializationError
@@ -441,7 +440,7 @@ class DAGWorker(Worker):
         return NodeOutput(batch=batch, metrics={})
 
     @DistProfiler.annotate(role="generate")
-    def generate_multi_agent_mode(self, config, batch: DataProto) -> NodeOutput:
+    def generate_multi_agent_mode(self, config, batch: TensorDict) -> NodeOutput:
         """Generates sequences for a training batch using the multi-agent rollout model."""
         gen_batch = prepare_generation_batch(batch)
         if config.actor_rollout_ref.rollout.agent.rewards_with_env and "reward_model" in batch.non_tensor_batch:
@@ -584,7 +583,7 @@ class DAGWorker(Worker):
         return NodeOutput(batch=processed_data)
 
     @DistProfiler.annotate(role="compute_advantage")
-    def compute_multi_agent_advantage(self, config, batch: DataProto, **kwargs) -> NodeOutput:
+    def compute_multi_agent_advantage(self, config, batch: TensorDict, **kwargs) -> NodeOutput:
         adv_config = config.algorithm
         rollout_config = config.actor_rollout_ref.rollout
         cur_node = kwargs["cur_node"]
@@ -1116,7 +1115,7 @@ class DAGWorker(Worker):
             else:
                 samples = Dict2Samples(data)
                 if not samples:
-                    logger.warning(f"Rank {self._rank}: DataProto for key '{key}' converted to 0 samples. Nothing to put.")
+                    logger.warning(f"Rank {self._rank}: TensorDict for key '{key}' converted to 0 samples. Nothing to put.")
                     return
 
                 with timer(self.enable_perf, f"put_samples_to_coordinator_{key}", timing_raw):
@@ -1172,10 +1171,10 @@ class DAGWorker(Worker):
         cur_dp_size: int,
         cur_dp_rank: int,
         timing_raw: Dict[str, float]
-    ) -> Optional[DataProto]:
+    ) -> Optional[TensorDict]:
         """
         Gets data from the DataCoordinator by filtering for a specific key,
-        then collates the resulting Samples back into a single DataProto.
+        then collates the resulting Samples back into a single TensorDict.
         
         Args:
             key: The key to filter samples
@@ -1234,7 +1233,7 @@ class DAGWorker(Worker):
             samples = ray.get(sample_refs)
 
         with timer(self.enable_perf, f"collate_samples_{key}", timing_raw):
-            # Collate the list of Sample objects back into a single DataProto
+            # Collate the list of Sample objects back into a single TensorDict
             tensordict = Samples2Dict(samples)
 
         return tensordict

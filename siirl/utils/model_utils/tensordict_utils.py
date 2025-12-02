@@ -231,7 +231,7 @@ def pad_to_divisor(data: TensorDict, size_divisor: int):
         data_padded = torch.cat([data] + padding_protos)
     else:
         if len(data) == 0:
-            logging.warning("padding a DataProto with no item, no changed made")
+            logging.warning("padding a TensorDict with no item, no changed made")
         pad_size = 0
         data_padded = data
     return data_padded, pad_size

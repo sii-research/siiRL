@@ -36,7 +36,6 @@ from typing import Dict, Optional, Type, List, Any, Tuple, Union
 from loguru import logger
 from tensordict import TensorDict
 
-from siirl.data_coordinator import DataProto
 from siirl.execution.dag.node import Node, NodeType, NodeRole
 from siirl.execution.dag import TaskGraph
 from siirl.utils.extras.device import get_device_name, device_synchronize
@@ -463,7 +462,7 @@ def prepare_generation_batch(batch: TensorDict) -> TensorDict:
     )
 
 
-def prepare_local_batch_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str, torch.Tensor]:
+def prepare_local_batch_metrics(batch: TensorDict, use_critic: bool = True) -> Dict[str, torch.Tensor]:
     """Extracts raw metric tensors from batch for distributed aggregation."""
     from siirl.utils.metrics.metric_utils import _compute_response_info
 
