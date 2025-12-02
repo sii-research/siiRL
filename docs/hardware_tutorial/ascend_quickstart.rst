@@ -26,6 +26,7 @@ Ensure your environment meets these core software version requirements:
 +---------------------+------------+
 | mindspeed(Optional) | == 0.12.1  |
 +---------------------+------------+
+
 Recommended Base Image
 ^^^^^^^^^^^^^^^^^^^^^^
 
