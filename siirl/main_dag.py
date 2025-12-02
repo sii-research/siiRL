@@ -170,7 +170,8 @@ class MainRunner:
         # In the new architecture, the number of buffers is typically the number of nodes.
         # We pass force_local=False to enable distributed deployment.
         data_coordinator_handle = init_data_coordinator(
-            num_buffers=siirl_args.trainer.nnodes
+            num_buffers=siirl_args.trainer.nnodes, ppo_mini_batch_size = siirl_args.actor_rollout_ref.actor.ppo_mini_batch_size,
+            world_size=siirl_args.trainer.nnodes * siirl_args.trainer.n_gpus_per_node
         )
 
         # 2. Load and configure the workflow task graph (DAG)
