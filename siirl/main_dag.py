@@ -24,7 +24,7 @@ from siirl.execution.scheduler.task_scheduler import TaskScheduler, log_schedule
 from siirl.utils.logger.logging_utils import set_basic_config
 from siirl.params import SiiRLArguments, log_dict_formatted, parse_config
 from siirl.execution.dag import TaskGraph
-from siirl.execution.dag.builtin_pipelines import grpo_pipeline, ppo_pipeline, dapo_pipeline, embodied_grpo_pipeline
+from siirl.execution.dag.builtin_pipelines import grpo_pipeline, ppo_pipeline, dapo_pipeline, embodied_srpo_pipeline
 from siirl.data_coordinator.data_buffer import init_data_coordinator
 from siirl.execution.metric_worker.metric_worker import MetricWorker
 
@@ -121,7 +121,7 @@ def load_pipeline(siirl_args: SiiRLArguments) -> TaskGraph:
                 f"Use 'gae' for PPO or 'grpo' for GRPO."
             )
         elif siirl_args.algorithm.adv_estimator == AdvantageEstimator.GRPO:
-            return embodied_grpo_pipeline()
+            return embodied_srpo_pipeline()
         else:
             raise ValueError(
                 f"Unsupported adv_estimator '{siirl_args.algorithm.adv_estimator}' for Embodied AI. "

@@ -227,7 +227,7 @@ def dapo_pipeline() -> TaskGraph:
 
     return pipeline.build()
 
-def embodied_grpo_pipeline() -> TaskGraph:
+def embodied_srpo_pipeline() -> TaskGraph:
     """
     Embodied AI GRPO training pipeline with data filtering and VJEPA-based reward computation.
 
