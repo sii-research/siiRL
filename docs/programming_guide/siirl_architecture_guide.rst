@@ -1663,46 +1663,8 @@ In traditional frameworks, all intermediate data (Rollout outputs, Reward result
            # - 'key': Target node ID
            # - 'source_dp_size': Source DP size
 
-6.4 Length Balancing Algorithm
-------------------------------
 
-Data Coordinator uses LPT (Longest Processing Time) algorithm to optimize sample distribution:
-
-.. code-block:: python
-
-   def _apply_length_balancing(
-       self,
-       batch_items: List[Tuple[SampleInfo, ray.ObjectRef]],
-       k_partitions: int
-   ) -> List[ray.ObjectRef]:
-       """Reorder samples using LPT algorithm to balance sequence lengths across workers"""
-       
-       # 1. Extract each sample's length
-       seqlen_list = [item[0].sum_tokens for item in batch_items]
-       
-       # 2. Calculate workloads
-       workload_lst = calculate_workload(seqlen_list)
-       
-       # 3. Partition using Karmarkar-Karp algorithm
-       global_partition_lst = get_seqlen_balanced_partitions(
-           workload_lst, k_partitions=self.world_size, equal_size=True
-       )
-       
-       # 4. Sort within each partition (smaller batches at ends to reduce PP bubbles)
-       for idx, partition in enumerate(global_partition_lst):
-           partition.sort(key=lambda x: (workload_lst[x], x))
-           ordered_partition = partition[::2] + partition[1::2][::-1]
-           global_partition_lst[idx] = ordered_partition
-       
-       # 5. Organize sample refs by partition order
-       reordered_refs = []
-       for partition in global_partition_lst:
-           for original_idx in partition:
-               reordered_refs.append(batch_items[original_idx][1])
-       
-       return reordered_refs
-
-6.5 DAGWorker Data Flow Operations
+6.4 DAGWorker Data Flow Operations
 ----------------------------------
 
 .. code-block:: python
