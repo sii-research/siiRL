@@ -168,7 +168,9 @@ Below is a complete example script, `run_qwen3-8b-megatron.sh`, which is adapted
         actor_rollout_ref.rollout.name=vllm
         actor_rollout_ref.rollout.gpu_memory_utilization=\$ROLLOUT_GPU_MEMORY_UTILIZATION
         actor_rollout_ref.rollout.n=\$ROLLOUT_N
-
+        actor_rollout_ref.rollout.prompt_length=\$MAX_PROMPT_LENGTH  
+        actor_rollout_ref.rollout.response_length=\$MAX_RESPONSE_LENGTH
+        
         # --- Trainer Configuration ---
         trainer.logger=['console','tensorboard']
         trainer.project_name=\$PROJECT_NAME
