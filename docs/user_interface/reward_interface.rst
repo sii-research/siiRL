@@ -6,6 +6,58 @@ Custom reward functions allow you to score model-generated responses. Simply wri
 
 **Official Example:** ``siirl/user_interface/rewards_interface/custom_gsm8k_reward.py``
 
+Architecture Overview
+---------------------
+
+::
+
+                           Reward Computation Flow
+   ==============================================================================
+
+   +------------------+     +-------------------+     +------------------+
+   |  Rollout Node    |     |   Reward Node     |     | Advantage Node   |
+   |  (Generation)    |---->|   (Scoring)       |---->|  (Normalization) |
+   +------------------+     +-------------------+     +------------------+
+                                    |
+                                    v
+                            +---------------+
+                            | RewardManager |
+                            +---------------+
+                                    |
+           +------------------------+------------------------+
+           |                        |                        |
+           v                        v                        v
+   +---------------+        +---------------+        +---------------+
+   | Naive Reward  |        | Batch Reward  |        | Custom Reward |
+   | (Rule-based)  |        | (Model-based) |        | (User-defined)|
+   +---------------+        +---------------+        +---------------+
+                                                            |
+                                                            v
+                                                    +---------------+
+                                                    | compute_score |
+                                                    | (data_source, |
+                                                    |  solution_str,|
+                                                    |  ground_truth,|
+                                                    |  extra_info)  |
+                                                    +-------+-------+
+                                                            |
+                                                            v
+                                                    +---------------+
+                                                    | Returns float |
+                                                    | score [0, 1]  |
+                                                    +---------------+
+
+   ==============================================================================
+
+   Custom Reward Function Integration:
+
+   Configuration                          Runtime
+   +---------------------------+          +---------------------------+
+   | custom_reward_function:   |          | RewardManager loads       |
+   |   path: /path/to/file.py  |  ----->  | compute_score function    |
+   |   name: compute_score     |          | and calls it per sample   |
+   +---------------------------+          +---------------------------+
+
 Quick Start
 -----------
 

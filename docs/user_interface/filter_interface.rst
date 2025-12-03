@@ -6,6 +6,51 @@ Filter interface is used for dynamic sampling and data filtering in Pipelines.
 
 **Location:** ``siirl/user_interface/filter_interface/``
 
+Architecture Overview
+---------------------
+
+::
+
+                              Filter Interface Architecture
+   ==============================================================================
+
+   +------------------+     +-------------------+     +------------------+
+   |   Previous Node  |     |   Filter Node     |     |    Next Node     |
+   |   (e.g. Reward)  |---->|   (COMPUTE type)  |---->|  (e.g. Advantage)|
+   +------------------+     +-------------------+     +------------------+
+                                    |
+                                    v
+                            +---------------+
+                            | Filter Logic  |
+                            +---------------+
+                            | 1. Get batch  |
+                            | 2. Compute    |
+                            |    mask       |
+                            | 3. Apply      |
+                            |    filter     |
+                            | 4. Return     |
+                            |    NodeOutput |
+                            +---------------+
+
+   ==============================================================================
+
+   Filter Execution Flow:
+
+   Input Batch              Filter Function              Output
+   +-----------+            +-------------+            +-----------+
+   | samples   |            |             |            | filtered  |
+   | [0,1,2,3, |  ------->  |  mask =     |  ------->  | samples   |
+   |  4,5,6,7] |            |  [T,T,F,T,  |            | [0,1,3,5] |
+   +-----------+            |   F,T,F,F]  |            +-----------+
+                            +-------------+
+                                  |
+                                  v
+                            +-------------+
+                            |  Metrics:   |
+                            | kept_ratio  |
+                            | kept_groups |
+                            +-------------+
+
 Built-in Filters
 ----------------
 
@@ -17,6 +62,19 @@ DAPO Dynamic Sampling
 **Function:** ``dynamic_sampling()``
 
 Filters zero-variance sample groups (all correct or all incorrect).
+
+**Flow Diagram:**
+
+::
+
+   Input: Batch with rewards grouped by uid (prompt)
+   +-----------------------------------------------------------+
+   |  uid=0: [1.0, 1.0, 1.0, 1.0]  -> std=0 -> FILTER OUT     |
+   |  uid=1: [1.0, 0.0, 1.0, 0.0]  -> std>0 -> KEEP           |
+   |  uid=2: [0.0, 0.0, 0.0, 0.0]  -> std=0 -> FILTER OUT     |
+   |  uid=3: [0.5, 0.8, 0.2, 0.9]  -> std>0 -> KEEP           |
+   +-----------------------------------------------------------+
+   Output: Only uid=1 and uid=3 samples remain
 
 **How it works:**
 
@@ -59,6 +117,33 @@ Embodied AI Sampling
 **Function:** ``embodied_local_rank_sampling()``
 
 Filters Embodied AI data based on task completion and accuracy.
+
+**Flow Diagram:**
+
+::
+
+   Input: Embodied rollout batch
+   +-----------------------------------------------------------------------+
+   |                                                                       |
+   |  Step 1: verify() - Compute accuracy from 'complete' field            |
+   |  +-------------------------------------------------------------------+|
+   |  | Sample 0: complete=True  -> acc=1.0                               ||
+   |  | Sample 1: complete=False -> acc=0.0                               ||
+   |  | ...                                                               ||
+   |  +-------------------------------------------------------------------+|
+   |                                                                       |
+   |  Step 2: _filter_batch() - Apply filters                              |
+   |  +-------------------------------------------------------------------+|
+   |  | Accuracy Filter (per prompt group):                               ||
+   |  |   prompt_mean_acc >= lower_bound (0.1)  AND                       ||
+   |  |   prompt_mean_acc <= upper_bound (0.9)                            ||
+   |  |                                                                   ||
+   |  | Truncation Filter:                                                ||
+   |  |   finish_step < max_steps (not truncated)                         ||
+   |  +-------------------------------------------------------------------+|
+   |                                                                       |
+   +-----------------------------------------------------------------------+
+   Output: Filtered batch (only "learnable" samples)
 
 **Features:**
 

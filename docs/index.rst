@@ -17,15 +17,10 @@ siiRL documentation
    :maxdepth: 2
    :caption: Programming guide
 
-   programming_guide/guide
+   programming_guide/siirl_architecture_guide
    programming_guide/code_structure
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Code Explained
-
-   code_explained/siiRL_code_explained
-   code_explained/srpo_code_explained
+   programming_guide/siiRL_code_explained
+   programming_guide/srpo_code_explained
 
 .. toctree::
    :maxdepth: 1
@@ -36,7 +31,7 @@ siiRL documentation
 
 .. toctree::
    :maxdepth: 2
-   :caption: User interface
+   :caption: User Define Interface
 
    user_interface/filter_interface
    user_interface/reward_interface
@@ -56,7 +51,6 @@ siiRL documentation
    examples/deepscaler_example
    examples/mm_eureka_example
    examples/cpgd_example
-   examples/multi_agent
    examples/megatron_backend_example
    examples/embodied_srpo_example
 

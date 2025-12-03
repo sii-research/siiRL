@@ -4,6 +4,50 @@ Pipeline API
 
 Pipeline is a declarative Python API for defining training workflows. Each Pipeline consists of Nodes connected through dependencies to form a DAG.
 
+Architecture Overview
+---------------------
+
+::
+
+                            Pipeline Architecture
+   ==============================================================================
+
+   +------------------+                      +------------------+
+   |    Pipeline      |     .build()         |   TaskGraph      |
+   |    (Builder)     | ------------------> |     (DAG)        |
+   +------------------+                      +------------------+
+   | - pipeline_id    |                      | - graph_id       |
+   | - description    |                      | - nodes: Dict    |
+   | - _nodes: Dict   |                      | - adj: Dict      |
+   +------------------+                      | - rev_adj: Dict  |
+                                             +------------------+
+                                                     |
+                                                     | executed by
+                                                     v
+                                             +------------------+
+                                             |   DAGWorker      |
+                                             |   (per GPU)      |
+                                             +------------------+
+
+   ==============================================================================
+
+   Built-in Pipelines Comparison:
+
+   +----------+------------------------------------------------------------------+
+   | Pipeline | Nodes Flow                                                       |
+   +----------+------------------------------------------------------------------+
+   | GRPO     | rollout -> reward -> advantage -> old_log -> ref_log -> train    |
+   +----------+------------------------------------------------------------------+
+   | PPO      | rollout -> reward -> value -> advantage -> old_log -> ref_log    |
+   |          |         -> train_actor -> train_critic                           |
+   +----------+------------------------------------------------------------------+
+   | DAPO     | rollout -> reward -> dynamic_sampling -> advantage -> old_log    |
+   |          |         -> ref_log -> train                                      |
+   +----------+------------------------------------------------------------------+
+   | Embodied | rollout -> embodied_sampling -> reward -> advantage -> old_log   |
+   | SRPO     |         -> ref_log -> train                                      |
+   +----------+------------------------------------------------------------------+
+
 Basic Usage
 -----------
 

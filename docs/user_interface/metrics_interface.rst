@@ -4,7 +4,67 @@ Metrics Interface
 
 Custom metrics allow you to track and aggregate any quantitative measures during training and validation. siiRL provides a distributed, Ray-based metrics system that automatically handles aggregation across all workers using various reduction operations (mean, max, min, sum).
 
-**Key Architecture:**
+Architecture Overview
+---------------------
+
+::
+
+                         Distributed Metrics Architecture
+   ==============================================================================
+
+   DAGWorker 0        DAGWorker 1        DAGWorker 2        DAGWorker N
+   +-----------+      +-----------+      +-----------+      +-----------+
+   | compute   |      | compute   |      | compute   |      | compute   |
+   | metrics   |      | metrics   |      | metrics   |      | metrics   |
+   +-----+-----+      +-----+-----+      +-----+-----+      +-----+-----+
+         |                  |                  |                  |
+         v                  v                  v                  v
+   +-----+-----+      +-----+-----+      +-----+-----+      +-----+-----+
+   | Metric    |      | Metric    |      | Metric    |      | Metric    |
+   | Client    |      | Client    |      | Client    |      | Client    |
+   +-----+-----+      +-----+-----+      +-----+-----+      +-----+-----+
+         |                  |                  |                  |
+         +------------------+------------------+------------------+
+                                    |
+                                    v
+                         +-------------------+
+                         |   MetricWorker    |  (Ray Actor - Singleton)
+                         |   (Aggregator)    |
+                         +-------------------+
+                         | - Collect metrics |
+                         | - Wait for all    |
+                         |   workers         |
+                         | - Aggregate:      |
+                         |   mean/max/min/   |
+                         |   sum             |
+                         +--------+----------+
+                                  |
+                                  v
+                         +-------------------+
+                         |  Final Metrics    |
+                         | (to Logger/WandB) |
+                         +-------------------+
+
+   ==============================================================================
+
+   Metrics Data Flow:
+
+   +-------------+     +----------------+     +----------------+     +--------+
+   | TensorDict  | --> | compute_*      | --> | MetricClient   | --> | Metric |
+   | (batch)     |     | _metric()      |     | .submit_metric |     | Worker |
+   +-------------+     +----------------+     +----------------+     +--------+
+                              |
+                              v
+                       +-------------+
+                       | Dict[str,   |
+                       |   float]    |
+                       | {name: val} |
+                       +-------------+
+
+   ==============================================================================
+
+**Key Files:**
+
 - ``siirl/execution/metric_worker/metric_worker.py`` - Ray-based distributed metrics aggregation
 - ``siirl/utils/metrics/metric_utils.py`` - Core metric computation functions
 - ``siirl/execution/metric_worker/utils.py`` - Aggregation function utilities
@@ -69,64 +129,117 @@ Method 1: Extending Core Metrics Functions (Recommended)
 Current Metrics System
 ----------------------
 
-Built-in Data Metrics
-~~~~~~~~~~~~~~~~~~~~~~
+Built-in Metrics Reference
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The ``compute_data_metric`` function in ``metric_utils.py`` provides these standard metrics:
+The following tables list all built-in metrics provided by siiRL.
 
-**Critic Metrics:**
-- ``critic/score/mean|max|min`` - Sequence-level scores from token-level scores
-- ``critic/rewards/mean|max|min`` - Sequence-level rewards from token-level rewards
-- ``critic/advantages/mean|max|min`` - Advantages (masked by response_mask)
-- ``critic/returns/mean|max|min`` - Returns (masked by response_mask)
-- ``critic/values/mean|max|min`` - Value function estimates (if available)
-- ``critic/vf_explained_var`` - Explained variance of value function
+**Data Metrics** (from ``compute_data_metric`` in ``metric_utils.py``):
 
-**Response Analysis:**
-- ``response/length/mean|max|min`` - Response token lengths
-- ``response/clip_ratio/mean`` - Proportion hitting max response length
-- ``response/correct_length/mean|max|min`` - Lengths for responses with reward > 0.5
-- ``response/wrong_length/mean|max|min`` - Lengths for responses with reward ≤ 0.5
+.. list-table:: Critic Metrics
+   :header-rows: 1
+   :widths: 40 60
 
-**Prompt Analysis:**
-- ``prompt/length/mean|max|min`` - Prompt token lengths
-- ``prompt/clip_ratio/mean`` - Proportion hitting max prompt length
+   * - Metric Name
+     - Description
+   * - ``critic/score/mean|max|min``
+     - Sequence-level scores from token-level scores
+   * - ``critic/rewards/mean|max|min``
+     - Sequence-level rewards from token-level rewards
+   * - ``critic/advantages/mean|max|min``
+     - Advantages (masked by response_mask)
+   * - ``critic/returns/mean|max|min``
+     - Returns (masked by response_mask)
+   * - ``critic/values/mean|max|min``
+     - Value function estimates (if available)
+   * - ``critic/vf_explained_var``
+     - Explained variance of value function
 
-**System Performance:**
-- ``perf/process_cpu_mem_used_gb`` - CPU memory usage per process
+.. list-table:: Response Analysis Metrics
+   :header-rows: 1
+   :widths: 40 60
 
-**Multi-turn Conversations:**
-- ``num_turns/min|max|mean`` - Statistics for multi-turn conversations (if ``__num_turns__`` present)
+   * - Metric Name
+     - Description
+   * - ``response/length/mean|max|min``
+     - Response token lengths
+   * - ``response/clip_ratio/mean``
+     - Proportion hitting max response length
+   * - ``response/correct_length/mean|max|min``
+     - Lengths for responses with reward > 0.5
+   * - ``response/wrong_length/mean|max|min``
+     - Lengths for responses with reward ≤ 0.5
 
-Built-in Timing Metrics
-~~~~~~~~~~~~~~~~~~~~~~~~
+.. list-table:: Prompt Analysis Metrics
+   :header-rows: 1
+   :widths: 40 60
 
-The ``compute_timing_metrics`` function provides:
+   * - Metric Name
+     - Description
+   * - ``prompt/length/mean|max|min``
+     - Prompt token lengths
+   * - ``prompt/clip_ratio/mean``
+     - Proportion hitting max prompt length
 
-- ``timing_s/{stage}`` - Raw timing in seconds for each stage
-- ``timing_per_token_ms/{stage}`` - Per-token timing in milliseconds
+.. list-table:: System & Multi-turn Metrics
+   :header-rows: 1
+   :widths: 40 60
 
-Stages include: ``gen``, ``ref``, ``values``, ``adv``, ``update_critic``, ``update_actor``
+   * - Metric Name
+     - Description
+   * - ``perf/process_cpu_mem_used_gb``
+     - CPU memory usage per process
+   * - ``num_turns/min|max|mean``
+     - Statistics for multi-turn conversations
 
-Built-in Throughput Metrics
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+**Timing Metrics** (from ``compute_timing_metrics``):
 
-The ``compute_throughout_metrics`` function provides:
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
 
-- ``perf/total_num_tokens`` - Total tokens processed
-- ``perf/time_per_step`` - Time per training step
-- ``perf/throughput`` - Tokens per second per GPU
+   * - Metric Name
+     - Description
+   * - ``timing_s/{stage}``
+     - Raw timing in seconds for each stage
+   * - ``timing_per_token_ms/{stage}``
+     - Per-token timing in milliseconds
 
-Validation Metrics
-~~~~~~~~~~~~~~~~~~
+Stages: ``gen``, ``ref``, ``values``, ``adv``, ``update_critic``, ``update_actor``
 
-The ``process_validation_metrics`` function provides bootstrap sampling metrics:
+**Throughput Metrics** (from ``compute_throughout_metrics``):
 
-- ``val-core/{data_source}/{var}/mean@N`` - Mean across N samples
-- ``val-core/{data_source}/{var}/best@N/mean|std`` - Bootstrap best-of-N statistics
-- ``val-core/{data_source}/{var}/worst@N/mean|std`` - Bootstrap worst-of-N statistics
-- ``val-core/{data_source}/{var}/maj@N/mean|std`` - Bootstrap majority voting statistics
-- ``val/test_score/{data_source}`` - Test score per data source
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - Metric Name
+     - Description
+   * - ``perf/total_num_tokens``
+     - Total tokens processed
+   * - ``perf/time_per_step``
+     - Time per training step
+   * - ``perf/throughput``
+     - Tokens per second per GPU
+
+**Validation Metrics** (from ``process_validation_metrics``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - Metric Name
+     - Description
+   * - ``val-core/{data_source}/{var}/mean@N``
+     - Mean across N samples
+   * - ``val-core/{data_source}/{var}/best@N/mean|std``
+     - Bootstrap best-of-N statistics
+   * - ``val-core/{data_source}/{var}/worst@N/mean|std``
+     - Bootstrap worst-of-N statistics
+   * - ``val-core/{data_source}/{var}/maj@N/mean|std``
+     - Bootstrap majority voting statistics
+   * - ``val/test_score/{data_source}``
+     - Test score per data source
 
 Custom Metrics Implementation
 -----------------------------
