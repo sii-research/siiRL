@@ -106,7 +106,6 @@ Key components include:
         <ul style="margin-left: 0; padding-left: 16px;">
           <li>OpenVLA </li>
           <li>OpenVLA-OFT </li>
-          <li>Custom MLP-Policy </li>
         </ul>
       </td>
       <td>

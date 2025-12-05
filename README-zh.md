@@ -105,7 +105,6 @@ siiRL 是一个**完全分布式、多控制器的架构**。
         <ul style="margin-left: 0; padding-left: 16px;">
           <li>OpenVLA </li>
           <li>OpenVLA-OFT </li>
-          <li>Custom MLP-Policy </li>
         </ul>
       </td>
       <td>
