@@ -25,4 +25,4 @@ def import_string(import_name: str):
         raise ImportError(f"Could not import {import_name}") from e
 
 if __name__ == "__main__":
-    print(import_string("siirl.workers.sharding_manager.fsdp_vllm.MultiAgentFSDPVLLMShardingManager"))
+    print(import_string("siirl.engine.sharding_manager.fsdp_vllm.MultiAgentFSDPVLLMShardingManager"))

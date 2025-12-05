@@ -14,7 +14,7 @@
 
 import re
 from typing import Any, Dict, List
-
+from tensordict import TensorDict
 import numpy as np
 import torch
 from scipy import special
@@ -22,7 +22,6 @@ from scipy.spatial.distance import cdist
 from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import StandardScaler
 
-from siirl import DataProto
 
 
 def _tensor_to_str_list(tensor: torch.Tensor) -> List[str]:
@@ -40,7 +39,7 @@ def _extract_task_name(task_file_name: str) -> str:
 
 
 def compute_embodied_reward(
-    batch_data: DataProto,
+    batch_data: TensorDict,
     **kwargs: Any,
 ) -> List[Dict[str, Any]]:
     """
@@ -53,7 +52,7 @@ def compute_embodied_reward(
     The results are logically and mathematically identical to the original implementation.
 
     Args:
-        batch_data: The DataProto object containing all batch information.
+        batch_data: The TensorDict object containing all batch information.
 
     Returns:
         A list of dictionaries, each containing detailed score information.
@@ -61,11 +60,11 @@ def compute_embodied_reward(
     # --- Step 1: Data Extraction and Global Pre-filtering ---
     from loguru import logger
     
-    batch_size = batch_data.batch["responses"].size(0)
-    completes = np.array(batch_data.batch["complete"].tolist())
-    finish_steps = batch_data.batch["finish_step"].cpu().numpy()
-    embeddings = batch_data.batch["vjepa_embedding"].cpu().numpy()
-    task_file_names = _tensor_to_str_list(batch_data.batch["task_file_name"])
+    batch_size = batch_data["responses"].size(0)
+    completes = np.array(batch_data["complete"].tolist())
+    finish_steps = batch_data["finish_step"].cpu().numpy()
+    embeddings = batch_data["vjepa_embedding"].cpu().numpy()
+    task_file_names = _tensor_to_str_list(batch_data["task_file_name"])
 
     # Pre-filtering: Identify all invalid samples (all-zero embeddings) upfront.
     zero_embedding_mask = np.all(embeddings == 0, axis=1)

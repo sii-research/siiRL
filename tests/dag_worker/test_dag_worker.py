@@ -21,7 +21,6 @@ from tensordict import TensorDict
 from typing import List, Optional, Dict
 
 from siirl.workers.databuffer.data_buffer import DataBuffer
-from siirl.workers.databuffer import DataProto
 from tests.data_buffer.test_data_buffer import compare_dataprotos
 
 
@@ -53,7 +52,7 @@ class MockDAGWorker:
             rank=self._rank,
         )
 
-    async def put_data_to_buffers(self, key: str, data: DataProto, source_dp_size: int, dest_dp_size: int):
+    async def put_data_to_buffers(self, key: str, data: TensorDict, source_dp_size: int, dest_dp_size: int):
         # This is a copy of the logic from the actual DAGWorker
         data.meta_info["padding_values"] = {
             "input_ids": self.tokenizer.pad_token_id,
@@ -73,7 +72,7 @@ class MockDAGWorker:
             put_futures = [buffer.put.remote(key, chunk) for buffer, chunk in zip(self.data_buffers, chunks)]
             await asyncio.gather(*put_futures)
 
-    async def get_data_from_buffers(self, key: str, my_current_dp_rank: int, my_current_dp_world_size: int) -> Optional[DataProto]:
+    async def get_data_from_buffers(self, key: str, my_current_dp_rank: int, my_current_dp_world_size: int) -> Optional[TensorDict]:
         # This is a copy of the logic from the actual DAGWorker
         if not self.data_buffers:
             return None
@@ -86,17 +85,17 @@ class MockDAGWorker:
         if isinstance(first_item, ray.ObjectRef):
             return await first_item
 
-        elif isinstance(first_item, DataProto):
+        elif isinstance(first_item, TensorDict):
             my_sub_chunks = [first_item]
             get_futures = [buffer.get.remote(key, my_current_dp_rank, my_current_dp_world_size) for buffer in self.data_buffers[1:]]
             other_sub_chunks = await asyncio.gather(*get_futures)
 
             for sub_chunk in other_sub_chunks:
-                if not isinstance(sub_chunk, DataProto):
+                if not isinstance(sub_chunk, TensorDict):
                     return None
                 my_sub_chunks.append(sub_chunk)
 
-            return DataProto.concat(my_sub_chunks)
+            return TensorDict.concat(my_sub_chunks)
 
         return None
 
@@ -107,14 +106,14 @@ class MockDAGWorker:
         dist.barrier()
 
 
-def _create_test_dp(batch_size: int, seq_len: int, meta: Optional[Dict] = None) -> DataProto:
-    """Creates a sample DataProto for testing."""
+def _create_test_dp(batch_size: int, seq_len: int, meta: Optional[Dict] = None) -> TensorDict:
+    """Creates a sample TensorDict for testing."""
     tensors = {
         "input_ids": torch.randint(1, 100, (batch_size, seq_len)),
         "attention_mask": torch.ones(batch_size, seq_len, dtype=torch.long),
     }
     td = TensorDict(tensors, batch_size=[batch_size])
-    return DataProto(batch=td, meta_info=meta or {})
+    return TensorDict(batch=td, meta_info=meta or {})
 
 
 class TestDAGWorkerDataFlow(unittest.IsolatedAsyncioTestCase):
@@ -131,7 +130,7 @@ class TestDAGWorkerDataFlow(unittest.IsolatedAsyncioTestCase):
     async def test_put_get_flow_sharded(self):
         """
         Tests the data flow for sharded storage (source_dp != dest_dp).
-        - A single worker (rank 0) puts a sharded DataProto.
+        - A single worker (rank 0) puts a sharded TensorDict.
         - All workers get their corresponding data and reconstruct it.
         """
         num_buffers = 2
@@ -172,14 +171,14 @@ class TestDAGWorkerDataFlow(unittest.IsolatedAsyncioTestCase):
                 sub_sub_chunks = buffer_chunk.chunk(chunks=dest_dp)
                 sub_chunks_for_worker.append(sub_sub_chunks[worker_rank])
             # The worker's final data is the concatenation of the sub-shards it receives from all buffers.
-            expected_shards_by_worker.append(DataProto.concat(sub_chunks_for_worker))
+            expected_shards_by_worker.append(TensorDict.concat(sub_chunks_for_worker))
 
         self.assertEqual(len(results), len(expected_shards_by_worker))
 
         for i, result_dp in enumerate(results):
             self.assertIsNotNone(result_dp, f"Worker {i} received None")
             expected_dp = expected_shards_by_worker[i]
-            self.assertTrue(compare_dataprotos(expected_dp, result_dp, check_meta=False), f"DataProto for worker {i} does not match the expected interleaved shard. Expected size {len(expected_dp)}, got {len(result_dp)}")
+            self.assertTrue(compare_dataprotos(expected_dp, result_dp, check_meta=False), f"TensorDict for worker {i} does not match the expected interleaved shard. Expected size {len(expected_dp)}, got {len(result_dp)}")
 
         # Cleanup
         for actor in workers + buffers:
@@ -188,7 +187,7 @@ class TestDAGWorkerDataFlow(unittest.IsolatedAsyncioTestCase):
     async def test_put_get_flow_object_ref(self):
         """
         Tests the data flow for ObjectRef storage (source_dp == dest_dp).
-        - A single worker (rank 0) puts a DataProto, which becomes an ObjectRef.
+        - A single worker (rank 0) puts a TensorDict, which becomes an ObjectRef.
         - All workers get and resolve the same ObjectRef.
         """
         num_buffers = 1  # Only one buffer is used in this case
@@ -217,7 +216,7 @@ class TestDAGWorkerDataFlow(unittest.IsolatedAsyncioTestCase):
         # In the ObjectRef case, every worker gets the same data.
         for i, result_dp in enumerate(results):
             self.assertIsNotNone(result_dp, f"Worker {i} received None")
-            self.assertTrue(compare_dataprotos(full_dp, result_dp, check_meta=False), f"DataProto for worker {i} does not match the original")
+            self.assertTrue(compare_dataprotos(full_dp, result_dp, check_meta=False), f"TensorDict for worker {i} does not match the original")
 
         # Cleanup
         for actor in workers + buffers:

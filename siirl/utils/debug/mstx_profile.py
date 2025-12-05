@@ -21,7 +21,7 @@ from typing import Any, Callable, Optional
 
 import torch_npu
 from torch_npu.npu import mstx
-from siirl.utils.params import ProfilerArguments
+from siirl.params import ProfilerArguments
 from loguru import logger
 
 from .profile import DistProfiler

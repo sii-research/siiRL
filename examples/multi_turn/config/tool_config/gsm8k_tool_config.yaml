@@ -1,5 +1,5 @@
 tools:
-  - class_name: "siirl.multiturn.tools.gsm8k_tool.Gsm8kTool"
+  - class_name: "siirl.execution.rollout_flow.multiturn.tools.gsm8k_tool.Gsm8kTool"
     config: 
       type: native
     tool_schema:

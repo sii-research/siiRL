@@ -27,7 +27,7 @@ export TRAIN_MICRO_BATCH_SIZE=8
 export OFFLOAD=False
 export MAX_PROMPT_LENGTH=2048
 export MAX_RESPONSE_LENGTH=8192
-export ROLLOUT_GPU_MEMORY_UTILIZATION=0.7
+export ROLLOUT_GPU_MEMORY_UTILIZATION=0.6
 export ROLLOUT_TP=2
 export ROLLOUT_N=8
 export SAVE_FREQ=30
@@ -88,7 +88,7 @@ export TOP_K=-1                  # Top-k sampling (-1 for disabled)
 
 # --- Define the Training Command and its Arguments ---
 TRAINING_CMD=(
-    python3 -m siirl.client.main_dag
+    python3 -m siirl.main_dag
     algorithm.adv_estimator=\$ALG
     data.train_files=\$TRAIN_DATA_PATH
     data.val_files=\$TEST_DATA_PATH
@@ -124,6 +124,8 @@ TRAINING_CMD=(
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=\$INFER_MICRO_BATCH_SIZE
     actor_rollout_ref.rollout.tensor_model_parallel_size=\$ROLLOUT_TP
     actor_rollout_ref.rollout.name=vllm
+    actor_rollout_ref.rollout.prompt_length=\$MAX_PROMPT_LENGTH  
+    actor_rollout_ref.rollout.response_length=\$MAX_RESPONSE_LENGTH
     actor_rollout_ref.rollout.gpu_memory_utilization=\$ROLLOUT_GPU_MEMORY_UTILIZATION
     actor_rollout_ref.rollout.enable_chunked_prefill=True
     actor_rollout_ref.rollout.enforce_eager=False

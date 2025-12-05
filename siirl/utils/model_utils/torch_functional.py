@@ -268,7 +268,8 @@ def broadcast_dict_tensor(tensors: Union[Dict[str, torch.Tensor], TensorDict], s
     """
 
     for key in tensors.sorted_keys:
-        torch.distributed.broadcast(tensors[key], src=src, group=group, async_op=False)
+        if isinstance(tensors[key], torch.Tensor):
+            torch.distributed.broadcast(tensors[key], src=src, group=group, async_op=False)
 
 
 def allgather_dict_tensors(tensors: Union[Dict[str, torch.Tensor], TensorDict], size, group, dim=0):

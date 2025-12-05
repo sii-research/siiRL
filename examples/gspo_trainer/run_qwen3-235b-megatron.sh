@@ -89,7 +89,7 @@ export PPO_MINI_BATCH_SIZE=$(($PPO_MINI_BATCH_SIZE_PER_NODE * $NNODES))
 
 # --- Define the Training Command and its Arguments ---
 TRAINING_CMD=(
-    python3 -m siirl.client.main_dag
+    python3 -m siirl.main_dag
     algorithm.adv_estimator=\$ADV_ESTIMATOR
     data.train_files=\$TRAIN_DATA_PATH
     data.val_files=\$TEST_DATA_PATH
@@ -147,6 +147,8 @@ TRAINING_CMD=(
     # Rollout configuration (235B)
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.rollout.tensor_model_parallel_size=\$ROLLOUT_TP
+    actor_rollout_ref.rollout.prompt_length=\$MAX_PROMPT_LENGTH  
+    actor_rollout_ref.rollout.response_length=\$MAX_RESPONSE_LENGTH
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.gpu_memory_utilization=\$ROLLOUT_GPU_MEMORY_UTILIZATION
     actor_rollout_ref.rollout.max_model_len=\$MAX_MODEL_LENGTH

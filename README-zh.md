@@ -76,6 +76,50 @@ siiRL 是一个**完全分布式、多控制器的架构**。
 * **DAG Workers**: 核心执行单元，每个DAG Worker绑定到单个 GPU，独立运行其分配的任务。
 * **Data Coordinator**: 一组分布式组件（`分布式数据加载器`和`分布式数据缓冲区`），无需中央协调器即可管理从初始加载到中间数据重分配的整个数据生命周期。
 
+### 典型支持的模型与算法
+
+<table style="width: 100%; table-layout: auto; border-collapse: collapse;">
+  <thead align="center" valign="bottom">
+    <tr>
+      <th style="min-width: 120px;">模型</th>
+      <th style="min-width: 120px;">算法</th>
+    </tr>
+  </thead>
+  <tbody valign="top">
+    <tr>
+      <td>
+        <b>Qwen2.5 系列</b>
+        <ul style="margin-left: 0; padding-left: 16px;">
+          <li>Qwen2.5-7B </li>
+          <li>Qwen2.5-72B </li>
+          <li>Qwen2.5-VL-7B </li>
+          <li>Qwen2.5-VL-72B </li>
+        </ul>
+        <b>Qwen3 系列</b>
+        <ul style="margin-left: 0; padding-left: 16px;">
+          <li>Qwen3-1.7B </li>
+          <li>Qwen3-30B </li>
+          <li>Qwen3-235B-A22B (MoE) </li>
+        </ul>
+        <b>VLA 模型</b>
+        <ul style="margin-left: 0; padding-left: 16px;">
+          <li>OpenVLA </li>
+          <li>OpenVLA-OFT </li>
+        </ul>
+      </td>
+      <td>
+        <b>强化学习算法</b>
+        <ul style="margin-left: 极: 0; padding-left: 16px;">
+          <li>GRPO </li>
+          <li>PPO </li>
+          <li>DAPO </li>
+          <li>GSPO </li>
+        </ul>
+      </td>
+    </tr>
+  </tbody>
+</table>
+
 ## 🧪 实验评测
 
 我们对 siiRL 的性能和扩展性进行了全面评测，并与业界领先的 RL 框架 verl 进行了比较。实验表明，siiRL 在所有指标上均表现出卓越的性能。
@@ -141,16 +185,13 @@ siiRL 展示了近线性的扩展能力，可平滑扩展至 1024 张 GPU。相�
 
 ## 🗓️ 未来计划
 
-siiRL 仍在积极开发中。我们对未来充满期待，并致力于在两个关键方向上扩展框架的功能：推进多智能体支持和优化基础框架。
+siiRL 仍在积极开发中。我们对未来充满期待，并致力于在两个关键方向上扩展框架的功能：支持真实机器人 VLA 训练和训练推理分离。
 
-### 增强的多智能体能力
-我们灵活的 DAG 设计为复杂的多智能体系统提供了天然且强大的基础。
+### 具身 VLA 训练与真实世界部署
+我们正在扩展视觉-语言-动作（VLA）能力，以支持**真实世界机器人部署**。
 
-### 支持 VLA 训练
-其目标是创建一个能够为具身智能（embodied AI）任务训练大规模、多模态 VLA 模型的端到端分布式强化学习（RL）解决方案。您可以在此 [Pull Request](https://github.com/sii-research/siiRL/pull/30) 中跟踪此功能的开发进度。
-
-### 基础框架增强
-我们将持续努力提升核心系统的性能、效率和扩展性。
+### 训练-推理分离架构
+为增强部署灵活性和资源利用率，我们正在开发**解耦的训练-推理架构**。
 
 ---
 

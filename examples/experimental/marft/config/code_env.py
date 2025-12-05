@@ -12,11 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from siirl.workers.environment.base import BaseEnvironment
 from siirl.utils.reward_score.prime_code import compute_score
 from typing import Any, Dict, Optional, Tuple
 import asyncio
-class CodeEnv(BaseEnvironment):
+class CodeEnv():
     def __init__(self):
         pass
     def reset(self) -> Any:
