@@ -158,7 +158,7 @@ To ensure your setup is correct, we recommend performing a quick test run. The f
 
     # --- Define the Training Command and its Arguments ---
     TRAINING_CMD=(
-        python3 -m siirl.client.main_dag
+        python3 -m siirl.main_dag
         algorithm.adv_estimator=\$ALG
         data.train_files=\$TRAIN_DATA_PATH
         data.val_files=\$TEST_DATA_PATH

@@ -10,10 +10,9 @@ export ALG=grpo
 export MODEL_NAME=qwen2.5-vl-7b
 
 # --- Path Definitions ---
-export HOME={your_home_path}
-export TRAIN_DATA_PATH=$HOME/data/datasets/$DATASET/train.parquet
-export TEST_DATA_PATH=$HOME/data/datasets/$DATASET/test.parquet
-export MODEL_PATH=$HOME/data/models/Qwen2.5-VL-7B-Instruct
+export TRAIN_DATA_PATH=/inspire/hdd/project/qianghuaxuexi/public/datasets/mm_eureka/train.parquet
+export TEST_DATA_PATH=/inspire/hdd/project/qianghuaxuexi/public/datasets/mm_eureka/test.parquet
+export MODEL_PATH=/inspire/hdd/project/qianghuaxuexi/public/models/Qwen2.5-VL-7B-Instruct
 
 # Base output paths
 export BASE_CKPT_PATH=ckpts
@@ -59,7 +58,7 @@ export PPO_MINI_BATCH_SIZE=$(($PPO_MINI_BATCH_SIZE_PER_NODE * $NNODES))
 
 # --- Define the Training Command and its Arguments ---
 TRAINING_CMD=(
-    python3 -m siirl.client.main_dag
+    python3 -m siirl.main_dag
     algorithm.adv_estimator=\$ALG
     data.train_files=\$TRAIN_DATA_PATH
     data.val_files=\$TEST_DATA_PATH
@@ -92,6 +91,8 @@ TRAINING_CMD=(
     actor_rollout_ref.rollout.enforce_eager=False
     actor_rollout_ref.rollout.free_cache_engine=False
     actor_rollout_ref.rollout.n=\$ROLLOUT_N
+    actor_rollout_ref.rollout.prompt_length=\$MAX_PROMPT_LENGTH  
+    actor_rollout_ref.rollout.response_length=\$MAX_RESPONSE_LENGTH
     actor_rollout_ref.rollout.engine_kwargs.vllm.disable_mm_preprocessor_cache=True
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.ref.fsdp_config.param_offload=True

@@ -26,6 +26,7 @@ Ensure your environment meets these core software version requirements:
 +---------------------+------------+
 | mindspeed(Optional) | == 0.12.1  |
 +---------------------+------------+
+
 Recommended Base Image
 ^^^^^^^^^^^^^^^^^^^^^^
 
@@ -118,7 +119,7 @@ To ensure your setup is correct, we recommend performing a quick test run. The f
 
     set -x
 
-    python3 -m siirl.client.main_dag \
+    python3 -m siirl.main_dag \
         algorithm.adv_estimator=grpo \
         data.train_files=/datasets/gsm8k/train.parquet\
         data.val_files=/datasets/gsm8k/teset.parquet \

@@ -34,7 +34,6 @@ from transformers import (
     PreTrainedModel,
 )
 from transformers.modeling_outputs import CausalLMOutputWithPast
-
 from siirl.models.registry import ModelRegistry
 
 

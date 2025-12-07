@@ -71,8 +71,8 @@ For this task, we use a simple but effective rule-based reward function. The fra
 
 **Training Script**
 
-Below is a complete training script based on `examples/ppo_trainer/run_qwen2_5-7b.sh`. It is configured for a single-node, multi-GPU setup. You should adapt paths like `HOME` to your environment.
+Below is a complete training script based on `examples/ppo_trainer/run_qwen3-8b.sh`. It is configured for a single-node, multi-GPU setup. You should adapt paths like `HOME` to your environment.
 
-.. literalinclude:: ../../examples/ppo_trainer/run_qwen2_5-7b.sh
+.. literalinclude:: ../../examples/ppo_trainer/run_qwen3-8b.sh
    :language: bash
    :caption: examples/ppo_trainer/run_qwen2_5-7b.sh

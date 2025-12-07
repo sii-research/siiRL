@@ -22,10 +22,23 @@ from torch import distributed as dist
 
 import siirl.utils.model_utils.tensordict_utils as tu
 from siirl.utils.extras.device import get_device_name
-from siirl.workers.databuffer.protocol import DataProto
+from tensordict import TensorDict
 
 
-def karmarkar_karp(seqlen_list: List[int], k_partitions: int, equal_size: bool):
+
+def calculate_workload(seqlen_list: list[int]):
+    """
+    Calculate the workload for a dense transformer block based on sequence length.
+    FLOPs = 12 * hidden_size^2 * seqlen + 2 * hidden_size * seqlen^2
+    Hardcodes the constants by a 7B model (hidden_size=4096),
+    so the FLOPs are propotional to (6 * 4096 * seqlen + seqlen^2).
+    """
+    if not isinstance(seqlen_list, torch.Tensor):
+        seqlen_list = torch.tensor(seqlen_list, dtype=torch.int64)
+    return 24576 * seqlen_list + seqlen_list**2
+
+
+def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool):
     # see: https://en.wikipedia.org/wiki/Largest_differencing_method
     class Set:
         def __init__(self) -> None:
@@ -49,7 +62,7 @@ def karmarkar_karp(seqlen_list: List[int], k_partitions: int, equal_size: bool):
             return self.items < other.items
 
     class State:
-        def __init__(self, items: List[Tuple[int, int]], k: int) -> None:
+        def __init__(self, items: list[tuple[int, int]], k: int) -> None:
             self.k = k
             # sets should always be decreasing order
             self.sets = [Set() for _ in range(k)]
@@ -129,7 +142,7 @@ def karmarkar_karp(seqlen_list: List[int], k_partitions: int, equal_size: bool):
     return partitions
 
 
-def greedy_partition(seqlen_list: List[int], k_partitions: int, equal_size: bool):
+def greedy_partition(seqlen_list: list[int], k_partitions: int, equal_size: bool):
     bias = sum(seqlen_list) + 1 if equal_size else 0
     sorted_seqlen = [(seqlen + bias, i) for i, seqlen in enumerate(seqlen_list)]
     partitions = [[] for _ in range(k_partitions)]
@@ -149,7 +162,7 @@ def greedy_partition(seqlen_list: List[int], k_partitions: int, equal_size: bool
     return partitions
 
 
-def get_seqlen_balanced_partitions(seqlen_list: List[int], k_partitions: int, equal_size: bool):
+def get_seqlen_balanced_partitions(seqlen_list: list[int], k_partitions: int, equal_size: bool):
     """
     Calculates partitions of indices from seqlen_list such that the sum of sequence lengths
     in each partition is balanced. Uses the Karmarkar-Karp differencing method.
@@ -193,14 +206,28 @@ def get_seqlen_balanced_partitions(seqlen_list: List[int], k_partitions: int, eq
     return _check_and_sort_partitions(partitions)
 
 
-def log_seqlen_unbalance(seqlen_list: List[int], partitions: List[List[int]], prefix):
-    # add some metrics of seqlen sum on dp ranks
+def log_seqlen_unbalance(seqlen_list: list[int], partitions: list[list[int]], prefix):
+    """
+    Calculate and log metrics related to sequence length imbalance before and after partitioning.
+
+    Args:
+        seqlen_list (List[int]): A list of sequence lengths for each item.
+        partitions (List[List[int]]): A list of partitions, where each inner list contains indices
+                                      from seqlen_list assigned to that partition.
+        prefix (str): A prefix to be added to each metric key in the returned dictionary.
+
+    Returns:
+        dict: A dictionary containing metrics related to sequence length imbalance.
+    """
+    # Get the number of partitions
     k_partition = len(partitions)
     # assert len(seqlen_list) % k_partition == 0
     batch_size = len(seqlen_list) // k_partition
     min_sum_seqlen = None
     max_sum_seqlen = None
     total_sum_seqlen = 0
+
+    # Iterate over each batch of sequence lengths
     for offset in range(0, len(seqlen_list), batch_size):
         cur_sum_seqlen = sum(seqlen_list[offset : offset + batch_size])
         if min_sum_seqlen is None or cur_sum_seqlen < min_sum_seqlen:
@@ -285,20 +312,22 @@ def rearrange_micro_batches(
     if num_batches_divided_by is not None:
         num_micro_batches = roundup_divisible(num_micro_batches, num_batches_divided_by)
 
-    seq_len_effective = seq_len_effective.tolist()
     assert num_micro_batches <= len(seq_len_effective)
 
-    micro_bsz_idx = get_seqlen_balanced_partitions(seq_len_effective, num_micro_batches, equal_size=False)
+    workloads = calculate_workload(seq_len_effective)
+    micro_bsz_idx = get_seqlen_balanced_partitions(workloads, num_micro_batches, equal_size=False)
 
     if use_dynamic_bsz_balance:
         # Use the sum of squared sequence lengths to approximate attention computation workload
         micro_bsz_idx.sort(
             key=lambda partition: (
-                sum(seq_len_effective[idx] ** 2 for idx in partition),
-                min(partition) if partition else 0,
+                sum(workloads[idx] for idx in partition),
+                partition[0] if partition else 0,
             ),
             reverse=True,
         )
+        # Place smaller micro-batches at both ends to reduce the bubbles exposed during the warm-up and cool-down.
+        micro_bsz_idx = micro_bsz_idx[::2][::-1] + micro_bsz_idx[1::2]
 
     micro_batches = []
 
@@ -328,27 +357,27 @@ def get_reverse_idx(idx_map):
 
 
 def prepare_dynamic_batch(
-    data: DataProto,
+    data: TensorDict,
     max_token_len: int,
     dp_group=None,
     num_batches_divided_by=None,
     same_micro_num_in_dp=True,
     min_num_micro_batch=None,
     use_dynamic_bsz_balance=True,
-) -> tuple[list[DataProto], list[list[int]]]:
+) -> tuple[list[TensorDict], list[list[int]]]:
     """
     Prepare a batch for dynamic batching.
 
     Args:
-        data (DataProto): The input data.
+        data (Tensordict): The input data.
         max_token_len (int): The maximum token length for dynamic batching.
 
     Returns:
-        Tuple[List[DataProto], List[List[int]]]: A tuple containing a list of DataProto objects
+        Tuple[List[Tensordict], List[List[int]]]: A tuple containing a list of Tensordict objects
         and a list of index lists.
     """
     batch, batch_idx_list = rearrange_micro_batches(
-        data.batch,
+        data,
         max_token_len=max_token_len,
         dp_group=dp_group,
         num_batches_divided_by=num_batches_divided_by,
@@ -358,10 +387,7 @@ def prepare_dynamic_batch(
     )
     micro_batches = []
     for i, batch_idx in enumerate(batch_idx_list):
-        tensors = dict(batch[i])
-        non_tensors = {key: value[batch_idx] for key, value in data.non_tensor_batch.items()}
-        meta_info = copy.deepcopy(data.meta_info)
-        micro_batches.append(DataProto.from_dict(tensors, non_tensors, meta_info=meta_info))
+        micro_batches.append(batch)
 
     return micro_batches, batch_idx_list
 

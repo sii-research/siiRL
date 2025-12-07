@@ -100,9 +100,7 @@ export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${ALG}_${DATASET}_${timestamp}
 
 # --- Define the Training Command ---
 TRAINING_CMD=(
-    python3 -m siirl.client.main_dag
-    --config-name=embodied_srpo_trainer
-    
+    python3 -m siirl.main_dag
     # Data configuration
     data.train_files=\$TRAIN_DATA_PATH
     data.val_files=\$TEST_DATA_PATH
@@ -110,7 +108,13 @@ TRAINING_CMD=(
     data.val_batch_size=\$VAL_BATCH_SIZE
     data.max_prompt_length=\$MAX_PROMPT_LENGTH
     data.max_response_length=\$MAX_RESPONSE_LENGTH
-    
+    data.dataset_type=embodied  
+
+    # Reward
+    reward_model.reward_manager=embodied
+    reward_model.reward_kwargs.action_token_len=7
+    reward_model.reward_kwargs.reward_coef=5.0
+
     # Algorithm configuration
     algorithm.workflow_type=embodied
     algorithm.adv_estimator=grpo
@@ -119,6 +123,7 @@ TRAINING_CMD=(
     algorithm.norm_adv_by_std_in_grpo=True
     
     # Embodied sampling configuration (aligned with DAPO architecture)
+    algorithm.filter_groups.enable=True
     algorithm.embodied_sampling.filter_accuracy=\$FILTER_ACCURACY
     algorithm.embodied_sampling.accuracy_lower_bound=\$ACCURACY_LOWER_BOUND
     algorithm.embodied_sampling.accuracy_upper_bound=\$ACCURACY_UPPER_BOUND
@@ -128,13 +133,15 @@ TRAINING_CMD=(
     # Model configuration
     actor_rollout_ref.model.path=\$MODEL_PATH
     actor_rollout_ref.model.enable_gradient_checkpointing=True
-    
+    actor_rollout_ref.model.model_type=embodied
+    actor_rollout_ref.model.trust_remote_code=True
     # Actor configuration
     actor_rollout_ref.actor.optim.lr=\$LEARNING_RATE
     actor_rollout_ref.actor.optim.weight_decay=\$WEIGHT_DECAY
     actor_rollout_ref.actor.ppo_mini_batch_size=\$PPO_MINI_BATCH_SIZE
     actor_rollout_ref.actor.ppo_epochs=\$PPO_EPOCHS
     actor_rollout_ref.actor.grad_clip=\$GRAD_CLIP
+    actor_rollout_ref.actor.clip_ratio_c=10000.0
     actor_rollout_ref.actor.clip_ratio_high=\$CLIP_RATIO_HIGH
     actor_rollout_ref.actor.clip_ratio_low=\$CLIP_RATIO_LOW
     actor_rollout_ref.actor.entropy_coeff=\$ENTROPY_COEFF
@@ -150,6 +157,7 @@ TRAINING_CMD=(
     actor_rollout_ref.rollout.n=\$ROLLOUT_N_SAMPLES
     actor_rollout_ref.rollout.temperature=\$TEMPERATURE
     actor_rollout_ref.rollout.do_sample=True
+    actor_rollout_ref.rollout.prompt_length=\$MAX_PROMPT_LENGTH  
     actor_rollout_ref.rollout.response_length=512
     
     # Embodied AI specific configuration

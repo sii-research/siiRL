@@ -90,7 +90,7 @@ export SOCKET_NIC=ens1
 
 # --- Define the Training Command and its Arguments ---
 TRAINING_CMD=(
-    python3 -m siirl.client.main_dag
+    python3 -m siirl.main_dag
     algorithm.adv_estimator=\$ALG
     data.train_files=\$TRAIN_DATA_PATH
     data.val_files=\$TEST_DATA_PATH
@@ -125,6 +125,8 @@ TRAINING_CMD=(
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.free_cache_engine=True
     actor_rollout_ref.rollout.n=\$ROLLOUT_N
+    actor_rollout_ref.rollout.prompt_length=\$MAX_PROMPT_LENGTH  
+    actor_rollout_ref.rollout.response_length=\$MAX_RESPONSE_LENGTH
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=$(($PPO_MICRO_BATCH_SIZE_PER_GPU * 4))
     actor_rollout_ref.ref.fsdp_config.param_offload=True
     algorithm.use_kl_in_reward=False
