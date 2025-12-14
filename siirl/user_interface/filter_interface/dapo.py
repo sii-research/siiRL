@@ -67,8 +67,14 @@ def dynamic_sampling(config: SiiRLArguments, batch: TensorDict, **kwargs: Any) -
     metric_values = batch[metric_name]
 
     for i in range(len(uids)):
-        # Convert tensor uid to Python int for use as dict key
-        uid_key = int(uids[i]) if hasattr(uids[i], 'item') else uids[i]
+        # Convert uid to a hashable key (supports both int and str types)
+        uid_val = uids[i]
+        if hasattr(uid_val, 'item'):
+            # Handle torch.Tensor or numpy scalar
+            uid_key = uid_val.item()
+        else:
+            # Already a Python type (int, str, etc.)
+            uid_key = uid_val
         prompt_uid_to_metric_vals[uid_key].append(metric_values[i])
 
     # Calculate the standard deviation of the metric for each group of trajectories.
@@ -87,9 +93,15 @@ def dynamic_sampling(config: SiiRLArguments, batch: TensorDict, **kwargs: Any) -
     if not kept_prompt_uids:
         kept_traj_indices = []
     else:
+        def get_uid_key(uid_val):
+            """Convert uid value to a hashable key (supports both int and str types)."""
+            if hasattr(uid_val, 'item'):
+                return uid_val.item()
+            return uid_val
+        
         kept_traj_indices = [
             idx for idx in range(len(uids))
-            if (int(uids[idx]) if hasattr(uids[idx], 'item') else uids[idx]) in kept_prompt_uids
+            if get_uid_key(uids[idx]) in kept_prompt_uids
         ]
 
     # Filter the original batch by slicing it with the collected indices.

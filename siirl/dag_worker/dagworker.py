@@ -1121,11 +1121,19 @@ class DAGWorker(Worker):
                 with timer(self.enable_perf, f"put_samples_to_coordinator_{key}", timing_raw):
                     sample_infos = []
                     for sample in samples:
-                        # Convert uid to string (handle tensor uid from postprocess_sampling)
-                        uid_val = getattr(sample, 'uid', uuid.uuid4().int)
-                        if isinstance(uid_val, torch.Tensor):
-                            uid_str = str(int(uid_val.item()))
+                        # Get uid as string (supports UUID strings, tensors, or generates a new UUID if missing)
+                        uid_val = getattr(sample, 'uid', None)
+                        if uid_val is None:
+                            # No uid set, generate a new UUID string
+                            uid_str = str(uuid.uuid4())
+                        elif isinstance(uid_val, torch.Tensor):
+                            # Handle legacy tensor uid (convert to string)
+                            uid_str = str(uid_val.item())
+                        elif hasattr(uid_val, 'item'):
+                            # Handle numpy scalar
+                            uid_str = str(uid_val.item())
                         else:
+                            # Already a Python type (str, int, etc.)
                             uid_str = str(uid_val)
                         
                         sample_infos.append(SampleInfo(
