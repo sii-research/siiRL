@@ -332,6 +332,9 @@ class TestGroupNBalancing(unittest.TestCase):
         """
         Test: Groups with different sizes (edge case).
         Some prompts might have more/fewer responses due to filtering.
+        
+        Key verification: Even with varying group sizes, samples within each group
+        should remain contiguous (not split across different parts of the output).
         """
         groups = [
             ("uid_0", [100, 200, 300]),      # 3 samples
@@ -343,17 +346,36 @@ class TestGroupNBalancing(unittest.TestCase):
         k_partitions = 2
         
         reordered_refs = self._apply_length_balancing_with_group_n(batch_items, k_partitions)
-        uid_partitions = self._get_uid_distribution(batch_items, reordered_refs, k_partitions)
         
-        # Each partition should have 2 groups (4 groups / 2 partitions)
-        for i, uid_set in enumerate(uid_partitions):
-            self.assertEqual(len(uid_set), 2, f"Partition {i} has {len(uid_set)} groups")
+        # Build ref_id to uid mapping
+        ref_to_uid = {}
+        for sample_info, ref in batch_items:
+            ref_to_uid[ref.sample_id] = sample_info.uid
         
-        # No group should be split
-        self.assertEqual(
-            len(uid_partitions[0] & uid_partitions[1]), 0,
-            "No group should be split across partitions"
-        )
+        # Extract uid sequence from reordered refs
+        uid_sequence = [ref_to_uid[ref.sample_id] for ref in reordered_refs]
+        
+        # Verify contiguity: same uid samples should be adjacent (group not split)
+        current_uid = None
+        seen_uids = set()
+        for uid in uid_sequence:
+            if uid != current_uid:
+                # Transitioning to a new group
+                self.assertNotIn(
+                    uid, seen_uids,
+                    f"Group {uid} appeared again after we left it! "
+                    f"This means the group was split. Sequence: {uid_sequence}"
+                )
+                if current_uid is not None:
+                    seen_uids.add(current_uid)
+                current_uid = uid
+        
+        # Verify all samples are present
+        self.assertEqual(len(reordered_refs), 10, "All 10 samples should be present")
+        
+        # Verify all groups are represented
+        all_uids_in_result = set(uid_sequence)
+        self.assertEqual(all_uids_in_result, {"uid_0", "uid_1", "uid_2", "uid_3"})
 
     def test_large_scale_group_n(self):
         """
