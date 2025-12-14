@@ -19,7 +19,7 @@ import random
 import ray
 import loguru
 import time
-from collections import deque
+from collections import deque, defaultdict
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from siirl.data_coordinator.sample import SampleInfo
 from siirl.utils.model_utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions
@@ -204,14 +204,100 @@ class DataCoordinator:
         keep_mini_batch = False
     ) -> List[ray.ObjectRef]:
         """Applies the length balancing algorithm to reorder samples.
-        
         Uses the LPT (Longest Processing Time) algorithm to reorder samples so that
         if they are evenly distributed among k_partitions workers, the sum of
         sample lengths for each worker is as balanced as possible.
         
+        Supports Group N: samples with the same uid will be assigned to the same partition,
+        ensuring correct group-relative advantage computation for GRPO and similar algorithms.
+        
         Args:
             batch_items: A list of (SampleInfo, ObjectRef) tuples.
             k_partitions: The number of partitions (typically the DP size).
+            keep_mini_batch: Whether to keep mini-batch structure during balancing.
+            
+        Returns:
+            A reordered list of ObjectRefs.
+        """
+        # ========== Step 1: Group samples by uid ==========
+        uid_to_indices = defaultdict(list)
+        for idx, (sample_info, _) in enumerate(batch_items):
+            uid = sample_info.uid if sample_info.uid is not None else str(idx)
+            uid_to_indices[uid].append(idx)
+        
+        # Check if grouping is needed (max_group_size > 1 means we have Group N)
+        max_group_size = max(len(indices) for indices in uid_to_indices.values()) if uid_to_indices else 1
+        
+        if max_group_size == 1:
+            # No grouping needed, use original single-sample balancing logic
+            return self._apply_length_balancing_single_sample(batch_items, k_partitions, keep_mini_batch)
+        
+        # ========== Step 2: Calculate workload for each Group ==========
+        group_list = list(uid_to_indices.keys())  # All unique uids
+        group_workloads = []
+        for uid in group_list:
+            indices = uid_to_indices[uid]
+            # Group workload = sum of all samples' sum_tokens in the group
+            total_tokens = sum(batch_items[i][0].sum_tokens for i in indices)
+            group_workloads.append(total_tokens)
+        
+        # ========== Step 3: Balance Groups across partitions ==========
+        workload_lst = calculate_workload(group_workloads)
+        
+        # Check if number of groups is divisible by k_partitions
+        num_groups = len(group_list)
+        if num_groups < k_partitions:
+            loguru.logger.warning(
+                f"Number of groups ({num_groups}) is less than partitions ({k_partitions}). "
+                f"Some partitions will be empty. Falling back to single-sample balancing."
+            )
+            return self._apply_length_balancing_single_sample(batch_items, k_partitions, keep_mini_batch)
+        
+        equal_size = (num_groups % k_partitions == 0)
+        if not equal_size:
+            loguru.logger.warning(
+                f"Number of groups ({num_groups}) is not divisible by partitions ({k_partitions}). "
+                f"Some partitions may have uneven group counts."
+            )
+        
+        # Partition groups across workers
+        group_partitions = get_seqlen_balanced_partitions(
+            workload_lst, 
+            k_partitions=k_partitions, 
+            equal_size=equal_size
+        )
+        
+        # ========== Step 4: Expand groups to samples, keeping group integrity ==========
+        reordered_refs = []
+        for partition_group_indices in group_partitions:
+            for group_idx in partition_group_indices:
+                uid = group_list[group_idx]
+                sample_indices = uid_to_indices[uid]
+                # Add all samples of the same group together, preserving original order within group
+                for sample_idx in sample_indices:
+                    reordered_refs.append(batch_items[sample_idx][1])
+        
+        loguru.logger.debug(
+            f"Applied GROUP-aware length balancing: "
+            f"{len(batch_items)} samples in {num_groups} groups (group_size={max_group_size}) "
+            f"reordered into {k_partitions} partitions"
+        )
+        
+        return reordered_refs
+
+    def _apply_length_balancing_single_sample(
+        self, 
+        batch_items: List[Tuple[SampleInfo, ray.ObjectRef]], 
+        k_partitions: int,
+        keep_mini_batch = False
+    ) -> List[ray.ObjectRef]:
+        """
+        This is used when there's no Group N (each uid has only one sample).
+        
+        Args:
+            batch_items: A list of (SampleInfo, ObjectRef) tuples.
+            k_partitions: The number of partitions (typically the DP size).
+            keep_mini_batch: Whether to keep mini-batch structure during balancing.
             
         Returns:
             A reordered list of ObjectRefs.
