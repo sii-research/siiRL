@@ -216,7 +216,7 @@ class EmbodiedHFRollout(BaseRollout):
         total_batch_size = prompts.batch_size[0]
         n_samples = prompts['n_samples'] if 'n_samples' in prompts else 1
         assert self.num_workers >= n_samples, f"rollout num_workers({self.num_workers}) must be >= n_samples({n_samples})"
-        batch_size_per_chunk = self.num_workers // n_samples
+        batch_size_per_chunk = self.num_workers
         num_chunks = (total_batch_size + batch_size_per_chunk - 1) // batch_size_per_chunk
         logger.info(f"RobHFRollout.generate_sequences called with total batch size {total_batch_size}, "
                     f"n_samples {n_samples}, num_workers {self.num_workers}, batch_size_per_chunk {batch_size_per_chunk}, "

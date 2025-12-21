@@ -147,7 +147,7 @@ class DataCoordinator:
                 return res
             if not filter_plugin:
                 if len(self._sample_queue) < batch_size * balance_partitions:
-                    loguru.logger.warning(f"Coordinator queue size ({len(self._sample_queue)}) is less than requested batch size ({batch_size}). Returning empty list.")
+                    loguru.logger.info(f"[DataCoordinator] Queue: {len(self._sample_queue)}/{batch_size * balance_partitions} samples. Waiting for more data...")
                     return []
         
                 batch_items = []
@@ -178,7 +178,7 @@ class DataCoordinator:
                 # 2. Check if there are enough samples
                 global_batch_size = batch_size * balance_partitions
                 if len(potential_items) < global_batch_size:
-                    loguru.logger.warning(f"After filtering, {filter_plugin} coordinator has {len(potential_items)} samples, which is less than requested batch size ({global_batch_size}). Returning empty list.")
+                    loguru.logger.info(f"[DataCoordinator] Filtered samples: {len(potential_items)}/{global_batch_size}. Waiting for more data...")
                     return []
                 potential_items = potential_items[:global_batch_size]
                 # 4. Efficiently remove the selected items from the original queue

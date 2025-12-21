@@ -71,8 +71,147 @@ from siirl.dag_worker.dag_utils import  (
 from siirl.utils.debug import DistProfiler
 from siirl.utils.extras.device import get_device_name, get_nccl_backend
 from siirl.execution.rollout_flow.multiturn.agent_loop import AgentLoopManager
+from dataclasses import dataclass, field
 
 device_name = get_device_name()
+
+
+@dataclass
+class DynamicSamplingProgress:
+    """
+    Tracks dynamic sampling progress for algorithms with sample filtering (DAPO/GRPO/Embodied RL).
+    
+    In dynamic sampling, each rollout generates samples that are filtered before training.
+    Multiple rollouts may be needed to fill the buffer for one training update.
+    """
+    # Buffer state
+    rollout_count: int = 0               # Number of rollouts executed for current training step
+    buffer_size: int = 0                 # Current valid samples in replay buffer
+    train_batch_size: int = 0            # Required samples for one training update
+    
+    # Current rollout stats
+    sampled: int = 0                     # Raw samples generated in current rollout
+    accepted: int = 0                    # Samples accepted after filtering (acceptance rate)
+    rollout_start_time: float = 0.0      # Start time of current rollout
+    
+    # Overall stats
+    collection_start_time: float = 0.0   # Start time of on-policy collection phase
+    zero_accept_streak: int = 0          # Consecutive rollouts with zero acceptance
+    
+    # Config
+    stall_warning_threshold: int = 3     # Warn after this many zero-acceptance rollouts
+    max_rollouts: int = 20               # Error after this many rollouts
+    
+    def reset_for_new_step(self, train_batch_size: int):
+        """Reset tracker for a new training update (after previous update completes)."""
+        self.rollout_count = 0
+        self.buffer_size = 0
+        self.train_batch_size = train_batch_size
+        self.sampled = 0
+        self.accepted = 0
+        self.zero_accept_streak = 0
+        self.collection_start_time = time.time()
+        self.rollout_start_time = time.time()
+    
+    def start_rollout(self):
+        """Mark the start of a new rollout."""
+        self.rollout_count += 1
+        self.rollout_start_time = time.time()
+        self.sampled = 0
+        self.accepted = 0
+    
+    def update_rollout_stats(self, sampled: int, accepted: int, buffer_total: int):
+        """Update stats after a rollout completes."""
+        self.sampled = sampled
+        self.accepted = accepted
+        prev_buffer = self.buffer_size
+        self.buffer_size = buffer_total
+        
+        # Track zero-acceptance streak
+        if accepted == 0 or buffer_total <= prev_buffer:
+            self.zero_accept_streak += 1
+        else:
+            self.zero_accept_streak = 0
+    
+    def get_buffer_progress(self) -> float:
+        """Get buffer fill progress as percentage."""
+        if self.train_batch_size <= 0:
+            return 100.0
+        return min(100.0, (self.buffer_size / self.train_batch_size) * 100)
+    
+    def get_rollout_time(self) -> float:
+        """Get time elapsed for current rollout."""
+        return time.time() - self.rollout_start_time
+    
+    def get_collection_time(self) -> float:
+        """Get total time for on-policy collection phase."""
+        return time.time() - self.collection_start_time
+    
+    def is_buffer_ready(self) -> bool:
+        """Check if buffer has enough samples for training."""
+        return self.buffer_size >= self.train_batch_size
+    
+    def should_warn_low_acceptance(self) -> bool:
+        """Check if low acceptance warning should be issued."""
+        return self.zero_accept_streak >= self.stall_warning_threshold
+    
+    def should_error_max_rollouts(self) -> bool:
+        """Check if max rollouts exceeded."""
+        return self.rollout_count >= self.max_rollouts
+    
+    def _format_time(self, seconds: float) -> str:
+        """Format time in human readable format."""
+        if seconds >= 60:
+            minutes = int(seconds // 60)
+            secs = seconds % 60
+            return f"{minutes}m{secs:.0f}s"
+        return f"{seconds:.1f}s"
+    
+    def format_progress_log(self) -> str:
+        """Format a progress log message for dynamic sampling scenarios."""
+        progress_pct = self.get_buffer_progress()
+        rollout_time = self.get_rollout_time()
+        total_time = self.get_collection_time()
+        remaining = self.train_batch_size - self.buffer_size
+        
+        # Calculate acceptance rate for this rollout
+        accept_rate = (self.accepted / self.sampled * 100) if self.sampled > 0 else 0
+        
+        # Estimate remaining rollouts based on current acceptance rate
+        if self.accepted > 0:
+            est_remaining = max(1, remaining // self.accepted)
+            est_str = f"~{est_remaining} more rollouts"
+        else:
+            est_str = "N/A"
+        
+        return (
+            f"[Dynamic Sampling] Rollout #{self.rollout_count}\n"
+            f"  - Current rollout: sampled {self.sampled}, accepted {self.accepted} ({accept_rate:.0f}%), {self._format_time(rollout_time)}\n"
+            f"  - Buffer: {self.buffer_size}/{self.train_batch_size} ({progress_pct:.0f}%)\n"
+            f"  - Total: {self.rollout_count} rollouts, {self._format_time(total_time)} elapsed\n"
+            f"  - Est. remaining: {est_str}"
+        )
+    
+    def format_complete_log(self) -> str:
+        """Format a completion log message."""
+        total_time = self.get_collection_time()
+        
+        return (
+            f"[Dynamic Sampling] ✅ Buffer ready for training\n"
+            f"  - Buffer: {self.buffer_size}/{self.train_batch_size} samples\n"
+            f"  - Total: {self.rollout_count} rollouts, {self._format_time(total_time)} elapsed"
+        )
+    
+    def format_low_acceptance_warning(self) -> str:
+        """Format a low acceptance rate warning message."""
+        progress_pct = self.get_buffer_progress()
+        total_time = self.get_collection_time()
+        return (
+            f"[Dynamic Sampling] ⚠️ Low acceptance rate warning\n"
+            f"  - Issue: {self.zero_accept_streak} consecutive rollouts with 0 accepted samples\n"
+            f"  - Buffer: {self.buffer_size}/{self.train_batch_size} ({progress_pct:.0f}%)\n"
+            f"  - Total: {self.rollout_count} rollouts, {self._format_time(total_time)} elapsed"
+        )
 
 class DAGWorker(Worker):
     """
@@ -125,6 +264,9 @@ class DAGWorker(Worker):
         # This is the core state-carrying mechanism for dynamic sampling.
         self.sampling_leftover_cache: Optional[Any] = None
 
+        # Dynamic sampling progress tracker for algorithms with sample filtering (DAPO/GRPO/Embodied RL)
+        self.sampling_progress = DynamicSamplingProgress()
+        
         # multi agent
         self._multi_agent = False
         
@@ -268,6 +410,17 @@ class DAGWorker(Worker):
     def _run_training_step(self, epoch: int, batch_idx: int) -> Optional[List[Tuple[str, Any]]]:
         """Executes a single training step by traversing the computational graph."""
         timing_raw, ordered_metrics = self.timing_raw, []
+        
+        # Update on-policy sampling progress for dynamic filtering algorithms
+        if self.config.algorithm.filter_groups.enable:
+            progress = self.sampling_progress
+            # Initialize train_batch_size if not set
+            if progress.train_batch_size == 0:
+                rollout_n = getattr(self.config.actor_rollout_ref.rollout, 'n', 1) or 1
+                progress.reset_for_new_step(
+                    train_batch_size=self.config.data.train_batch_size * rollout_n
+                )
+            progress.start_rollout()
 
         with timer(self.enable_perf, "step", timing_raw):
             # --- 1. Data Loading ---
@@ -297,8 +450,23 @@ class DAGWorker(Worker):
                             batch = self.get_data_from_buffers(key=cur_node.node_id, cur_dp_size=cur_dp_size, cur_dp_rank=cur_dp_rank, timing_raw=timing_raw)
                             if batch is None:
                                 if self.config.algorithm.filter_groups.enable:
+                                    # Dynamic filtering enabled - this is expected behavior during sample collection
                                     if cur_node.node_role == NodeRole.ACTOR:
-                                        logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
+                                        # Log progress info instead of error
+                                        progress = self.sampling_progress
+                                        if progress.should_warn_low_acceptance():
+                                            logger.warning(progress.format_low_acceptance_warning())
+                                        elif progress.should_error_max_rollouts():
+                                            logger.error(
+                                                f"[Dynamic Sampling] ❌ Exceeded max rollouts limit\n"
+                                                f"  - Limit: {progress.max_rollouts} rollouts\n"
+                                                f"  - Buffer: {progress.buffer_size}/{progress.train_batch_size} ({progress.get_buffer_progress():.0f}%)\n"
+                                                f"  - Total: {progress.rollout_count} rollouts, {progress._format_time(progress.get_collection_time())} elapsed"
+                                            )
+                                        else:
+                                            # Normal progress - log at info level only on rank 0 to reduce noise
+                                            if self._rank == 0:
+                                                logger.info(progress.format_progress_log())
                                         return None 
                                 else:
                                     logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
@@ -341,14 +509,16 @@ class DAGWorker(Worker):
                     
                     # Check if node returned empty batch (e.g., DAPO insufficient samples)
                     # This triggers re-rollout to collect more data
-                    if  node_output.batch is None or (node_output.batch is not None and len(node_output.batch) == 0):
-                        logger.warning(
-                            f"Rank {self._rank}: Node '{cur_node.node_id}' returned empty batch. "
-                        )
-                        if not self.config.algorithm.filter_groups.enable:
+                    if node_output.batch is None or (node_output.batch is not None and len(node_output.batch) == 0):
+                        if self.config.algorithm.filter_groups.enable:
+                            # For dynamic filtering, empty batch is expected during collection
+                            logger.debug(
+                                f"Rank {self._rank}: Node '{cur_node.node_id}' returned empty batch during sample collection."
+                            )
+                        else:
                             logger.warning(
                                 f"Rank {self._rank}: Node '{cur_node.node_id}' returned empty batch. "
-                                f"Aborting current step to trigger re-rollout. {node_output.batch is not None and len(node_output.batch) != 0}"
+                                f"Aborting current step to trigger re-rollout."
                             )
                             return None
                     
@@ -411,6 +581,16 @@ class DAGWorker(Worker):
             metrics = self.metric_worker.wait_final_res()
             ordered_metrics = dict(sorted(metrics.items()))
             ordered_metrics.update({"training/global_step": self.global_steps + 1, "training/epoch": epoch + 1})
+
+        # Log completion and reset progress tracker for dynamic filtering
+        if self.config.algorithm.filter_groups.enable and self._rank == 0:
+            progress = self.sampling_progress
+            logger.info(progress.format_complete_log())
+            # Reset for next training update
+            rollout_n = getattr(self.config.actor_rollout_ref.rollout, 'n', 1) or 1
+            progress.reset_for_new_step(
+                train_batch_size=self.config.data.train_batch_size * rollout_n
+            )
 
         return ordered_metrics
 
@@ -1159,7 +1339,15 @@ class DAGWorker(Worker):
                     
                     put_future = self.data_coordinator.put_batch.remote(sample_infos, sample_refs, caller_node_id)
                     loop.run_until_complete(put_future)
-                    logger.info(f"Rank {self._rank}: ✅ Successfully PUT {len(samples)} samples to DataCoordinator for key '{key}' (source_dp={source_dp_size}, dest_dp={dest_dp_size})")
+                    
+                    # Update on-policy sampling progress for dynamic filtering
+                    if self.config.algorithm.filter_groups.enable:
+                        progress = self.sampling_progress
+                        # Estimate buffer size (this is an approximation - actual count is in DataCoordinator)
+                        progress.buffer_size += len(samples)
+                        progress.accepted = len(samples)
+                    
+                    logger.debug(f"Rank {self._rank}: PUT {len(samples)} samples to DataCoordinator for key '{key}' (source_dp={source_dp_size}, dest_dp={dest_dp_size})")
 
         except Exception as e:
             logger.error(f"Rank {self._rank}: Unexpected error in put_data_to_buffers for key '{key}': {e}", exc_info=True)
@@ -1224,10 +1412,21 @@ class DAGWorker(Worker):
             )
 
         if not sample_refs:
-            logger.warning(f"Rank {self._rank}: ❌ DataCoordinator returned EMPTY list for key '{key}' (adjusted_batch_size={adjusted_batch_size})")
+            # For dynamic filtering scenarios, empty result is normal during collection
+            # Only log at debug level - upper layer will handle progress tracking
+            if self.config.algorithm.filter_groups.enable:
+                logger.debug(
+                    f"Rank {self._rank}: DataCoordinator returned empty list for key '{key}' "
+                    f"(requested={adjusted_batch_size}). Continuing sample collection..."
+                )
+            else:
+                logger.warning(
+                    f"Rank {self._rank}: ❌ DataCoordinator returned EMPTY list for key '{key}' "
+                    f"(adjusted_batch_size={adjusted_batch_size})"
+                )
             return None
 
-        logger.info(f"Rank {self._rank}: ✅ Retrieved {len(sample_refs)} sample references from DataCoordinator for key '{key}'")
+        logger.debug(f"Rank {self._rank}: Retrieved {len(sample_refs)} sample references from DataCoordinator for key '{key}'")
 
         with timer(self.enable_perf, f"ray_get_samples_{key}", timing_raw):
             samples = ray.get(sample_refs)
