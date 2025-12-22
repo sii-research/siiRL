@@ -58,7 +58,9 @@ export PPO_MINI_BATCH_SIZE=$(($PPO_MINI_BATCH_SIZE_PER_NODE * $NNODES))
 
 # --- Define the Training Command and its Arguments ---
 TRAINING_CMD=(
-    python3 -m siirl.main_dag
+    python3 -m siirl.client.main_dag
+    --config-path=\$CONFIG_PATH 
+    --config-name='gsm8k_multiturn_grpo' 
     algorithm.adv_estimator=\$ALG
     data.train_files=\$TRAIN_DATA_PATH
     data.val_files=\$TEST_DATA_PATH
@@ -93,8 +95,6 @@ TRAINING_CMD=(
     actor_rollout_ref.rollout.enforce_eager=False
     actor_rollout_ref.rollout.free_cache_engine=False
     actor_rollout_ref.rollout.n=\$ROLLOUT_N
-    actor_rollout_ref.rollout.prompt_length=\$MAX_PROMPT_LENGTH  
-    actor_rollout_ref.rollout.response_length=\$MAX_RESPONSE_LENGTH
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.ref.fsdp_config.param_offload=True
     algorithm.kl_ctrl.kl_coef=0.001
@@ -111,8 +111,6 @@ TRAINING_CMD=(
     trainer.max_actor_ckpt_to_keep=\$MAX_CKPT_KEEP
     trainer.default_local_dir=\$CKPT_PATH
     trainer.val_before_train=True
-    actor_rollout_ref.rollout.multi_turn.enable=True
-    actor_rollout_ref.rollout.multi_turn.max_assistant_turns=5
     actor_rollout_ref.rollout.multi_turn.tool_config_path="\$TOOL_CONFIG_PATH" 
     actor_rollout_ref.rollout.multi_turn.interaction_config_path="\$INTERACTION_CONFIG_PATH" 
 )

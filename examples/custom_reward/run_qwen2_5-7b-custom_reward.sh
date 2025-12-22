@@ -164,7 +164,7 @@ start_ray_cluster() {
 
 start_training() {
     if [ "$NODE_RANK" = "0" ]; then
-        python3 -m siirl.main_dag \
+        python3 -m siirl.client.main_dag \
             algorithm.adv_estimator=grpo \
             data.train_files=$TRAIN_DATA_PATH \
             data.val_files=$TEST_DATA_PATH \

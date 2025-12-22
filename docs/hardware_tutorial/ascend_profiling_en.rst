@@ -1,12 +1,12 @@
 Data Collection on Ascend Devices Based on the FSDP Backend
-============================================================
+====================================
 
 Last updated: 08/14/2025.
 
 This is a tutorial for using GRPO to collect data on Ascend devices based on the FSDP backend.
 
 Configuration
--------------
+----
 
 - Global Collection Control: Use the configuration items in siirl/client/config/ppo_trainer.yaml to control the default collection mode.
 
@@ -43,7 +43,7 @@ train_critic, train_actor
 - profile_steps: List of collection steps. For example, [2, 4] indicates that steps 2 and 4 will be collected. If set to null, no data is collected.
 
 Example
--------
+----
 Disable collection
 ~~~~~~~~~~~~~~~~~~~~
 .. code:: yaml
@@ -63,7 +63,7 @@ End-to-end collection
 The run_qwen2_5-7b-npu-e2e_prof.sh script is provided in examples/grpo_trainer for reference.
 
 Discrete mode collection
-~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code:: yaml
 
@@ -74,7 +74,7 @@ Discrete mode collection
 The discrete mode acquisition script run_qwen2_5-7b-npu-discrete_prof.sh is provided in examples/grpo_trainer for reference.
 
 Visualization
--------------
+------
 
 The acquired data is stored in the user-defined save_path and can be visualized using the MindStudio Insight tool，
 you can refer to <https://www.hiascend.com/document/detail/zh/mindstudio/80RC1/GUI_baseddevelopmenttool/msascendinsightug/Insight_userguide_0002.html>.

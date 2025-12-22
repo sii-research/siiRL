@@ -1,0 +1,75 @@
+# Copyright 2025, Shanghai Innovation Institute. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+dag_id: "embodied_srpo_training_pipeline"
+description: "Embodied AI SRPO training workflow with data filtering and VJEPA-based reward computation."
+
+nodes:
+  # Step 1: Environment rollout with embodied AI agent
+  - node_id: "rollout_actor"
+    node_type: "MODEL_INFERENCE"
+    node_role: "ROLLOUT"
+    dependencies: []
+
+  # Step 2: Data verification and filtering (embodied_sampling)
+  - node_id: "embodied_sampling"
+    node_type: "COMPUTE"
+    executable_ref: "siirl.algorithm.embodied.embodied_local_rank_sampling"
+    dependencies:
+      - "rollout_actor"
+
+  # Step 3: Data rebalancing across workers (after filtering)
+  - node_id: "data_rebalance"
+    node_type: "COMPUTE"
+    node_role: "DATA_REBALANCE"
+    dependencies:
+      - "embodied_sampling"
+
+  # Step 4: VJEPA-based reward computation
+  - node_id: "compute_reward"
+    node_type: "COMPUTE"
+    node_role: "REWARD"
+    dependencies:
+      - "data_rebalance"
+
+  # Step 5: Calculate advantages (SRPO group-based)
+  - node_id: "calculate_advantages"
+    node_type: "COMPUTE"
+    node_role: "ADVANTAGE"
+    dependencies:
+      - "compute_reward"
+
+  # Step 6: Compute old actor log probabilities
+  - node_id: "actor_old_log_prob"
+    node_type: "MODEL_TRAIN"
+    node_role: "ACTOR"
+    only_forward_compute: true
+    dependencies:
+      - "calculate_advantages"
+
+  # Step 7: Compute reference model log probabilities
+  - node_id: "reference_log_prob"
+    node_type: "MODEL_TRAIN"
+    node_role: "REFERENCE"
+    dependencies:
+      - "actor_old_log_prob"
+
+  # Step 8: Actor training with SRPO
+  - node_id: "actor_train"
+    node_type: "MODEL_TRAIN"
+    node_role: "ACTOR"
+    dependencies:
+      - "reference_log_prob"
+
+

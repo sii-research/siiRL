@@ -40,7 +40,7 @@ export PROJECT_DIR="$(pwd)"
 export DAG_WORKERFLOW=$PROJECT_DIR/examples/experimental/marft/config/workflow_marft.yaml
 # --- Define the Training Command and its Arguments ---
 TRAINING_CMD=(
-    python3 -m siirl.main_dag
+    python3 -m siirl.client.main_dag
     algorithm.adv_estimator=\$ALG
     data.train_files=\$TRAIN_DATA_PATH
     data.val_files=\$TEST_DATA_PATH
@@ -77,8 +77,6 @@ TRAINING_CMD=(
     actor_rollout_ref.rollout.multi_turn.max_assistant_turns=3
     actor_rollout_ref.rollout.multi_turn.use_all_traj=False
     actor_rollout_ref.rollout.n=\$ROLLOUT_N
-    actor_rollout_ref.rollout.prompt_length=\$MAX_PROMPT_LENGTH  
-    actor_rollout_ref.rollout.response_length=\$MAX_RESPONSE_LENGTH
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.ref.fsdp_config.param_offload=True
     critic.optim.lr=1e-5
@@ -87,7 +85,6 @@ TRAINING_CMD=(
     critic.model.enable_gradient_checkpointing=True
     critic.use_dynamic_bsz=False
     critic.ppo_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
-    critic.ppo_mini_batch_size=\$PPO_MINI_BATCH_SIZE
     critic.ppo_max_token_len_per_gpu=12288
     critic.model.fsdp_config.param_offload=False
     critic.model.fsdp_config.optimizer_offload=False

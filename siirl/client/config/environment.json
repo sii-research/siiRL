@@ -1,0 +1,26 @@
+[
+    {
+        "environment_id": 0, 
+        "agent_parallel_num": 2,
+        "environment_type_ref": "math_env.MathEnv",
+        "config": {
+                "num_agents": 2, 
+                "max_step": 100, 
+                "dataset_path": "~/data/env/train.json",
+                "profile_path": "~/data/env/math_dual.json"
+            },
+        "source_options": {"num_cpus": 1}
+    },
+    {
+        "environment_id": 1, 
+        "agent_parallel_num": 2,
+        "environment_type_ref": "math_env.MathEnv",
+        "config": {
+                "num_agents": 2, 
+                "max_step": 100, 
+                "dataset_path": "~/data/env/train.json",
+                "profile_path": "~/data/env/math_dual.json"
+            },
+        "source_options": {"num_cpus": 1}
+    }
+]

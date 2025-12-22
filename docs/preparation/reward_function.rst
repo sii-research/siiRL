@@ -6,7 +6,7 @@ In Reinforcement Learning for LLMs, the reward function is a critical component 
 The RewardManager
 -----------------
 
-The ``RewardManager`` is the central hub for reward computation. As defined in `siirl/scheduler/reward.py`, its primary role is to orchestrate the scoring of generated responses by invoking a specified scoring function. Different managers, like `NaiveRewardManager` or `BatchRewardManager`, offer different strategies for handling this process. This design is consistent with the `verl` framework's architecture. [1]_
+The ``RewardManager`` is the central hub for reward computation. As defined in `siirl/scheduler/reward.py`, its primary role is to orchestrate the scoring of generated responses by invoking a specified scoring function. Different managers, like `NaiveRewardManager` or `BatchRewardManager`, offer different strategies for handling this process. This design is consistent with the `verl` framework's architecture.[1]_
 
 The typical workflow is as follows:
 1. The manager receives a `DataProto` object, which is a batch containing all necessary information.
@@ -39,7 +39,7 @@ The script specifies the path to the custom code, the function to use, and selec
 .. code-block:: bash
 
    # ... other configurations ...
-   python3 -m siirl.main_dag \
+   python3 -m siirl.client.main_dag \
        # ...
        custom_reward_function.path=$HOME/rl/rewardfunc_gsm8k.py \
        custom_reward_function.name=compute_score \

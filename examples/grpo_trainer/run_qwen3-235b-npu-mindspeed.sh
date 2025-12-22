@@ -76,7 +76,7 @@ export PPO_MINI_BATCH_SIZE=$(($PPO_MINI_BATCH_SIZE_PER_NODE * $NNODES))
 
 # --- Define the Training Command and its Arguments ---
 TRAINING_CMD=(
-    python3 -m siirl.main_dag
+    python3 -m siirl.client.main_dag
     algorithm.adv_estimator=\$ALG
     data.train_files=\$TRAIN_DATA_PATH
     data.val_files=\$TEST_DATA_PATH
@@ -134,8 +134,6 @@ TRAINING_CMD=(
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.gpu_memory_utilization=\$ROLLOUT_GPU_MEMORY_UTILIZATION
     actor_rollout_ref.rollout.n=\$ROLLOUT_N
-    actor_rollout_ref.rollout.prompt_length=\$MAX_PROMPT_LENGTH  
-    actor_rollout_ref.rollout.response_length=\$MAX_RESPONSE_LENGTH
     actor_rollout_ref.rollout.enable_chunked_prefill=True
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.free_cache_engine=True
@@ -217,7 +215,7 @@ main() {
     ray stop --force
     echo "Cleaning up residual distributed processes..."
     pkill -f ray || true
-    pkill -f siirl.main_dag || true
+    pkill -f siirl.client.main_dag || true
     pkill -f torchrun || true
     pkill -f vllm || true
     pkill -f hccl || true

@@ -3,7 +3,6 @@
 # ===                       USER CONFIGURATION SECTION                            ===
 # ===================================================================================
 
-# --- For debugging
 export HYDRA_FULL_ERROR=0
 export SIIRL_LOG_VERBOSITY=INFO
 
@@ -18,8 +17,8 @@ export TEST_DATA_PATH=$HOME/data/dataset/$DATASET/test.parquet
 export MODEL_PATH=$HOME/data/models/Qwen3-8B
 
 # Base output paths
-export BASE_CKPT_PATH=$HOME/ckpts
-export BASE_TENSORBOARD_PATH=$HOME/tensorboard
+export BASE_CKPT_PATH=ckpts
+export BASE_TENSORBOARD_PATH=tensorboard
 
 # --- Key Training Hyperparameters ---
 export TRAIN_BATCH_SIZE_PER_NODE=1024
@@ -27,7 +26,8 @@ export PPO_MINI_BATCH_SIZE_PER_NODE=256
 export PPO_MICRO_BATCH_SIZE_PER_GPU=8
 export MAX_PROMPT_LENGTH=2048
 export MAX_RESPONSE_LENGTH=4096
-export ROLLOUT_GPU_MEMORY_UTILIZATION=0.45
+export ROLLOUT_GPU_MEMORY_UTILIZATION=0.5
+export ROLLOUT_TP=2
 export ROLLOUT_N=1
 export SAVE_FREQ=30
 export TEST_FREQ=10
@@ -53,9 +53,9 @@ export MASTER_ADDR=${MASTER_ADDR:-localhost}
 # --- Output Paths and Experiment Naming ---
 export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_hybrid_${NNODES}nodes
 export PROJECT_NAME=siirl_${DATASET}_${ALG}
-export EXPERIMENT_NAME=siirl_${MODEL_NAME}_${ALG}_${DATASET}_experiment
+export EXPERIMENT_NAME=siirl_megatron_${MODEL_NAME}_${ALG}_${DATASET}_experiment
 export TENSORBOARD_DIR=${BASE_TENSORBOARD_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_hybrid_tensorboard/dlc_${NNODES}_$timestamp
-export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${ALG}_${DATASET}_hybrid_${NNODES}_$timestamp
+export SIIRL_LOGGING_FILENAME=megatron_${MODEL_NAME}_${ALG}_${DATASET}_hybrid_${NNODES}_$timestamp
 
 # --- Calculated Global Hyperparameters ---
 export TRAIN_BATCH_SIZE=$(($TRAIN_BATCH_SIZE_PER_NODE * $NNODES))
@@ -63,7 +63,7 @@ export PPO_MINI_BATCH_SIZE=$(($PPO_MINI_BATCH_SIZE_PER_NODE * $NNODES))
 
 # --- Define the Training Command and its Arguments ---
 TRAINING_CMD=(
-    python3 -m siirl.main_dag
+    python3 -m siirl.client.main_dag
     algorithm.adv_estimator=\$ALG
     data.train_files=\$TRAIN_DATA_PATH
     data.val_files=\$TEST_DATA_PATH
@@ -74,9 +74,17 @@ TRAINING_CMD=(
     data.truncation='error'
     data.shuffle=False
     actor_rollout_ref.model.path=\$MODEL_PATH
+    actor_rollout_ref.actor.optim.lr=1e-6
     actor_rollout_ref.model.use_remove_padding=True
     actor_rollout_ref.model.use_fused_kernels=False
     actor_rollout_ref.model.enable_gradient_checkpointing=True
+    actor_rollout_ref.actor.ppo_mini_batch_size=\$PPO_MINI_BATCH_SIZE
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
+    actor_rollout_ref.actor.use_kl_loss=True
+    actor_rollout_ref.actor.grad_clip=0.5
+    actor_rollout_ref.actor.clip_ratio=0.2
+    actor_rollout_ref.actor.kl_loss_coef=0.01
+    actor_rollout_ref.actor.kl_loss_type=low_var_kl
     actor_rollout_ref.actor.strategy=megatron
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=\$ACTOR_REF_CRITIC_TP
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=\$ACTOR_REF_CRITIC_PP
@@ -85,18 +93,10 @@ TRAINING_CMD=(
     actor_rollout_ref.actor.megatron.use_distributed_optimizer=True
     actor_rollout_ref.actor.megatron.param_dtype=bfloat16
     actor_rollout_ref.actor.megatron.param_offload=True
+    actor_rollout_ref.actor.megatron.optimizer_offload=True
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=False
-    actor_rollout_ref.actor.megatron.seed=1
-    actor_rollout_ref.actor.optim.lr=1e-6
-    actor_rollout_ref.actor.ppo_mini_batch_size=\$PPO_MINI_BATCH_SIZE
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
-    actor_rollout_ref.actor.use_kl_loss=True
-    actor_rollout_ref.actor.grad_clip=0.5
-    actor_rollout_ref.actor.clip_ratio=0.2
-    actor_rollout_ref.actor.kl_loss_coef=0.01
-    actor_rollout_ref.actor.kl_loss_type=low_var_kl
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$PPO_MICRO_BATCH_SIZE_PER_GPU
-    actor_rollout_ref.rollout.tensor_model_parallel_size=\$ACTOR_REF_CRITIC_TP
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
+    actor_rollout_ref.rollout.tensor_model_parallel_size=\$ROLLOUT_TP
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.gpu_memory_utilization=\$ROLLOUT_GPU_MEMORY_UTILIZATION
     actor_rollout_ref.rollout.max_model_len=8192
@@ -104,10 +104,7 @@ TRAINING_CMD=(
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.free_cache_engine=True
     actor_rollout_ref.rollout.n=\$ROLLOUT_N
-    actor_rollout_ref.rollout.prompt_length=\$MAX_PROMPT_LENGTH  
-    actor_rollout_ref.rollout.response_length=\$MAX_RESPONSE_LENGTH
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
-    actor_rollout_ref.ref.strategy=megatron
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=\$ACTOR_REF_CRITIC_TP
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=\$ACTOR_REF_CRITIC_PP
     actor_rollout_ref.ref.megatron.context_parallel_size=\$ACTOR_REF_CRITIC_CP
@@ -119,7 +116,6 @@ TRAINING_CMD=(
     critic.model.enable_gradient_checkpointing=True
     critic.use_dynamic_bsz=False
     critic.ppo_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
-    critic.ppo_mini_batch_size=\$PPO_MINI_BATCH_SIZE
     critic.ppo_max_token_len_per_gpu=98304
     critic.strategy=megatron
     critic.megatron.tensor_model_parallel_size=\$ACTOR_REF_CRITIC_TP
@@ -189,7 +185,7 @@ start_ray_cluster() {
                 sleep 5
             done
             echo "INFO: Head is healthy. Worker starting..."
-            ray start --address="$head_node_address" "${ray_start_common_opts[@]}"
+            ray start --address="$head_node_address" "${ray_start_common_opts[@]}" --block
         fi
     else
         echo "INFO: Starting Ray in single-node mode..."
@@ -211,7 +207,7 @@ main() {
     export RAY_MASTER_PORT=${RAY_MASTER_PORT:-6379}
     export RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-8265}
     export RAY_MASTER_ADDR=$MASTER_ADDR
-    
+
     start_ray_cluster
 
     if [ "$NNODES" -gt 1 ] && [ "$NODE_RANK" = "0" ]; then
@@ -222,7 +218,7 @@ main() {
             local ready_nodes=$(ray list nodes --format=json | python3 -c "import sys, json; print(len(json.load(sys.stdin)))")
             if [ "$ready_nodes" -ge "$NNODES" ]; then break; fi
             echo "Waiting... ($ready_nodes / $NNODES nodes ready)"
-            sleep 5
+            sleep 2
         done
         echo "All $NNODES nodes have joined."
     fi

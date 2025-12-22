@@ -10,13 +10,10 @@ export ALG=grpo  # DAPO uses GRPO (Group Relative Policy Optimization) as the ba
 export MODEL_NAME=qwen2.5-7b
 
 # --- Path Definitions ---
-# export HOME={your_home_path}
-# export TRAIN_DATA_PATH=$HOME/data/datasets/$DATASET/train.parquet
-# export TEST_DATA_PATH=$HOME/data/datasets/$DATASET/test.parquet
-# export MODEL_PATH=$HOME/data/models/Qwen2.5-VL-7B-Instruct
-export TRAIN_DATA_PATH=/inspire/hdd/project/qianghuaxuexi/public/datasets/DAPO-Math-17k/dapo-math-17k.parquet
-export TEST_DATA_PATH=/inspire/hdd/project/qianghuaxuexi/public/datasets/gsm8k/test.parquet
-export MODEL_PATH=/inspire/hdd/project/qianghuaxuexi/public/models/Qwen3-1.7B
+export HOME={your_home_path}
+export TRAIN_DATA_PATH=$HOME/data/datasets/DAPO-Math-17k/dapo-math-17k.parquet
+export TEST_DATA_PATH=$HOME/data/datasets/$DATASET/test.parquet
+export MODEL_PATH=$HOME/data/models/Qwen2.5-7B-Instruct
 
 # Base output paths
 export BASE_CKPT_PATH=ckpts
@@ -91,7 +88,7 @@ export TOP_K=-1                  # Top-k sampling (-1 for disabled)
 
 # --- Define the Training Command and its Arguments ---
 TRAINING_CMD=(
-    python3 -m siirl.main_dag
+    python3 -m siirl.client.main_dag
     algorithm.adv_estimator=\$ALG
     data.train_files=\$TRAIN_DATA_PATH
     data.val_files=\$TEST_DATA_PATH
@@ -134,8 +131,6 @@ TRAINING_CMD=(
     actor_rollout_ref.rollout.max_num_batched_tokens=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
     actor_rollout_ref.rollout.max_model_len=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
     actor_rollout_ref.rollout.n=\$ROLLOUT_N
-    actor_rollout_ref.rollout.prompt_length=\$MAX_PROMPT_LENGTH  
-    actor_rollout_ref.rollout.response_length=\$MAX_RESPONSE_LENGTH
     actor_rollout_ref.rollout.temperature=\$TEMPERATURE
     actor_rollout_ref.rollout.top_p=\$TOP_P
     actor_rollout_ref.rollout.top_k=\$TOP_K

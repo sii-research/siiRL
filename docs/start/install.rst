@@ -6,7 +6,6 @@ siiRL provides three primary installation methods. We **strongly recommend** usi
 * :ref:`Method 1: Install from Docker Image (Recommended) <install-docker>`
 * :ref:`Method 2: Install from PyPI (pip) <install-pip>`
 * :ref:`Method 3: Install from Source (Custom Environment) <install-source>`
-
 Requirements
 ------------
 
@@ -19,16 +18,14 @@ Currently, siiRL supports the following configurations are available:
 - **SGLang** and **vLLM** for rollout generation.
 
 .. _install-docker:
-
 Method 1: Install from docker image
-------------------------------------
+-------------------------
 
 The stable image is ``siiai/siirl-base:vllm0.8.5.post1-sglang0.4.6.post5-cu124``. This images contains the latest version of inference and training framework and its dependencies.
 
 .. _install-pip:
-
 Method 2: Install from PIP
----------------------------
+-----------------
 
 We provide prebuilt python wheels for Linux. Install siiRL with the following command:
 
@@ -39,10 +36,9 @@ We provide prebuilt python wheels for Linux. Install siiRL with the following co
 
     # Then, install required high-performance dependencies for siiRL
     pip install flashinfer-python -i https://flashinfer.ai/whl/cu124/torch2.6/
-    pip install flash-attn==2.7.3 --no-build-isolation
+    pip install flash-attn==2.7.3 --no-build-isolation   
 
 .. _install-source:
-
 Method 3: Install from custom environment
 ---------------------------------------------
 

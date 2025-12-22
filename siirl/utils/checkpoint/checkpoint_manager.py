@@ -27,7 +27,7 @@ from omegaconf import DictConfig
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from siirl.utils.extras.device import is_cuda_available, is_npu_available
-from siirl.params.model_args import CheckpointArguments
+from siirl.utils.params.model_args import CheckpointArguments
 
 
 class BaseCheckpointManager:

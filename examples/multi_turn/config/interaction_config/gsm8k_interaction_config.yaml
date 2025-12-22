@@ -1,4 +1,4 @@
 interaction:
   - name: "gsm8k"
-    class_name: "siirl.execution.rollout_flow.multiturn.interactions.gsm8k_interaction.Gsm8kInteraction"
+    class_name: "siirl.multiturn.interactions.gsm8k_interaction.Gsm8kInteraction"
     config: {}

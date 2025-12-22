@@ -105,7 +105,7 @@ export PPO_MINI_BATCH_SIZE=$(($PPO_MINI_BATCH_SIZE_PER_NODE * $NNODES))
 
 # --- Define the Training Command and its Arguments ---
 TRAINING_CMD=(
-    python3 -m siirl.main_dag
+    python3 -m siirl.client.main_dag
     algorithm.workflow_type=dapo
     algorithm.adv_estimator=\$ADV_ESTIMATOR
     data.train_files=\$TRAIN_DATA_PATH
@@ -170,8 +170,6 @@ TRAINING_CMD=(
     actor_rollout_ref.rollout.enforce_eager=True
     actor_rollout_ref.rollout.free_cache_engine=True
     actor_rollout_ref.rollout.n=\$ROLLOUT_N
-    actor_rollout_ref.rollout.prompt_length=\$MAX_PROMPT_LENGTH  
-    actor_rollout_ref.rollout.response_length=\$MAX_RESPONSE_LENGTH
     actor_rollout_ref.rollout.temperature=\$TEMPERATURE
     actor_rollout_ref.rollout.top_p=\$TOP_P
     actor_rollout_ref.rollout.top_k=\$TOP_K

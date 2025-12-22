@@ -77,10 +77,8 @@ export MASTER_ADDR=${MASTER_ADDR:-localhost}
 
 # --- Output Paths and Experiment Naming ---
 export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_fsdp_${NNODES}nodes
-export WANDB_BASE_URL=https://wandb1.sii.edu.cn/
-export WANDB_API_KEY=local-6a4cc4c8b917355ce21530f9c9be52014cc55ee2
-export EXPERIMENT_NAME=siirl_1116_vllm_${MODEL_NAME}_${ALG}_${DATASET}_${NNODES}_nodes_experiment
-export PROJECT_NAME=hujr_merge_test
+export PROJECT_NAME=siirl_${DATASET}_${ALG}
+export EXPERIMENT_NAME=siirl_${MODEL_NAME}_${ALG}_${DATASET}_fsdp_experiment
 export TENSORBOARD_DIR=${BASE_TENSORBOARD_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_fsdp_tensorboard/dlc_${NNODES}_$timestamp
 export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${ALG}_${DATASET}_fsdp_${NNODES}_$timestamp
 
@@ -90,7 +88,7 @@ export PPO_MINI_BATCH_SIZE=$(($PPO_MINI_BATCH_SIZE_PER_NODE * $NNODES))
 
 # --- Define the Training Command and its Arguments ---
 TRAINING_CMD=(
-    python3 -m siirl.main_dag
+    python3 -m siirl.client.main_dag
     algorithm.adv_estimator=\$ADV_ESTIMATOR
     data.train_files=\$TRAIN_DATA_PATH
     data.val_files=\$TEST_DATA_PATH
@@ -129,8 +127,6 @@ TRAINING_CMD=(
     # Rollout configuration
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=\$PPO_MICRO_BATCH_SIZE_PER_GPU
     actor_rollout_ref.rollout.tensor_model_parallel_size=\$ROLLOUT_TP
-    actor_rollout_ref.rollout.prompt_length=\$MAX_PROMPT_LENGTH  
-    actor_rollout_ref.rollout.response_length=\$MAX_RESPONSE_LENGTH
     actor_rollout_ref.rollout.name=vllm
     actor_rollout_ref.rollout.n=\$ROLLOUT_N
     actor_rollout_ref.rollout.gpu_memory_utilization=\$ROLLOUT_GPU_MEMORY_UTILIZATION
@@ -151,7 +147,7 @@ TRAINING_CMD=(
     algorithm.kl_ctrl.kl_coef=\$KL_COEF
     # Trainer configuration
     trainer.critic_warmup=0
-    trainer.logger='["console","tensorboard","wandb"]'
+    trainer.logger='["console","tensorboard"]'
     trainer.project_name=\$PROJECT_NAME
     trainer.experiment_name=\$EXPERIMENT_NAME
     trainer.n_gpus_per_node=\$N_GPUS_PER_NODE

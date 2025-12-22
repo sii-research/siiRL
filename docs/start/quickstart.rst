@@ -79,7 +79,7 @@ Set the ``data.train_files`` ,\ ``data.val_files``, ``actor_rollout_ref.model.pa
 
 .. code-block:: bash
 
-   python3 -m siirl.main_dag \
+   python3 -m siirl.client.main_dag \
     algorithm.adv_estimator=grpo \
     data.train_files=$HOME/data/gsm8k/train.parquet \
     data.val_files=$HOME/data/gsm8k/test.parquet \

@@ -77,50 +77,6 @@ Key components include:
 * **DAG Workers**: The core execution units, with each worker bound to a single GPU, running its assigned tasks independently.
 * **Data Coordinator**: A set of distributed components (`Distributed Dataloader` and `Distributed Databuffer`) that manage the entire data lifecycle, from initial loading to intermediate data redistribution, without a central coordinator.
 
-### Typical Supported Models & Algorithms
-
-<table style="width: 100%; table-layout: auto; border-collapse: collapse;">
-  <thead align="center" valign="bottom">
-    <tr>
-      <th style="min-width: 120px;">Models</th>
-      <th style="min-width: 120px;">Algorithms</th>
-    </tr>
-  </thead>
-  <tbody valign="top">
-    <tr>
-      <td>
-        <b>Qwen2.5 Series</b>
-        <ul style="margin-left: 0; padding-left: 16px;">
-          <li>Qwen2.5-7B </li>
-          <li>Qwen2.5-72B </li>
-          <li>Qwen2.5-VL-7B </li>
-          <li>Qwen2.5-VL-72B </li>
-        </ul>
-        <b>Qwen3 Series</b>
-        <ul style="margin-left: 0; padding-left: 16px;">
-          <li>Qwen3-1.7B </li>
-          <li>Qwen3-30B </li>
-          <li>Qwen3-235B-A22B (MoE) </li>
-        </ul>
-        <b>VLA Models</b>
-        <ul style="margin-left: 0; padding-left: 16px;">
-          <li>OpenVLA </li>
-          <li>OpenVLA-OFT </li>
-        </ul>
-      </td>
-      <td>
-        <b>Reinforcement Learning</b>
-        <ul style="margin-left: 0; padding-left: 16px;">
-          <li>GRPO </li>
-          <li>PPO </li>
-          <li>DAPO </li>
-          <li>GSPO </li>
-        </ul>
-      </td>
-    </tr>
-  </tbody>
-</table>
-
 ##  🧪 Experiment
 
 We conducted a comprehensive evaluation of siiRL's performance and scalability across various scenarios, comparing it with the SOTA RL framework, verl. The experiments demonstrate that siiRL exhibits outstanding performance across all metrics.
@@ -186,13 +142,18 @@ Experiments confirm that siiRL's performance optimizations do not come at the co
 
 ## 🗓️ Future Plans
 
-siiRL is under active development. We are excited about the future and are focused on extending the framework's capabilities in two key directions: support training-tnference separation and real-robot VLA training.
+siiRL is under active development. We are excited about the future and are focused on extending the framework's capabilities in two key directions: advancing multi-agent support and optimizing the base framework.
 
-###  Training-Inference Separation Architecture
-To enhance deployment flexibility and resource utilization, we are developing a **decoupled training-inference architecture**.
+###  Advanced Multi-Agent Capabilities
+Our flexible DAG-based design provides a natural and powerful foundation for complex multi-agent systems. 
 
-###  Embodied VLA Training & Real-World Deployment
-We are expanding our Vision-Language-Action (VLA) capabilities to support **real-world robotics deployment**.
+###  Support Training for VLA
+The goal is to create an end-to-end, distributed RL solution capable of training large-scale, multi-modal VLA models for embodied AI tasks. You can track the development progress for this feature in this [Pull Request](https://github.com/sii-research/siiRL/pull/30)
+
+
+###  Base Framework Enhancements
+We are continuously working to improve the performance, efficiency, and scalability of the base system. 
+
 
 
 We welcome community contributions! Please see our [Contributing Guide](CONTRIBUTING.md) to get started.
