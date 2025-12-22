@@ -90,7 +90,7 @@ Below is an example script `run_embodied_srpo.sh` to run SRPO training on `liber
 
 **Note**: The siiRL repository provides ready-to-use training scripts for all four LIBERO tasks in the `examples/embodied_srpo_trainer/` directory:
 
--   ``run_openvla_oft_libero_10.sh``
+-   ``run_openvla_oft_libero_long.sh``
 -   ``run_openvla_oft_libero_goal.sh``
 -   ``run_openvla_oft_libero_object.sh``
 -   ``run_openvla_oft_libero_spatial.sh``
@@ -128,7 +128,7 @@ To train on a specific task, modify the following paths in the script to match y
     # --- Path Definitions (USER PROVIDED) ---
     export HOME_PATH=${HOME_PATH:your_home_path}
     export TRAIN_DATA_PATH=$HOME_PATH/data/train.parquet # generated automatically
-    export TEST_DATA_PATH=$HOME_PATH/data/test.parquet # generated automatically
+    export TEST_DATA_PATH=$HOME_PATH/data/validate.parquet # generated automatically
     export MODEL_PATH=$HOME_PATH/models/Sylvest/OpenVLA-AC-PD-1traj-libero-long
     export VJEPA_MODEL_PATH=$HOME_PATH/models/vjepa2/vitg-384.pt
 

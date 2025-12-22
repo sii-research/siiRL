@@ -19,7 +19,7 @@ export MODEL_TYPE=openvla-oft
 # --- Path Definitions (USER PROVIDED) ---
 export HOME_PATH=${HOME_PATH:your_home_path}
 export TRAIN_DATA_PATH=$HOME_PATH/datasets/vla-oft/libero/$DATASET/train.parquet
-export TEST_DATA_PATH=$HOME_PATH/datasets/vla-oft/libero/$DATASET/test.parquet
+export TEST_DATA_PATH=$HOME_PATH/datasets/vla-oft/libero/$DATASET/validate.parquet
 export MODEL_PATH=$HOME_PATH/models/Sylvest/OpenVLA-AC-PD-1traj-libero-object
 export VJEPA_MODEL_PATH=$HOME_PATH/models/vjepa2/vitg-384.pt
 
