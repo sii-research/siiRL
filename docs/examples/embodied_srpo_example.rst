@@ -32,7 +32,8 @@ Ensure you have the necessary environment variables set. This includes the path 
 .. code:: bash
 
    export SIIRL_DIR="/path/to/siiRL"
-   export PYTHONPATH="$SIIRL_DIR:/path/to/LIBERO:/path/to/vjepa:$PYTHONPATH"
+   export VJEPA2_DIR="$HOME/code/vjepa2"  # V-JEPA 2 code repository (https://github.com/facebookresearch/vjepa2)
+   export PYTHONPATH="$SIIRL_DIR:/path/to/LIBERO:$VJEPA2_DIR:$PYTHONPATH"
 
 Step 2: Prepare the Models
 --------------------------
@@ -50,7 +51,15 @@ You need the following models:
 
 2.  **Visual Encoder**: A visual encoder model V-JEPA is **required** for processing visual observations.
 
-    - Download the V-JEPA 2 model from Hugging Face: `Sylvest/vjepa2-vit-g <https://huggingface.co/Sylvest/vjepa2-vit-g>`_
+    - First, clone the V-JEPA 2 code repository from GitHub (`facebookresearch/vjepa2 <https://github.com/facebookresearch/vjepa2>`_):
+    
+      .. code:: bash
+
+         git clone https://github.com/facebookresearch/vjepa2.git $HOME/code/vjepa2
+
+      Make sure to add the V-JEPA 2 directory to your ``PYTHONPATH`` as shown in Step 1.
+
+    - Then, download the V-JEPA 2 model weights from Hugging Face: `Sylvest/vjepa2-vit-g <https://huggingface.co/Sylvest/vjepa2-vit-g>`_
     
       .. code:: bash
 
