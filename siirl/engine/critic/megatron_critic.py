@@ -138,6 +138,19 @@ class MegatronPPOCritic(BasePPOCritic):
         mini_batch.to(get_device_id())
         mini_batch = mini_batch.contiguous()
         broadcast_dict_tensor(mini_batch, src=mpu.get_pipeline_model_parallel_last_rank(), group=mpu.get_pipeline_model_parallel_group())
+        
+        # broadcast from cp rank 0 to all other cp ranks to ensure same data across CP group
+        cp_size = mpu.get_context_parallel_world_size()
+        if cp_size > 1:
+            cp_group = mpu.get_context_parallel_group()
+            cp_group_ranks = torch.distributed.get_process_group_ranks(cp_group)
+            src_rank = cp_group_ranks[0]  # cp_rank=0 in this group
+            broadcast_dict_tensor(
+                mini_batch,
+                src=src_rank,
+                group=cp_group,
+            )
+        
         # split into micro-batches
         mini_batch["attention_mask"] = mini_batch["attention_mask"].to(bool)
 
