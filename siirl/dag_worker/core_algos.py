@@ -313,7 +313,19 @@ def compute_grpo_outcome_advantage(
         Returns: `(torch.Tensor)`
             shape is (bs, response_length)
     """
+    # DEBUG LOG: Input information
+    logger.info(f"[DEBUG GRPO] ===== compute_grpo_outcome_advantage =====")
+    logger.info(f"[DEBUG GRPO] token_level_rewards shape: {token_level_rewards.shape}, dtype: {token_level_rewards.dtype}")
+    logger.info(f"[DEBUG GRPO] response_mask shape: {response_mask.shape}, dtype: {response_mask.dtype}")
+    logger.info(f"[DEBUG GRPO] index type: {type(index)}, shape: {index.shape if hasattr(index, 'shape') else 'N/A'}")
+    if isinstance(index, torch.Tensor):
+        logger.info(f"[DEBUG GRPO] index dtype: {index.dtype}, device: {index.device}")
+    elif isinstance(index, np.ndarray):
+        logger.info(f"[DEBUG GRPO] index dtype: {index.dtype}")
+    logger.info(f"[DEBUG GRPO] norm_adv_by_std_in_grpo: {norm_adv_by_std_in_grpo}")
+    
     scores = token_level_rewards.sum(dim=-1)
+    logger.info(f"[DEBUG GRPO] scores (sum of rewards) - mean: {scores.mean().item():.6f}, std: {scores.std().item():.6f}, min: {scores.min().item():.6f}, max: {scores.max().item():.6f}")
 
     id2score = defaultdict(list)
     id2mean = {}
@@ -325,6 +337,13 @@ def compute_grpo_outcome_advantage(
             # Convert tensor index to Python int for use as dict key
             idx_key = int(index[i].item()) if isinstance(index[i], torch.Tensor) else int(index[i])
             id2score[idx_key].append(scores[i])
+        
+        # DEBUG LOG: Grouping information
+        logger.info(f"[DEBUG GRPO] Number of unique groups: {len(id2score)}")
+        group_sizes = [len(v) for v in id2score.values()]
+        logger.info(f"[DEBUG GRPO] Group sizes - mean: {np.mean(group_sizes):.2f}, min: {min(group_sizes)}, max: {max(group_sizes)}")
+        logger.info(f"[DEBUG GRPO] Sample group IDs (first 5): {list(id2score.keys())[:5]}")
+        
         for idx in id2score:
             if len(id2score[idx]) == 1:
                 id2mean[idx] = torch.tensor(0.0)
@@ -335,6 +354,13 @@ def compute_grpo_outcome_advantage(
                 id2std[idx] = torch.std(scores_tensor)
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
+        
+        # DEBUG LOG: Group statistics
+        all_means = [id2mean[idx].item() for idx in id2mean]
+        all_stds = [id2std[idx].item() for idx in id2std]
+        logger.info(f"[DEBUG GRPO] Group means - mean: {np.mean(all_means):.6f}, std: {np.std(all_means):.6f}")
+        logger.info(f"[DEBUG GRPO] Group stds - mean: {np.mean(all_stds):.6f}, min: {min(all_stds):.6f}, max: {max(all_stds):.6f}")
+        
         for i in range(bsz):
             # Convert tensor index to Python int for dict lookup
             idx_key = int(index[i].item()) if isinstance(index[i], torch.Tensor) else int(index[i])
@@ -344,6 +370,9 @@ def compute_grpo_outcome_advantage(
                 scores[i] = scores[i] - id2mean[idx_key]
         scores = scores.unsqueeze(-1) * response_mask
 
+    # DEBUG LOG: Output advantages
+    logger.info(f"[DEBUG GRPO] Final advantages - mean: {scores.mean().item():.6f}, std: {scores.std().item():.6f}, min: {scores.min().item():.6f}, max: {scores.max().item():.6f}")
+    logger.info(f"[DEBUG GRPO] ========================================")
 
     return scores, scores
 
@@ -1438,6 +1467,11 @@ def compute_advantage(data: TensorDict, adv_estimator, gamma=1.0, lam=1.0, norm_
                 kwargs.get("pf_ppo_weight_pow", 2.0),
             )
     elif adv_estimator == AdvantageEstimator.GRPO:
+        # DEBUG LOG: Before GRPO advantage calculation
+        logger.info(f"[DEBUG ADV] ===== compute_advantage (GRPO) =====")
+        logger.info(f"[DEBUG ADV] token_level_rewards - mean: {data['token_level_rewards'].mean().item():.6f}, std: {data['token_level_rewards'].std().item():.6f}")
+        logger.info(f"[DEBUG ADV] responses shape: {data['responses'].shape}, ndim: {data['responses'].ndim}")
+        
         if "finish_step" in data and data["responses"].ndim == 3:
             # Embodied scenario: compute mask based on finish_step
             responses = data["responses"]
@@ -1448,15 +1482,27 @@ def compute_advantage(data: TensorDict, adv_estimator, gamma=1.0, lam=1.0, norm_
             action_token_len = responses.size(2)  # action token length
             finish_step = data['finish_step'] * action_token_len
             
+            # DEBUG LOG: finish_step information
+            logger.info(f"[DEBUG ADV] finish_step (before multiply) - mean: {data['finish_step'].float().mean().item():.2f}, min: {data['finish_step'].min().item()}, max: {data['finish_step'].max().item()}")
+            logger.info(f"[DEBUG ADV] action_token_len: {action_token_len}")
+            logger.info(f"[DEBUG ADV] finish_step (after multiply) - mean: {finish_step.float().mean().item():.2f}, min: {finish_step.min().item()}, max: {finish_step.max().item()}")
+            logger.info(f"[DEBUG ADV] response_length: {response_length}")
+            
             steps = torch.arange(response_length, device=responses.device)
             steps_expanded = steps.unsqueeze(0).expand(batch_size, -1)
             grpo_calculation_mask = steps_expanded < finish_step.unsqueeze(1)  # (batch_size, traj_len)
+            
+            # DEBUG LOG: Mask statistics
+            logger.info(f"[DEBUG ADV] grpo_calculation_mask shape: {grpo_calculation_mask.shape}")
+            logger.info(f"[DEBUG ADV] grpo_calculation_mask - sum per sample (first 5): {grpo_calculation_mask.sum(dim=1)[:5].tolist()}")
+            logger.info(f"[DEBUG ADV] grpo_calculation_mask - total True ratio: {grpo_calculation_mask.float().mean().item():.4f}")
             
             logger.info(f"[GRPO] Using finish_step-based mask for embodied scenario")
         else:
             # NLP scenario or no finish_step: use attention_mask-based response_mask
             grpo_calculation_mask = data["response_mask"]
             logger.info(f"[GRPO] Using attention_mask-based response_mask for NLP scenario")
+        
         # Call compute_grpo_outcome_advantage with parameters matching its definition
         advantages, returns = compute_grpo_outcome_advantage(
             token_level_rewards=data["token_level_rewards"],
@@ -1468,6 +1514,10 @@ def compute_advantage(data: TensorDict, adv_estimator, gamma=1.0, lam=1.0, norm_
         data["returns"] = returns
         # Store the mask for consistent metrics calculation
         data["response_mask"] = grpo_calculation_mask
+        
+        # DEBUG LOG: After GRPO advantage calculation
+        logger.info(f"[DEBUG ADV] Final advantages stored - mean: {advantages.mean().item():.6f}, std: {advantages.std().item():.6f}")
+        logger.info(f"[DEBUG ADV] ====================================")
         logger.debug(f"[GRPO] Stored response_mask in batch for consistent metrics")
     elif adv_estimator == AdvantageEstimator.CPGD:
         cpgd_calculation_mask = data["response_mask"]

@@ -156,7 +156,16 @@ class RobDataParallelPPOActor(BasePPOActor):
                 entropy = entropy.reshape((batch_size, traj_len*8,7) )
 
                 mask = self.generate_traj_mask(micro_batch['finish_step'], traj_len*8)
+                
+                # DEBUG LOG: Mask application in _forward_micro_batch
+                logger.info(f"[DEBUG MASK] _forward_micro_batch (openvla-oft)")
+                logger.info(f"[DEBUG MASK] finish_step: {micro_batch['finish_step'][:3].tolist() if len(micro_batch['finish_step']) >= 3 else micro_batch['finish_step'].tolist()}")
+                logger.info(f"[DEBUG MASK] mask shape: {mask.shape}, True count per sample (first 3): {mask.sum(dim=1)[:3].tolist()}")
+                logger.info(f"[DEBUG MASK] log_probs before mask - mean: {log_probs.mean().item():.6f}")
+                
                 log_probs, entropy = self.apply_mask_with_grad_control(log_probs, entropy, mask)
+                
+                logger.info(f"[DEBUG MASK] log_probs after mask - mean: {log_probs.mean().item():.6f}")
                 
                 log_probs = log_probs.reshape((batch_size, traj_len*response_length))
                 entropy = entropy.reshape((batch_size, traj_len*response_length))
@@ -180,7 +189,16 @@ class RobDataParallelPPOActor(BasePPOActor):
 
                 
                 mask = self.generate_traj_mask(micro_batch['finish_step'], traj_len)
+                
+                # DEBUG LOG: Mask application in _forward_micro_batch
+                logger.info(f"[DEBUG MASK] _forward_micro_batch (openvla)")
+                logger.info(f"[DEBUG MASK] finish_step: {micro_batch['finish_step'][:3].tolist() if len(micro_batch['finish_step']) >= 3 else micro_batch['finish_step'].tolist()}")
+                logger.info(f"[DEBUG MASK] mask shape: {mask.shape}, True count per sample (first 3): {mask.sum(dim=1)[:3].tolist()}")
+                logger.info(f"[DEBUG MASK] log_probs before mask - mean: {log_probs.mean().item():.6f}")
+                
                 log_probs, entropy = self.apply_mask_with_grad_control(log_probs, entropy, mask)
+                
+                logger.info(f"[DEBUG MASK] log_probs after mask - mean: {log_probs.mean().item():.6f}")
                 
                 log_probs = log_probs.reshape((batch_size, traj_len*response_length))
                 entropy = entropy.reshape((batch_size, traj_len*response_length))
@@ -384,6 +402,14 @@ class RobDataParallelPPOActor(BasePPOActor):
         self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
         temperature = data['temperature']  # temperature must be in the data.meta_info to avoid slient error
 
+        # DEBUG LOG: update_policy input
+        logger.info(f"[DEBUG UPDATE] ===== update_policy =====")
+        logger.info(f"[DEBUG UPDATE] temperature: {temperature}")
+        logger.info(f"[DEBUG UPDATE] old_log_probs - mean: {data['old_log_probs'].mean().item():.6f}, std: {data['old_log_probs'].std().item():.6f}")
+        logger.info(f"[DEBUG UPDATE] advantages - mean: {data['advantages'].mean().item():.6f}, std: {data['advantages'].std().item():.6f}, min: {data['advantages'].min().item():.6f}, max: {data['advantages'].max().item():.6f}")
+        if 'finish_step' in data:
+            logger.info(f"[DEBUG UPDATE] finish_step - mean: {data['finish_step'].float().mean().item():.2f}, min: {data['finish_step'].min().item()}, max: {data['finish_step'].max().item()}")
+
         select_keys = ['responses', 'input_ids', 'attention_mask', 'pixel_values', 'old_log_probs', 'advantages',"finish_step"]
         batch = data.select(*select_keys)
 
@@ -465,6 +491,15 @@ class RobDataParallelPPOActor(BasePPOActor):
                     old_log_prob_tmp = old_log_prob[:, slice_id: next_slice_id]
                     advantages_tmp = advantages[:, slice_id: next_slice_id]
                     response_mask_tmp = response_mask[:, slice_id: next_slice_id]
+                    
+                    # DEBUG LOG: Before PPO loss calculation
+                    if i == 0:  # Only log first split to avoid spam
+                        logger.info(f"[DEBUG UPDATE] --- Trajectory split {i} ---")
+                        logger.info(f"[DEBUG UPDATE] new log_prob - mean: {log_prob.mean().item():.6f}, std: {log_prob.std().item():.6f}")
+                        logger.info(f"[DEBUG UPDATE] old_log_prob_tmp - mean: {old_log_prob_tmp.mean().item():.6f}, std: {old_log_prob_tmp.std().item():.6f}")
+                        logger.info(f"[DEBUG UPDATE] log_prob - old_log_prob diff - mean: {(log_prob - old_log_prob_tmp).mean().item():.6f}, std: {(log_prob - old_log_prob_tmp).std().item():.6f}")
+                        logger.info(f"[DEBUG UPDATE] advantages_tmp - mean: {advantages_tmp.mean().item():.6f}, std: {advantages_tmp.std().item():.6f}")
+                        logger.info(f"[DEBUG UPDATE] response_mask_tmp sum: {response_mask_tmp.sum().item()}")
                         
                     pg_loss, pg_clipfrac, ppo_kl, _ = core_algos.compute_policy_loss_vanilla(old_log_prob=old_log_prob_tmp,
                                                                             log_prob=log_prob,
@@ -492,6 +527,15 @@ class RobDataParallelPPOActor(BasePPOActor):
             grad_norm = self._optimizer_step()
             data = {'actor/grad_norm': grad_norm.detach().item()}
             append_to_dict(metrics, data)
+            
+            # DEBUG LOG: Final metrics
+            logger.info(f"[DEBUG UPDATE] --- Final metrics ---")
+            logger.info(f"[DEBUG UPDATE] grad_norm: {grad_norm.detach().item():.6f}")
+            logger.info(f"[DEBUG UPDATE] pg_loss: {loss_info.get('actor/pg_loss', 0):.6f}")
+            logger.info(f"[DEBUG UPDATE] pg_clipfrac: {loss_info.get('actor/pg_clipfrac', 0):.6f}")
+            logger.info(f"[DEBUG UPDATE] ppo_kl: {loss_info.get('actor/ppo_kl', 0):.6f}")
+            logger.info(f"[DEBUG UPDATE] ============================")
+            
             torch.cuda.empty_cache()
         self.actor_optimizer.zero_grad()
         torch.cuda.synchronize()

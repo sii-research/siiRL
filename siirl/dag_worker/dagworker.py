@@ -531,8 +531,17 @@ class DAGWorker(Worker):
             return NodeOutput(batch=batch, metrics={})
         batch["global_token_num"] = NonTensorData((torch.sum(batch["attention_mask"], dim=-1) // tp_size).tolist())
 
+        # DEBUG LOG: Before reward computation
+        logger.info(f"[DEBUG REWARD] ===== compute_reward =====")
+        logger.info(f"[DEBUG REWARD] responses shape: {batch['responses'].shape if 'responses' in batch else 'N/A'}")
+        if 'finish_step' in batch:
+            logger.info(f"[DEBUG REWARD] finish_step - mean: {batch['finish_step'].float().mean().item():.2f}, min: {batch['finish_step'].min().item()}, max: {batch['finish_step'].max().item()}")
+
         reward_tensor, extra_infos = compute_reward(batch, self.reward_fn)
         batch["token_level_scores"] = reward_tensor
+
+        # DEBUG LOG: After reward computation
+        logger.info(f"[DEBUG REWARD] token_level_scores - mean: {reward_tensor.mean().item():.6f}, std: {reward_tensor.std().item():.6f}, min: {reward_tensor.min().item():.6f}, max: {reward_tensor.max().item():.6f}")
 
         if extra_infos:
             batch.update({k: np.array(v) for k, v in extra_infos.items()}, inplace=True)
@@ -544,6 +553,9 @@ class DAGWorker(Worker):
             metrics.update(kl_metrics)
         else:
             batch["token_level_rewards"] = batch["token_level_scores"]
+            logger.info(f"[DEBUG REWARD] use_kl_in_reward=False, token_level_rewards = token_level_scores")
+        
+        logger.info(f"[DEBUG REWARD] ==============================")
         return NodeOutput(batch=batch, metrics=metrics)
 
     
@@ -552,6 +564,18 @@ class DAGWorker(Worker):
         """Computes log probabilities from the actor model before the policy update."""
         process_group = kwargs.pop("process_group")
         agent_group = kwargs.pop("agent_group")
+        
+        # DEBUG LOG: Before compute_old_log_prob
+        logger.info(f"[DEBUG NODE] ===== compute_old_log_prob node =====")
+        logger.info(f"[DEBUG NODE] batch keys: {list(batch.keys())}")
+        if 'uid' in batch:
+            uid_data = batch['uid']
+            logger.info(f"[DEBUG NODE] uid type: {type(uid_data)}, shape: {uid_data.shape if hasattr(uid_data, 'shape') else 'N/A'}")
+            if hasattr(uid_data, 'dtype'):
+                logger.info(f"[DEBUG NODE] uid dtype: {uid_data.dtype}")
+            if isinstance(uid_data, (np.ndarray, torch.Tensor)):
+                logger.info(f"[DEBUG NODE] uid first 5 values: {uid_data[:5].tolist() if hasattr(uid_data, 'tolist') else list(uid_data[:5])}")
+        
         if "global_token_num" not in batch:
             # in multi-agent, agentA may don't have reward node
             # insert some info needed
@@ -565,6 +589,7 @@ class DAGWorker(Worker):
         processed_data.pop("metrics", None)
         processed_data.pop("entropys", None)
 
+        logger.info(f"[DEBUG NODE] ======================================")
         return NodeOutput(batch=processed_data, metrics=local_metrics)
 
     @DistProfiler.annotate(role="compute_ref_log_prob")
