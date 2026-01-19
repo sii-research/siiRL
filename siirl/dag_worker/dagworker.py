@@ -480,18 +480,19 @@ class DAGWorker(Worker):
         # Set meta_info for embodied training
         batch["eos_token_id"] = NonTensorData(self.validate_tokenizer.eos_token_id if self.validate_tokenizer else None)
         batch["n_samples"] = NonTensorData(self.config.actor_rollout_ref.rollout.n)
-        batch["pad_token_id"] = NonTensorData(self.validate_tokenizer.pad_token_id if self.validate_tokenizer else None)        
+        batch["pad_token_id"] = NonTensorData(self.validate_tokenizer.pad_token_id if self.validate_tokenizer else None)
+        
         logger.info(
-            f"[Embodied Validation] Batch variables: "
-            f"{batch.batch_size[0]}, "
-            f"eos_token_id={batch['eos_token_id']}, "
-            f"pad_token_id={batch['pad_token_id']}, "
+            f"[Embodied Training] Batch size: {len(batch)}, "
             f"n_samples={batch['n_samples']}, "
+            f"eos_token_id={batch['eos_token_id']}, "
+            f"pad_token_id={batch['pad_token_id']}"
         )
         # Generate embodied episodes
         gen_output = rollout_worker.generate_sequences(batch)
         metrics = gen_output["metrics"]
         batch.update(gen_output)
+        
         # Add unique IDs for tracking
         # Compute response mask if not already present
         if "response_mask" not in batch:
