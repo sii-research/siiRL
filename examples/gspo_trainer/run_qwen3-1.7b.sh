@@ -76,13 +76,11 @@ export NODE_RANK=${PET_NODE_RANK:-0}
 export MASTER_ADDR=${MASTER_ADDR:-localhost}
 
 # --- Output Paths and Experiment Naming ---
-export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_fsdp_${NNODES}nodes
-export WANDB_BASE_URL=https://wandb1.sii.edu.cn/
-export WANDB_API_KEY=local-6a4cc4c8b917355ce21530f9c9be52014cc55ee2
-export EXPERIMENT_NAME=siirl_1116_vllm_${MODEL_NAME}_${ALG}_${DATASET}_${NNODES}_nodes_experiment
-export PROJECT_NAME=hujr_merge_test
-export TENSORBOARD_DIR=${BASE_TENSORBOARD_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_fsdp_tensorboard/dlc_${NNODES}_$timestamp
-export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${ALG}_${DATASET}_fsdp_${NNODES}_$timestamp
+export CKPT_PATH=${BASE_CKPT_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_${NNODES}nodes
+export PROJECT_NAME=siirl_${DATASET}_${ALG}
+export EXPERIMENT_NAME=siirl_${MODEL_NAME}_${ALG}_${DATASET}_experiment
+export TENSORBOARD_DIR=${BASE_TENSORBOARD_PATH}/${MODEL_NAME}_${ALG}_${DATASET}_tensorboard/dlc_${NNODES}_$timestamp
+export SIIRL_LOGGING_FILENAME=${MODEL_NAME}_${ALG}_${DATASET}_${NNODES}_$timestamp
 
 # --- Calculated Global Hyperparameters ---
 export TRAIN_BATCH_SIZE=$(($TRAIN_BATCH_SIZE_PER_NODE * $NNODES))
