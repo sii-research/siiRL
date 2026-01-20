@@ -16,6 +16,7 @@ import uuid
 
 import numpy as np
 import torch
+from loguru import logger
 
 from siirl.scheduler.enums import AdvantageEstimator
 from siirl.scheduler.reward import compute_reward

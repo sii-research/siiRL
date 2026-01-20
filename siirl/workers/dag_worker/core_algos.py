@@ -27,6 +27,7 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
+from loguru import logger
 from omegaconf import DictConfig
 
 import siirl.utils.model_utils.torch_functional as siirl_F
