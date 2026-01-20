@@ -295,7 +295,15 @@ def compute_grpo_outcome_advantage(
         Returns: `(torch.Tensor)`
             shape is (bs, response_length)
     """
+    # DEBUG LOG: Input information
+    logger.info(f"[DEBUG GRPO] ===== compute_grpo_outcome_advantage =====")
+    logger.info(f"[DEBUG GRPO] token_level_rewards shape: {token_level_rewards.shape}, dtype: {token_level_rewards.dtype}")
+    logger.info(f"[DEBUG GRPO] response_mask shape: {response_mask.shape}, dtype: {response_mask.dtype}")
+    logger.info(f"[DEBUG GRPO] index type: {type(index)}, len: {len(index) if hasattr(index, '__len__') else 'N/A'}")
+    logger.info(f"[DEBUG GRPO] norm_adv_by_std_in_grpo: {norm_adv_by_std_in_grpo}")
+    
     scores = token_level_rewards.sum(dim=-1)
+    logger.info(f"[DEBUG GRPO] scores (sum of rewards) - mean: {scores.mean().item():.6f}, std: {scores.std().item():.6f}, min: {scores.min().item():.6f}, max: {scores.max().item():.6f}")
 
     id2score = defaultdict(list)
     id2mean = {}
@@ -305,6 +313,13 @@ def compute_grpo_outcome_advantage(
         bsz = scores.shape[0]
         for i in range(bsz):
             id2score[index[i]].append(scores[i])
+        
+        # DEBUG LOG: Grouping information
+        logger.info(f"[DEBUG GRPO] Number of unique groups: {len(id2score)}")
+        group_sizes = [len(v) for v in id2score.values()]
+        logger.info(f"[DEBUG GRPO] Group sizes - mean: {np.mean(group_sizes):.2f}, min: {min(group_sizes)}, max: {max(group_sizes)}")
+        logger.info(f"[DEBUG GRPO] Sample group IDs (first 5): {list(id2score.keys())[:5]}")
+        
         for idx in id2score:
             if len(id2score[idx]) == 1:
                 id2mean[idx] = torch.tensor(0.0)
@@ -315,12 +330,23 @@ def compute_grpo_outcome_advantage(
                 id2std[idx] = torch.std(scores_tensor)
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
+        
+        # DEBUG LOG: Group statistics
+        all_means = [id2mean[idx].item() for idx in id2mean]
+        all_stds = [id2std[idx].item() for idx in id2std]
+        logger.info(f"[DEBUG GRPO] Group means - mean: {np.mean(all_means):.6f}, std: {np.std(all_means):.6f}")
+        logger.info(f"[DEBUG GRPO] Group stds - mean: {np.mean(all_stds):.6f}, min: {min(all_stds):.6f}, max: {max(all_stds):.6f}")
+        
         for i in range(bsz):
             if norm_adv_by_std_in_grpo:
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
             else:
                 scores[i] = scores[i] - id2mean[index[i]]
         scores = scores.unsqueeze(-1) * response_mask
+
+    # DEBUG LOG: Output advantages
+    logger.info(f"[DEBUG GRPO] Final advantages - mean: {scores.mean().item():.6f}, std: {scores.std().item():.6f}, min: {scores.min().item():.6f}, max: {scores.max().item():.6f}")
+    logger.info(f"[DEBUG GRPO] ========================================")
 
     return scores, scores
 

@@ -170,9 +170,19 @@ class NodeExecutorsMixin:
         """Calculates rewards for a batch of generated sequences."""
         if "token_level_rewards" in batch.batch:
             return NodeOutput(batch=batch, metrics={})
+        
+        # DEBUG LOG: Before reward computation
+        logger.info(f"[DEBUG REWARD] ===== compute_reward =====")
+        logger.info(f"[DEBUG REWARD] responses shape: {batch.batch['responses'].shape if 'responses' in batch.batch else 'N/A'}")
+        if 'finish_step' in batch.batch:
+            logger.info(f"[DEBUG REWARD] finish_step - mean: {batch.batch['finish_step'].float().mean().item():.2f}, min: {batch.batch['finish_step'].min().item()}, max: {batch.batch['finish_step'].max().item()}")
+        
         batch.meta_info["global_token_num"] = (torch.sum(batch.batch["attention_mask"], dim=-1).flatten() // tp_size).tolist()
         reward_tensor, extra_infos = compute_reward(batch, self.reward_fn)
         batch.batch["token_level_scores"] = reward_tensor
+        
+        # DEBUG LOG: After reward computation
+        logger.info(f"[DEBUG REWARD] token_level_scores - mean: {reward_tensor.mean().item():.6f}, std: {reward_tensor.std().item():.6f}, min: {reward_tensor.min().item():.6f}, max: {reward_tensor.max().item():.6f}")
 
         if extra_infos:
             batch.non_tensor_batch.update({k: np.array(v) for k, v in extra_infos.items()})
@@ -183,11 +193,21 @@ class NodeExecutorsMixin:
             metrics.update(kl_metrics)
         else:
             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+            logger.info(f"[DEBUG REWARD] use_kl_in_reward=False, token_level_rewards = token_level_scores")
+        
+        logger.info(f"[DEBUG REWARD] ==============================")
         return NodeOutput(batch=batch, metrics=metrics)
 
     @DistProfiler.annotate(role="compute_old_log_prob")
     def compute_old_log_prob(self, batch: DataProto, worker_group_index: int, **kwargs) -> NodeOutput:
         """Computes log probabilities from the actor model before the policy update."""
+        # DEBUG LOG: Before compute_old_log_prob
+        logger.info(f"[DEBUG NODE] ===== compute_old_log_prob node =====")
+        logger.info(f"[DEBUG NODE] batch keys: {list(batch.batch.keys())}")
+        if 'uid' in batch.non_tensor_batch:
+            uid_data = batch.non_tensor_batch['uid']
+            logger.info(f"[DEBUG NODE] uid type: {type(uid_data)}, len: {len(uid_data) if hasattr(uid_data, '__len__') else 'N/A'}")
+        
         if "global_token_num" not in batch.meta_info:
             # in multi-agent, agentA may don't have reward node
             # insert some info needed

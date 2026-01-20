@@ -18,6 +18,7 @@ FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
+import numpy as np
 import torch
 from loguru import logger
 
@@ -168,7 +169,10 @@ def compute_advantage(
                 kwargs.get("pf_ppo_weight_pow", 2.0),
             )
     elif adv_estimator == AdvantageEstimator.GRPO:
-        # TODO: test on more adv estimator type
+        # DEBUG LOG: Before GRPO advantage calculation
+        logger.info(f"[DEBUG ADV] ===== compute_advantage (GRPO) =====")
+        logger.info(f"[DEBUG ADV] token_level_rewards - mean: {data.batch['token_level_rewards'].mean().item():.6f}, std: {data.batch['token_level_rewards'].std().item():.6f}")
+        logger.info(f"[DEBUG ADV] responses shape: {data.batch['responses'].shape}, ndim: {data.batch['responses'].ndim}")
         
         # For embodied scenarios, use finish_step-based mask
         # Check if this is embodied scenario (has finish_step)
@@ -182,9 +186,20 @@ def compute_advantage(
             action_token_len = responses.size(2)  # action token length
             finish_step = data.batch['finish_step'] * action_token_len
             
+            # DEBUG LOG: finish_step information
+            logger.info(f"[DEBUG ADV] finish_step (before multiply) - mean: {data.batch['finish_step'].float().mean().item():.2f}, min: {data.batch['finish_step'].min().item()}, max: {data.batch['finish_step'].max().item()}")
+            logger.info(f"[DEBUG ADV] action_token_len: {action_token_len}")
+            logger.info(f"[DEBUG ADV] finish_step (after multiply) - mean: {finish_step.float().mean().item():.2f}, min: {finish_step.min().item()}, max: {finish_step.max().item()}")
+            logger.info(f"[DEBUG ADV] response_length: {response_length}")
+            
             steps = torch.arange(response_length, device=responses.device)
             steps_expanded = steps.unsqueeze(0).expand(batch_size, -1)
             grpo_calculation_mask = steps_expanded < finish_step.unsqueeze(1)  # (batch_size, traj_len)
+            
+            # DEBUG LOG: Mask statistics
+            logger.info(f"[DEBUG ADV] grpo_calculation_mask shape: {grpo_calculation_mask.shape}")
+            logger.info(f"[DEBUG ADV] grpo_calculation_mask - sum per sample (first 5): {grpo_calculation_mask.sum(dim=1)[:5].tolist()}")
+            logger.info(f"[DEBUG ADV] grpo_calculation_mask - total True ratio: {grpo_calculation_mask.float().mean().item():.4f}")
             
             logger.info(f"[GRPO] Using finish_step-based mask for embodied scenario")
         else:
@@ -203,6 +218,10 @@ def compute_advantage(
         data.batch["returns"] = returns
         # Store the mask for consistent metrics calculation
         data.batch["response_mask"] = grpo_calculation_mask
+        
+        # DEBUG LOG: After GRPO advantage calculation
+        logger.info(f"[DEBUG ADV] Final advantages stored - mean: {advantages.mean().item():.6f}, std: {advantages.std().item():.6f}")
+        logger.info(f"[DEBUG ADV] ====================================")
         logger.debug(f"[GRPO] Stored response_mask in batch for consistent metrics")
     elif adv_estimator == AdvantageEstimator.GRPO_PASSK:
         advantages, returns = core_algos.compute_grpo_passk_outcome_advantage(
