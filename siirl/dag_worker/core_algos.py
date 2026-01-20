@@ -786,9 +786,32 @@ def compute_policy_loss_vanilla(
     )
 
     negative_approx_kl = log_prob - old_log_prob
+    
+    # DEBUG: 检查 clamp 前的范围
+    pre_clamp_min = negative_approx_kl.min().item()
+    pre_clamp_max = negative_approx_kl.max().item()
+    if pre_clamp_min < -20.0 or pre_clamp_max > 20.0:
+        logger.warning(f"[DEBUG PPO] ⚠️ negative_approx_kl 被 clamp! 原始范围: [{pre_clamp_min:.4f}, {pre_clamp_max:.4f}]")
+        clamp_low_count = (negative_approx_kl < -20.0).sum().item()
+        clamp_high_count = (negative_approx_kl > 20.0).sum().item()
+        logger.warning(f"[DEBUG PPO] clamp 到 -20 的数量: {clamp_low_count}, clamp 到 20 的数量: {clamp_high_count}")
+    
     # Clamp negative_approx_kl for stability
     negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
     ratio = torch.exp(negative_approx_kl)
+    
+    # DEBUG: ratio 详细检查
+    logger.info(f"[DEBUG PPO] ratio 范围: [{ratio.min().item():.6f}, {ratio.max().item():.6f}], mean: {ratio.mean().item():.6f}, std: {ratio.std().item():.6f}")
+    
+    # 检查 ratio 的分布
+    total_elements = ratio.numel()
+    ratio_too_small = (ratio < 0.5).sum().item()
+    ratio_too_large = (ratio > 2.0).sum().item()
+    if ratio_too_small > 0.1 * total_elements or ratio_too_large > 0.1 * total_elements:
+        logger.warning(f"[DEBUG PPO] ⚠️ ratio 分布异常!")
+        logger.warning(f"[DEBUG PPO]   ratio < 0.5: {ratio_too_small}/{total_elements} ({100*ratio_too_small/total_elements:.1f}%)")
+        logger.warning(f"[DEBUG PPO]   ratio > 2.0: {ratio_too_large}/{total_elements} ({100*ratio_too_large/total_elements:.1f}%)")
+    
     ppo_kl = siirl_F.masked_mean(-negative_approx_kl, response_mask)
 
     pg_losses1 = -advantages * ratio
