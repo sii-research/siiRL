@@ -36,6 +36,30 @@ from flash_attn.bert_padding import pad_input, unpad_input, rearrange, index_fir
 __all__ = ['RobDataParallelPPOActor']
 
 
+def debug_tensor_stats(name: str, tensor: torch.Tensor, mask: torch.Tensor = None) -> dict:
+    """输出 tensor 的详细统计信息，用于 debug"""
+    if tensor.numel() == 0:
+        return {"name": name, "shape": list(tensor.shape), "empty": True}
+    
+    stats = {
+        "name": name,
+        "shape": list(tensor.shape),
+        "dtype": str(tensor.dtype),
+        "min": tensor.min().item(),
+        "max": tensor.max().item(),
+        "mean": tensor.mean().item(),
+        "std": tensor.std().item() if tensor.numel() > 1 else 0.0,
+        "nan_count": torch.isnan(tensor).sum().item(),
+        "inf_count": torch.isinf(tensor).sum().item(),
+    }
+    if mask is not None and mask.sum() > 0:
+        masked_tensor = tensor[mask]
+        if masked_tensor.numel() > 0:
+            stats["masked_mean"] = masked_tensor.mean().item()
+            stats["masked_std"] = masked_tensor.std().item() if masked_tensor.numel() > 1 else 0.0
+    return stats
+
+
 
 class RobDataParallelPPOActor(BasePPOActor):
 
@@ -375,6 +399,19 @@ class RobDataParallelPPOActor(BasePPOActor):
             revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
             log_probs = log_probs[revert_indices]
 
+        # DEBUG: 详细的 log_prob 统计
+        logger.info(f"[DEBUG LOGPROB] ===== compute_log_prob 完成 =====")
+        logger.info(f"[DEBUG LOGPROB] log_probs stats: {debug_tensor_stats('log_probs', log_probs)}")
+        if log_probs.numel() > 0:
+            logger.info(f"[DEBUG LOGPROB] log_probs 分位数: Q1={log_probs.quantile(0.25).item():.4f}, median={log_probs.median().item():.4f}, Q3={log_probs.quantile(0.75).item():.4f}")
+        # 检查异常
+        if torch.isnan(log_probs).any():
+            logger.error(f"[DEBUG LOGPROB] ⚠️ log_probs 包含 NaN!")
+        if torch.isinf(log_probs).any():
+            logger.error(f"[DEBUG LOGPROB] ⚠️ log_probs 包含 Inf!")
+        if (log_probs > 0).any():
+            pos_count = (log_probs > 0).sum().item()
+            logger.warning(f"[DEBUG LOGPROB] ⚠️ log_probs 有 {pos_count} 个正值 (log_prob > 0 异常)")
         return log_probs, None # TODO: implement entropy computation
 
     def update_policy(self, data: DataProto):
@@ -384,13 +421,44 @@ class RobDataParallelPPOActor(BasePPOActor):
         self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
         temperature = data.meta_info['temperature']  # temperature must be in the data.meta_info to avoid slient error
 
-        # DEBUG LOG: update_policy input
-        logger.info(f"[DEBUG UPDATE] ===== update_policy =====")
+        # DEBUG LOG: update_policy 输入检查
+        logger.info(f"[DEBUG UPDATE] ===== update_policy 输入检查 =====")
         logger.info(f"[DEBUG UPDATE] temperature: {temperature}")
-        logger.info(f"[DEBUG UPDATE] old_log_probs - mean: {data.batch['old_log_probs'].mean().item():.6f}, std: {data.batch['old_log_probs'].std().item():.6f}")
-        logger.info(f"[DEBUG UPDATE] advantages - mean: {data.batch['advantages'].mean().item():.6f}, std: {data.batch['advantages'].std().item():.6f}, min: {data.batch['advantages'].min().item():.6f}, max: {data.batch['advantages'].max().item():.6f}")
+        
+        # 详细的 old_log_probs 检查
+        old_log_probs_data = data.batch['old_log_probs']
+        logger.info(f"[DEBUG UPDATE] old_log_probs stats: {debug_tensor_stats('old_log_probs', old_log_probs_data)}")
+        if old_log_probs_data.numel() > 0:
+            logger.info(f"[DEBUG UPDATE] old_log_probs 分位数: Q1={old_log_probs_data.quantile(0.25).item():.4f}, median={old_log_probs_data.median().item():.4f}, Q3={old_log_probs_data.quantile(0.75).item():.4f}")
+        
+        # old_log_probs 异常检查
+        if torch.isnan(old_log_probs_data).any():
+            logger.error(f"[DEBUG UPDATE] ⚠️ old_log_probs 包含 NaN! 数量: {torch.isnan(old_log_probs_data).sum().item()}")
+        if torch.isinf(old_log_probs_data).any():
+            logger.error(f"[DEBUG UPDATE] ⚠️ old_log_probs 包含 Inf! 数量: {torch.isinf(old_log_probs_data).sum().item()}")
+        if (old_log_probs_data > 0).any():
+            pos_count = (old_log_probs_data > 0).sum().item()
+            logger.warning(f"[DEBUG UPDATE] ⚠️ old_log_probs 有正值 (log_prob > 0 不正常): {pos_count} 个")
+        
+        # advantages 检查
+        logger.info(f"[DEBUG UPDATE] advantages stats: {debug_tensor_stats('advantages', data.batch['advantages'])}")
+        
+        # 数据一致性检查
+        logger.info(f"[DEBUG UPDATE] === 数据一致性检查 ===")
+        logger.info(f"[DEBUG UPDATE] responses shape: {data.batch['responses'].shape}")
+        logger.info(f"[DEBUG UPDATE] input_ids shape: {data.batch['input_ids'].shape}")
+        logger.info(f"[DEBUG UPDATE] old_log_probs shape: {old_log_probs_data.shape}")
+        logger.info(f"[DEBUG UPDATE] advantages shape: {data.batch['advantages'].shape}")
         if 'finish_step' in data.batch:
-            logger.info(f"[DEBUG UPDATE] finish_step - mean: {data.batch['finish_step'].float().mean().item():.2f}, min: {data.batch['finish_step'].min().item()}, max: {data.batch['finish_step'].max().item()}")
+            logger.info(f"[DEBUG UPDATE] finish_step shape: {data.batch['finish_step'].shape}, mean: {data.batch['finish_step'].float().mean().item():.2f}, min: {data.batch['finish_step'].min().item()}, max: {data.batch['finish_step'].max().item()}")
+        
+        # 验证 shape 一致性
+        batch_size = data.batch['responses'].size(0)
+        expected_response_len = data.batch['responses'].size(1) * data.batch['responses'].size(2)
+        if old_log_probs_data.size(0) != batch_size:
+            logger.error(f"[DEBUG UPDATE] ⚠️ old_log_probs batch_size 不匹配! {old_log_probs_data.size(0)} vs {batch_size}")
+        if old_log_probs_data.size(1) != expected_response_len:
+            logger.error(f"[DEBUG UPDATE] ⚠️ old_log_probs response_length 不匹配! {old_log_probs_data.size(1)} vs {expected_response_len}")
 
         select_keys = ['responses', 'input_ids', 'attention_mask', 'pixel_values', 'old_log_probs', 'advantages',"finish_step"]
         batch = data.select(batch_keys=select_keys).batch
@@ -473,14 +541,33 @@ class RobDataParallelPPOActor(BasePPOActor):
                     advantages_tmp = advantages[:, slice_id: next_slice_id]
                     response_mask_tmp = response_mask[:, slice_id: next_slice_id]
                     
-                    # DEBUG LOG: Before PPO loss calculation
-                    if i == 0:  # Only log first split to avoid spam
-                        logger.info(f"[DEBUG UPDATE] --- Trajectory split {i} ---")
-                        logger.info(f"[DEBUG UPDATE] new log_prob - mean: {log_prob.mean().item():.6f}, std: {log_prob.std().item():.6f}")
-                        logger.info(f"[DEBUG UPDATE] old_log_prob_tmp - mean: {old_log_prob_tmp.mean().item():.6f}, std: {old_log_prob_tmp.std().item():.6f}")
-                        logger.info(f"[DEBUG UPDATE] log_prob - old_log_prob diff - mean: {(log_prob - old_log_prob_tmp).mean().item():.6f}, std: {(log_prob - old_log_prob_tmp).std().item():.6f}")
-                        logger.info(f"[DEBUG UPDATE] advantages_tmp - mean: {advantages_tmp.mean().item():.6f}, std: {advantages_tmp.std().item():.6f}")
-                        logger.info(f"[DEBUG UPDATE] response_mask_tmp sum: {response_mask_tmp.sum().item()}")
+                    # DEBUG LOG: PPO loss 计算前的详细检查
+                    diff = log_prob - old_log_prob_tmp
+                    ratio = torch.exp(torch.clamp(diff, min=-20.0, max=20.0))
+                    
+                    logger.info(f"[DEBUG UPDATE] === batch_idx={batch_idx}, test_idx={test_idx}, traj_split={i} ===")
+                    logger.info(f"[DEBUG UPDATE] new log_prob stats: {debug_tensor_stats('log_prob', log_prob)}")
+                    logger.info(f"[DEBUG UPDATE] old_log_prob_tmp stats: {debug_tensor_stats('old_log_prob_tmp', old_log_prob_tmp)}")
+                    logger.info(f"[DEBUG UPDATE] diff (new - old) stats: {debug_tensor_stats('diff', diff)}")
+                    logger.info(f"[DEBUG UPDATE] ratio stats: {debug_tensor_stats('ratio', ratio)}")
+                    logger.info(f"[DEBUG UPDATE] advantages_tmp stats: {debug_tensor_stats('advantages_tmp', advantages_tmp)}")
+                    logger.info(f"[DEBUG UPDATE] response_mask_tmp sum: {response_mask_tmp.sum().item()}")
+                    
+                    # 异常检测
+                    if torch.isnan(log_prob).any() or torch.isnan(old_log_prob_tmp).any():
+                        logger.error(f"[DEBUG UPDATE] ⚠️ NaN detected! log_prob NaN: {torch.isnan(log_prob).sum().item()}, old_log_prob NaN: {torch.isnan(old_log_prob_tmp).sum().item()}")
+                    
+                    if ratio.max() > 5.0 or ratio.min() < 0.2:
+                        logger.warning(f"[DEBUG UPDATE] ⚠️ ratio 异常范围! min={ratio.min().item():.4f}, max={ratio.max().item():.4f}")
+                        # 找出异常样本
+                        abnormal_mask = (ratio > 5.0) | (ratio < 0.2)
+                        abnormal_count = abnormal_mask.sum().item()
+                        logger.warning(f"[DEBUG UPDATE] 异常 ratio 数量: {abnormal_count}/{ratio.numel()} ({100*abnormal_count/ratio.numel():.1f}%)")
+                        if abnormal_count > 0 and abnormal_count < 20:
+                            abnormal_indices = torch.where(abnormal_mask)
+                            for idx in range(min(5, len(abnormal_indices[0]))):
+                                b, t = abnormal_indices[0][idx].item(), abnormal_indices[1][idx].item()
+                                logger.warning(f"[DEBUG UPDATE]   位置[{b},{t}]: ratio={ratio[b,t].item():.4f}, new={log_prob[b,t].item():.4f}, old={old_log_prob_tmp[b,t].item():.4f}")
                         
                     pg_loss, pg_clipfrac, ppo_kl, _ = core_algos.compute_policy_loss_vanilla(old_log_prob=old_log_prob_tmp,
                                                                             log_prob=log_prob,
@@ -502,6 +589,11 @@ class RobDataParallelPPOActor(BasePPOActor):
                     loss_info['actor/pg_loss'] =  loss_info['actor/pg_loss'] + policy_loss.detach().item()
                     loss_info['actor/pg_clipfrac'] = loss_info['actor/pg_clipfrac'] + pg_clipfrac.detach().item()
                     loss_info['actor/ppo_kl'] = loss_info['actor/ppo_kl'] +  ppo_kl.detach().item()
+                    
+                    # 高 KL 警告
+                    if ppo_kl.item() > 0.5:
+                        logger.warning(f"[DEBUG UPDATE] ⚠️ 高 KL 警告! ppo_kl={ppo_kl.item():.4f} (阈值: 0.5)")
+                        logger.warning(f"[DEBUG UPDATE]   pg_loss={policy_loss.item():.4f}, pg_clipfrac={pg_clipfrac.item():.4f}")
 
                 append_to_dict(metrics, loss_info)
                
