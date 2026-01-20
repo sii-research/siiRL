@@ -393,6 +393,7 @@ class RobDataParallelPPOActor(BasePPOActor):
             revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
             log_probs = log_probs[revert_indices]
 
+        logger.info(f"[DEBUG LOGPROB] compute_log_prob returning log_probs shape: {log_probs.shape}")
         return log_probs, None # TODO: implement entropy computation
 
     def update_policy(self, data: TensorDict):
@@ -405,8 +406,8 @@ class RobDataParallelPPOActor(BasePPOActor):
         # DEBUG LOG: update_policy input
         logger.info(f"[DEBUG UPDATE] ===== update_policy =====")
         logger.info(f"[DEBUG UPDATE] temperature: {temperature}")
-        logger.info(f"[DEBUG UPDATE] old_log_probs - mean: {data['old_log_probs'].mean().item():.6f}, std: {data['old_log_probs'].std().item():.6f}")
-        logger.info(f"[DEBUG UPDATE] advantages - mean: {data['advantages'].mean().item():.6f}, std: {data['advantages'].std().item():.6f}, min: {data['advantages'].min().item():.6f}, max: {data['advantages'].max().item():.6f}")
+        logger.info(f"[DEBUG UPDATE] old_log_probs shape: {data['old_log_probs'].shape}, mean: {data['old_log_probs'].mean().item():.6f}, std: {data['old_log_probs'].std().item():.6f}")
+        logger.info(f"[DEBUG UPDATE] advantages shape: {data['advantages'].shape}, mean: {data['advantages'].mean().item():.6f}, std: {data['advantages'].std().item():.6f}, min: {data['advantages'].min().item():.6f}, max: {data['advantages'].max().item():.6f}")
         if 'finish_step' in data:
             logger.info(f"[DEBUG UPDATE] finish_step - mean: {data['finish_step'].float().mean().item():.2f}, min: {data['finish_step'].min().item()}, max: {data['finish_step'].max().item()}")
 
@@ -495,11 +496,11 @@ class RobDataParallelPPOActor(BasePPOActor):
                     # DEBUG LOG: Before PPO loss calculation
                     if i == 0:  # Only log first split to avoid spam
                         logger.info(f"[DEBUG UPDATE] --- Trajectory split {i} ---")
-                        logger.info(f"[DEBUG UPDATE] new log_prob - mean: {log_prob.mean().item():.6f}, std: {log_prob.std().item():.6f}")
-                        logger.info(f"[DEBUG UPDATE] old_log_prob_tmp - mean: {old_log_prob_tmp.mean().item():.6f}, std: {old_log_prob_tmp.std().item():.6f}")
+                        logger.info(f"[DEBUG UPDATE] new log_prob shape: {log_prob.shape}, mean: {log_prob.mean().item():.6f}, std: {log_prob.std().item():.6f}")
+                        logger.info(f"[DEBUG UPDATE] old_log_prob_tmp shape: {old_log_prob_tmp.shape}, mean: {old_log_prob_tmp.mean().item():.6f}, std: {old_log_prob_tmp.std().item():.6f}")
                         logger.info(f"[DEBUG UPDATE] log_prob - old_log_prob diff - mean: {(log_prob - old_log_prob_tmp).mean().item():.6f}, std: {(log_prob - old_log_prob_tmp).std().item():.6f}")
-                        logger.info(f"[DEBUG UPDATE] advantages_tmp - mean: {advantages_tmp.mean().item():.6f}, std: {advantages_tmp.std().item():.6f}")
-                        logger.info(f"[DEBUG UPDATE] response_mask_tmp sum: {response_mask_tmp.sum().item()}")
+                        logger.info(f"[DEBUG UPDATE] advantages_tmp shape: {advantages_tmp.shape}, mean: {advantages_tmp.mean().item():.6f}, std: {advantages_tmp.std().item():.6f}")
+                        logger.info(f"[DEBUG UPDATE] response_mask_tmp shape: {response_mask_tmp.shape}, sum: {response_mask_tmp.sum().item()}")
                         
                     pg_loss, pg_clipfrac, ppo_kl, _ = core_algos.compute_policy_loss_vanilla(old_log_prob=old_log_prob_tmp,
                                                                             log_prob=log_prob,
