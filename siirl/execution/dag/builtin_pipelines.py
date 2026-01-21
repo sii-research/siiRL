@@ -264,7 +264,7 @@ def embodied_srpo_pipeline() -> TaskGraph:
     ).add_node(
         "compute_reward",
         func="siirl.dag_worker.dagworker:DAGWorker.compute_reward",
-        deps=["data_rebalance"],
+        deps=["embodied_sampling"],
         node_type=NodeType.COMPUTE,
         node_role=NodeRole.REWARD
     ).add_node(
