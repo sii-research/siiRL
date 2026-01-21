@@ -518,11 +518,24 @@ class DAGWorker(Worker):
         metrics = gen_output.get("metrics", {}) if hasattr(gen_output, "get") else {}
         
         # Add unique IDs for tracking (prompt-level, then repeated to match rollout_n)
-        uid = np.array([str(uuid.uuid4()) for _ in range(len(batch))])
+        original_batch_size = batch.batch_size[0]
+        uid = np.array([str(uuid.uuid4()) for _ in range(original_batch_size)])
         
         # Repeat the original batch to match rollout output size
         if rollout_n > 1:
-            batch = batch.repeat(rollout_n, interleave=True)
+            # Manually repeat TensorDict contents (TensorDict has no repeat method)
+            repeated_data = {}
+            for key, value in batch.items():
+                if isinstance(value, torch.Tensor):
+                    repeated_data[key] = value.repeat_interleave(rollout_n, dim=0)
+                elif isinstance(value, np.ndarray):
+                    repeated_data[key] = np.repeat(value, rollout_n, axis=0)
+                elif isinstance(value, (list, tuple)):
+                    repeated_data[key] = np.repeat(np.array(value), rollout_n, axis=0)
+                else:
+                    # NonTensorData or other types - keep as is
+                    repeated_data[key] = value
+            batch = TensorDict(repeated_data, batch_size=original_batch_size * rollout_n)
             batch["uid"] = np.repeat(uid, rollout_n, axis=0)
         else:
             batch["uid"] = uid
