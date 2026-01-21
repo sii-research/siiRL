@@ -380,7 +380,7 @@ class DAGWorker(Worker):
 
                     # --- 5. Process Output & Get next node ---
                     with timer(self.enable_perf, "graph_output_handling", timing_raw):
-                        if node_output.metrics and cur_tp_rank == 0 and cur_pp_rank == 0:
+                        if node_output.metrics is not None and len(node_output.metrics) > 0 and cur_tp_rank == 0 and cur_pp_rank == 0:
                             self.metric_worker.submit_metric(node_output.metrics, cur_dp_size)
                         if next_nodes := self.taskgraph.get_downstream_nodes(cur_node.node_id):
                             if node_output.batch is not None and len(node_output.batch) != 0:

@@ -313,17 +313,15 @@ class EmbodiedHFRollout(BaseRollout):
         generate_tic = time.time()
         self.model.eval()
         
-        # Get n_samples and repeat task_id/trial_id/task_suite_name (aligned with srpo)
-        # Check if n_samples exists in prompts (validation mode has no n_samples)
-        has_n_samples = 'n_samples' in prompts.keys()
-        n_samples = prompts['n_samples'] if has_n_samples else 1
-        if isinstance(n_samples, int):
-            pass
-        elif hasattr(n_samples, 'item'):
-            n_samples = n_samples.item()
-        else:
-            n_samples = int(n_samples)
+        # Validation mode has no n_samples; training mode has n_samples for repeat
+        is_valid = 'n_samples' not in prompts.keys()
+        n_samples = 1
+        if not is_valid:
+            val = prompts['n_samples']
+            n_samples = val.item() if hasattr(val, 'item') else int(val)
+        global_steps = prompts['global_steps'] if 'global_steps' in prompts.keys() else 0
         
+        # Repeat task metadata to match n_samples (aligned with srpo)
         task_id = prompts['task_id'].repeat_interleave(n_samples, dim=0)
         trial_id = prompts['trial_id'].repeat_interleave(n_samples, dim=0)
         task_suite_name = np.repeat(prompts['task_suite_name'], n_samples, axis=0)
@@ -331,10 +329,7 @@ class EmbodiedHFRollout(BaseRollout):
         assert np.all(task_suite_name == self.config.embodied.env.env_name), \
             "All task_suite_name in the batch must match the rollout config"
         max_steps = self.config.embodied.env.max_steps
-        chunk_size = task_id.size(0)  # This is now the repeated size
-
-        is_valid = not has_n_samples  # aligned with srpo: validation has no n_samples
-        global_steps = prompts['global_steps'] if 'global_steps' in prompts.keys() else 0
+        chunk_size = task_id.size(0)
 
         timing_dict = {}
 
