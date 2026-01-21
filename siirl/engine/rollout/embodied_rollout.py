@@ -312,16 +312,26 @@ class EmbodiedHFRollout(BaseRollout):
     def _generate_chunk_rollout(self, prompts):
         generate_tic = time.time()
         self.model.eval()
-        # n_samples = prompts.get('n_samples', 1)
-        task_id = prompts['task_id']
-        trial_id = prompts['trial_id']
-        task_suite_name = prompts['task_suite_name']
+        
+        # Get n_samples and repeat task_id/trial_id/task_suite_name (aligned with srpo)
+        n_samples = prompts.get('n_samples', 1)
+        if isinstance(n_samples, int):
+            pass
+        elif hasattr(n_samples, 'item'):
+            n_samples = n_samples.item()
+        else:
+            n_samples = int(n_samples)
+        
+        task_id = prompts['task_id'].repeat_interleave(n_samples, dim=0)
+        trial_id = prompts['trial_id'].repeat_interleave(n_samples, dim=0)
+        task_suite_name = np.repeat(prompts['task_suite_name'], n_samples, axis=0)
+        
         assert np.all(task_suite_name == self.config.embodied.env.env_name), \
             "All task_suite_name in the batch must match the rollout config"
         max_steps = self.config.embodied.env.max_steps
-        chunk_size = task_id.size(0)
+        chunk_size = task_id.size(0)  # This is now the repeated size
 
-        is_valid = "n_samples" in prompts
+        is_valid = prompts.get('n_samples') is None  # aligned with srpo: validation has no n_samples
         global_steps = prompts.get('global_steps', 0) if is_valid else 0
 
         timing_dict = {}
