@@ -515,7 +515,9 @@ class DAGWorker(Worker):
         )
         # Generate embodied episodes
         gen_output = rollout_worker.generate_sequences(batch)
-        metrics = gen_output.get("metrics", {}) if hasattr(gen_output, "get") else {}
+        # Extract metrics (may be wrapped in NonTensorData)
+        raw_metrics = gen_output.get("metrics", {}) if hasattr(gen_output, "get") else {}
+        metrics = raw_metrics.data if hasattr(raw_metrics, 'data') else (raw_metrics if isinstance(raw_metrics, dict) else {})
         
         # Add unique IDs for tracking (prompt-level, then repeated to match rollout_n)
         original_batch_size = batch.batch_size[0]
