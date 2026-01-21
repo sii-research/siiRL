@@ -314,7 +314,9 @@ class EmbodiedHFRollout(BaseRollout):
         self.model.eval()
         
         # Get n_samples and repeat task_id/trial_id/task_suite_name (aligned with srpo)
-        n_samples = prompts.get('n_samples', 1)
+        # Check if n_samples exists in prompts (validation mode has no n_samples)
+        has_n_samples = 'n_samples' in prompts.keys()
+        n_samples = prompts['n_samples'] if has_n_samples else 1
         if isinstance(n_samples, int):
             pass
         elif hasattr(n_samples, 'item'):
@@ -331,8 +333,8 @@ class EmbodiedHFRollout(BaseRollout):
         max_steps = self.config.embodied.env.max_steps
         chunk_size = task_id.size(0)  # This is now the repeated size
 
-        is_valid = prompts.get('n_samples') is None  # aligned with srpo: validation has no n_samples
-        global_steps = prompts.get('global_steps', 0) if is_valid else 0
+        is_valid = not has_n_samples  # aligned with srpo: validation has no n_samples
+        global_steps = prompts['global_steps'] if 'global_steps' in prompts.keys() else 0
 
         timing_dict = {}
 
