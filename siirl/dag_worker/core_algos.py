@@ -322,8 +322,10 @@ def compute_grpo_outcome_advantage(
     with torch.no_grad():
         bsz = scores.shape[0]
         for i in range(bsz):
-            # Convert tensor index to Python int for use as dict key
-            idx_key = int(index[i].item()) if isinstance(index[i], torch.Tensor) else int(index[i])
+            if isinstance(index[i], torch.Tensor):
+                idx_key = index[i].item()
+            else:
+                idx_key = index[i]
             id2score[idx_key].append(scores[i])
         for idx in id2score:
             if len(id2score[idx]) == 1:
@@ -336,8 +338,10 @@ def compute_grpo_outcome_advantage(
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
         for i in range(bsz):
-            # Convert tensor index to Python int for dict lookup
-            idx_key = int(index[i].item()) if isinstance(index[i], torch.Tensor) else int(index[i])
+            if isinstance(index[i], torch.Tensor):
+                idx_key = index[i].item()
+            else:
+                idx_key = index[i]
             if norm_adv_by_std_in_grpo:
                 scores[i] = (scores[i] - id2mean[idx_key]) / (id2std[idx_key] + epsilon)
             else:

@@ -272,7 +272,12 @@ class DAGWorker(Worker):
         with timer(self.enable_perf, "step", timing_raw):
             # --- 1. Data Loading ---
             with timer(self.enable_perf, "get_data_from_dataloader", timing_raw):
-                batch = preprocess_dataloader(self.dataloader.run(epoch=epoch, is_validation_step=False), self.config.actor_rollout_ref.rollout.n)
+                is_embodied = self.config.actor_rollout_ref.model.model_type == "embodied"
+                repeat_n = 1 if is_embodied else self.config.actor_rollout_ref.rollout.n
+                batch = preprocess_dataloader(
+                    self.dataloader.run(epoch=epoch, is_validation_step=False),
+                    repeat_n
+                )
             node_queue = self.taskgraph.get_entry_nodes()
             if not node_queue:
                 logger.error("Taskgraph has no entry nodes. Cannot start execution.")
@@ -296,7 +301,13 @@ class DAGWorker(Worker):
                         with timer(self.enable_perf, "get_data_from_buffer", timing_raw):
                             batch = self.get_data_from_buffers(key=cur_node.node_id, cur_dp_size=cur_dp_size, cur_dp_rank=cur_dp_rank, timing_raw=timing_raw)
                             if batch is None:
-                                if self.config.algorithm.filter_groups.enable:
+                                embodied_sampling = self.config.algorithm.embodied_sampling
+                                allow_insufficient = (
+                                    self.config.algorithm.filter_groups.enable
+                                    or embodied_sampling.filter_accuracy
+                                    or embodied_sampling.filter_truncated
+                                )
+                                if allow_insufficient:
                                     if cur_node.node_role == NodeRole.ACTOR:
                                         logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
                                         return None 
@@ -341,11 +352,17 @@ class DAGWorker(Worker):
                     
                     # Check if node returned empty batch (e.g., DAPO insufficient samples)
                     # This triggers re-rollout to collect more data
-                    if  node_output.batch is None or (node_output.batch is not None and len(node_output.batch) == 0):
+                    if node_output.batch is None or (node_output.batch is not None and len(node_output.batch) == 0):
                         logger.warning(
                             f"Rank {self._rank}: Node '{cur_node.node_id}' returned empty batch. "
                         )
-                        if not self.config.algorithm.filter_groups.enable:
+                        embodied_sampling = self.config.algorithm.embodied_sampling
+                        allow_insufficient = (
+                            self.config.algorithm.filter_groups.enable
+                            or embodied_sampling.filter_accuracy
+                            or embodied_sampling.filter_truncated
+                        )
+                        if not allow_insufficient:
                             logger.warning(
                                 f"Rank {self._rank}: Node '{cur_node.node_id}' returned empty batch. "
                                 f"Aborting current step to trigger re-rollout. {node_output.batch is not None and len(node_output.batch) != 0}"
@@ -378,7 +395,14 @@ class DAGWorker(Worker):
                                         #     self.multi_agent_put_log(key=next_node.node_id, data=node_output.batch, next_dp_size = next_dp_size, agent_group = next_node.agent_group, timing_raw = timing_raw)
                                         # else:
                                         # have filter, must use databuffer to rebalance
-                                        enforce_buffer = (self.config.algorithm.filter_groups.enable) and (cur_node.node_type == NodeType.COMPUTE) and (next_node.node_type == NodeType.MODEL_TRAIN) 
+                                        embodied_sampling = self.config.algorithm.embodied_sampling
+                                        enforce_buffer = (
+                                            (self.config.algorithm.filter_groups.enable
+                                             or embodied_sampling.filter_accuracy
+                                             or embodied_sampling.filter_truncated)
+                                            and (cur_node.node_type == NodeType.COMPUTE)
+                                            and (next_node.node_type == NodeType.MODEL_TRAIN)
+                                        )
                                         self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch,  source_dp_size=cur_dp_size, dest_dp_size=next_dp_size, enforce_buffer = enforce_buffer, timing_raw=timing_raw)
                         # elif self._multi_agent:
                         #     # last_node add prefix for metrics
@@ -476,10 +500,11 @@ class DAGWorker(Worker):
         from loguru import logger
         
         rollout_worker = agent_group[NodeRole.ROLLOUT]
+        rollout_n = self.config.actor_rollout_ref.rollout.n
         
         # Set meta_info for embodied training
         batch["eos_token_id"] = NonTensorData(self.validate_tokenizer.eos_token_id if self.validate_tokenizer else None)
-        batch["n_samples"] = NonTensorData(self.config.actor_rollout_ref.rollout.n)
+        batch["n_samples"] = NonTensorData(rollout_n)
         batch["pad_token_id"] = NonTensorData(self.validate_tokenizer.pad_token_id if self.validate_tokenizer else None)        
         logger.info(
             f"[Embodied Validation] Batch variables: "
@@ -490,9 +515,21 @@ class DAGWorker(Worker):
         )
         # Generate embodied episodes
         gen_output = rollout_worker.generate_sequences(batch)
-        metrics = gen_output["metrics"]
+        metrics = gen_output.get("metrics", {}) if hasattr(gen_output, "get") else {}
+        
+        # Add unique IDs for tracking (prompt-level, then repeated to match rollout_n)
+        uid = np.array([str(uuid.uuid4()) for _ in range(len(batch))])
+        
+        # Repeat the original batch to match rollout output size
+        if rollout_n > 1:
+            batch = batch.repeat(rollout_n, interleave=True)
+            batch["uid"] = np.repeat(uid, rollout_n, axis=0)
+        else:
+            batch["uid"] = uid
+        
+        # Merge generated data into batch
         batch.update(gen_output)
-        # Add unique IDs for tracking
+        
         # Compute response mask if not already present
         if "response_mask" not in batch:
             batch["response_mask"] = compute_response_mask(batch)

@@ -185,16 +185,16 @@ def _compute_embodied_verification_metrics(
         
         # Prepare batch dict for metrics computation
         batch_dict = {
-            'responses': batch.batch.get('responses'),
-            'complete': batch.batch.get('complete'),
-            'finish_step': batch.batch.get('finish_step'),
+            'responses': batch.get('responses'),
+            'complete': batch.get('complete'),
+            'finish_step': batch.get('finish_step'),
         }
         
         # Add optional fields
-        if 'pixel_values' in batch.batch:
-            batch_dict['pixel_values'] = batch.batch['pixel_values']
-        if 'acc' in batch.batch:
-            batch_dict['acc'] = batch.batch['acc']
+        if 'pixel_values' in batch:
+            batch_dict['pixel_values'] = batch['pixel_values']
+        if 'acc' in batch:
+            batch_dict['acc'] = batch['acc']
         
         # Compute rollout metrics
         rollout_metrics = compute_rollout_metrics(batch_dict, config)
