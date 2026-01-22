@@ -107,6 +107,7 @@ class SampleManager(BaseModel):
 
 
 def preprocess_dataloader(data:Dict, n:int = 1):
+    from loguru import logger
     # Manually repeat all numpy arrays and torch tensors
     # This ensures consistent handling of all fields
     batch_size = None
@@ -132,6 +133,20 @@ def preprocess_dataloader(data:Dict, n:int = 1):
     # Now all fields have batch_size * n
     # Create TensorDict with the expanded batch size
     tensor_dict = TensorDict(data, batch_size=batch_size * n)
+    
+    # ========== SRPO_DEBUG: preprocess_dataloader ==========
+    logger.info(f"[SRPO_DEBUG][preprocess_dataloader] ========================================")
+    logger.info(f"[SRPO_DEBUG][preprocess_dataloader] original_batch_size={batch_size}, n={n}, final_batch_size={batch_size * n}")
+    logger.info(f"[SRPO_DEBUG][preprocess_dataloader] uid first 16: {data['uid'][:16].tolist()}")
+    logger.info(f"[SRPO_DEBUG][preprocess_dataloader] uid unique count: {len(set(data['uid'].tolist()))}")
+    if 'task_id' in data:
+        task_ids = data['task_id'][:8].tolist() if isinstance(data['task_id'], (np.ndarray, torch.Tensor)) else data['task_id'][:8]
+        logger.info(f"[SRPO_DEBUG][preprocess_dataloader] task_id first 8: {task_ids}")
+    if 'trial_id' in data:
+        trial_ids = data['trial_id'][:8].tolist() if isinstance(data['trial_id'], (np.ndarray, torch.Tensor)) else data['trial_id'][:8]
+        logger.info(f"[SRPO_DEBUG][preprocess_dataloader] trial_id first 8: {trial_ids}")
+    logger.info(f"[SRPO_DEBUG][preprocess_dataloader] keys: {list(data.keys())}")
+    logger.info(f"[SRPO_DEBUG][preprocess_dataloader] ========================================")
     
     return tensor_dict
 

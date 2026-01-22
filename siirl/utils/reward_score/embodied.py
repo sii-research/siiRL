@@ -75,9 +75,9 @@ def compute_embodied_reward(
     num_zero = zero_embedding_mask.sum()
     num_success = completes.sum()
     num_valid = len(valid_indices)
-    logger.info(f"[REWARD COMPUTE] Batch size: {batch_size}, Success: {num_success}, Zero embeddings: {num_zero}, Valid embeddings: {num_valid}")
+    logger.info(f"[SRPO_DEBUG][reward_compute] Batch size: {batch_size}, Success: {num_success}, Zero embeddings: {num_zero}, Valid embeddings: {num_valid}")
     if num_zero == batch_size:
-        logger.error(f"[REWARD COMPUTE] ALL EMBEDDINGS ARE ZERO! All rewards will be 0!")
+        logger.error(f"[SRPO_DEBUG][reward_compute] ALL EMBEDDINGS ARE ZERO! All rewards will be 0!")
     elif num_zero > 0:
         logger.warning(f"[REWARD COMPUTE] {num_zero}/{batch_size} embeddings are zero")
 
@@ -185,16 +185,19 @@ def compute_embodied_reward(
     num_partial = ((final_rewards > 0) & (final_rewards < 1.0)).sum()
     num_failed = (final_rewards == 0).sum()
     logger.info(
-        f"[REWARD COMPUTE] Batch {batch_size} completed - "
+        f"[SRPO_DEBUG][reward_compute] Batch {batch_size} completed - "
         f"Avg: {final_rewards.mean():.4f}, "
         f"Success (reward=1.0): {num_success}, "
         f"Partial (0<reward<1.0): {num_partial}, "
         f"Failed (reward=0): {num_failed}"
     )
+    logger.info(f"[SRPO_DEBUG][reward_compute] final_rewards first 16: {final_rewards[:16].tolist()}")
+    logger.info(f"[SRPO_DEBUG][reward_compute] completes first 16: {completes[:16].tolist()}")
+    logger.info(f"[SRPO_DEBUG][reward_compute] finish_steps first 16: {finish_steps[:16].tolist()}")
     
     # Detailed per-sample information (debug level)
     for i in range(min(10, batch_size)):
         dist_info = f", dist={results[i].get('normalized_distance', 'N/A'):.4f}" if 'normalized_distance' in results[i] else ""
-        logger.debug(f"[REWARD COMPUTE] Sample {i}: complete={completes[i]}, reward={final_rewards[i]:.4f}{dist_info}, zero_emb={results[i]['is_zero_embedding']}")
+        logger.debug(f"[SRPO_DEBUG][reward_compute] Sample {i}: complete={completes[i]}, reward={final_rewards[i]:.4f}{dist_info}, zero_emb={results[i]['is_zero_embedding']}")
 
     return results

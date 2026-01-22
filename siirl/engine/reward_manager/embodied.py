@@ -90,6 +90,22 @@ class EmbodiedRewardManager:
             If return_dict=False: (reward_tensor_dict, reward_metrics) tuple
         """
         batch_size = data["responses"].shape[0]
+        
+        # ========== SRPO_DEBUG: EmbodiedRewardManager INPUT ==========
+        logger.info(f"[SRPO_DEBUG][reward_manager] ========================================")
+        logger.info(f"[SRPO_DEBUG][reward_manager] INPUT:")
+        logger.info(f"[SRPO_DEBUG][reward_manager] batch_size: {batch_size}")
+        logger.info(f"[SRPO_DEBUG][reward_manager] responses shape: {data['responses'].shape}")
+        if 'complete' in data:
+            logger.info(f"[SRPO_DEBUG][reward_manager] complete values: {data['complete'].tolist()}")
+        if 'finish_step' in data:
+            logger.info(f"[SRPO_DEBUG][reward_manager] finish_step values: {data['finish_step'].tolist()}")
+        if 'vjepa_embedding' in data:
+            logger.info(f"[SRPO_DEBUG][reward_manager] vjepa_embedding shape: {data['vjepa_embedding'].shape}")
+            logger.info(f"[SRPO_DEBUG][reward_manager] vjepa_embedding mean: {data['vjepa_embedding'].mean().item():.6f}")
+            # Check for zero embeddings
+            zero_emb_mask = (data['vjepa_embedding'].abs().sum(dim=-1) == 0)
+            logger.info(f"[SRPO_DEBUG][reward_manager] zero_embeddings count: {zero_emb_mask.sum().item()}")
 
         # --- Step 1: Delegate the core reward calculation ---
         if self.compute_score is None:
@@ -147,6 +163,15 @@ class EmbodiedRewardManager:
         reward_tensor_dict["all"] = final_reward_tensor
         reward_metrics["reward_all"] = final_reward_tensor.sum(dim=-1).mean().item()
         
+        # ========== SRPO_DEBUG: EmbodiedRewardManager OUTPUT ==========
+        logger.info(f"[SRPO_DEBUG][reward_manager] OUTPUT:")
+        logger.info(f"[SRPO_DEBUG][reward_manager] verifier_scores first 16: {verifier_scores[:16]}")
+        logger.info(f"[SRPO_DEBUG][reward_manager] verifier_scores mean: {sum(verifier_scores)/len(verifier_scores):.6f}")
+        logger.info(f"[SRPO_DEBUG][reward_manager] final_reward_tensor shape: {final_reward_tensor.shape}")
+        logger.info(f"[SRPO_DEBUG][reward_manager] final_reward_tensor sum: {final_reward_tensor.sum().item():.6f}")
+        logger.info(f"[SRPO_DEBUG][reward_manager] final_reward_tensor per_sample_sum first 16: {final_reward_tensor.sum(dim=-1)[:16].tolist()}")
+        logger.info(f"[SRPO_DEBUG][reward_manager] reward_all metric: {reward_metrics['reward_all']:.6f}")
+        logger.info(f"[SRPO_DEBUG][reward_manager] ========================================")
 
         # Return format based on return_dict flag
         if return_dict:
