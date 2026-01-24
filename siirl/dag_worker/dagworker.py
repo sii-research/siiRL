@@ -330,6 +330,13 @@ class DAGWorker(Worker):
                             node_kwargs["cur_tp_rank"] = cur_tp_rank
                             if cur_node.node_role == NodeRole.REWARD:
                                 node_kwargs["tp_size"] = cur_tp_size
+                                # Add parallelism info to batch for distributed reward computation
+                                batch["dp_size"] = NonTensorData(cur_dp_size)
+                                batch["dp_rank"] = NonTensorData(cur_dp_rank)
+                                batch["tp_rank"] = NonTensorData(cur_tp_rank)
+                                batch["tp_size"] = NonTensorData(cur_tp_size)
+                                batch["pp_rank"] = NonTensorData(cur_pp_rank)
+                                batch["pp_size"] = NonTensorData(cur_pp_size)
                             elif cur_node.node_role == NodeRole.ADVANTAGE:
                                 node_kwargs["cur_node"] = cur_node
 
@@ -391,19 +398,30 @@ class DAGWorker(Worker):
                                 is_current_last_pp_tp_rank0 = (cur_pp_rank == cur_pp_size - 1 and cur_tp_rank == 0)
                                 if whether_put_data(self._rank, is_current_last_pp_tp_rank0, next_dp_size, cur_dp_size, cur_node, next_node):
                                     with timer(self.enable_perf, "put_data_to_buffer", timing_raw):
-                                        # if self._multi_agent and next_node.node_role == NodeRole.ADVANTAGE:
-                                        #     self.multi_agent_put_log(key=next_node.node_id, data=node_output.batch, next_dp_size = next_dp_size, agent_group = next_node.agent_group, timing_raw = timing_raw)
-                                        # else:
-                                        # have filter, must use databuffer to rebalance
+                                        # Determine if we need to force data through DataCoordinator
+                                        # This is needed when filter causes data imbalance and requires rebalancing
                                         embodied_sampling = self.config.algorithm.embodied_sampling
-                                        enforce_buffer = (
-                                            (self.config.algorithm.filter_groups.enable
-                                             or embodied_sampling.filter_accuracy
-                                             or embodied_sampling.filter_truncated)
-                                            and (cur_node.node_type == NodeType.COMPUTE)
-                                            and (next_node.node_type == NodeType.MODEL_TRAIN)
+                                        
+                                        # Check if any filtering is enabled (causes data imbalance)
+                                        has_filtering = (
+                                            self.config.algorithm.filter_groups.enable
+                                            or embodied_sampling.filter_accuracy
+                                            or embodied_sampling.filter_truncated
                                         )
-                                        self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch,  source_dp_size=cur_dp_size, dest_dp_size=next_dp_size, enforce_buffer = enforce_buffer, timing_raw=timing_raw)
+                                        
+                                        # Check if current node is embodied filter node
+                                        is_embodied_filter_node = (cur_node.node_id == "embodied_sampling")
+                                        
+                                        # Check if this is a COMPUTE -> consumer transition that needs rebalancing
+                                        is_compute_output = (cur_node.node_type == NodeType.COMPUTE)
+                                        needs_rebalance = (
+                                            next_node.node_type == NodeType.MODEL_TRAIN
+                                            or (is_embodied_filter_node and next_node.node_role == NodeRole.REWARD)
+                                        )
+                                        
+                                        enforce_buffer = has_filtering and is_compute_output and needs_rebalance
+                                        
+                                        self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch, source_dp_size=cur_dp_size, dest_dp_size=next_dp_size, enforce_buffer=enforce_buffer, timing_raw=timing_raw)
                         # elif self._multi_agent:
                         #     # last_node add prefix for metrics
                         #     node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node)                        
@@ -504,14 +522,14 @@ class DAGWorker(Worker):
         
         # Set meta_info for embodied training
         batch["eos_token_id"] = NonTensorData(self.validate_tokenizer.eos_token_id if self.validate_tokenizer else None)
-        batch["n_samples"] = NonTensorData(rollout_n)
+        batch["n_samples"] = NonTensorData(self.config.actor_rollout_ref.rollout.n)
         batch["pad_token_id"] = NonTensorData(self.validate_tokenizer.pad_token_id if self.validate_tokenizer else None)        
         logger.info(
             f"[Embodied Validation] Batch variables: "
             f"{batch.batch_size[0]}, "
             f"eos_token_id={batch['eos_token_id']}, "
             f"pad_token_id={batch['pad_token_id']}, "
-            f"n_samples={batch['n_samples']}, "
+            f"n_samples={batch['n_samples']} (dataloader already repeated {rollout_n}x), "
         )
         # Generate embodied episodes
         gen_output = rollout_worker.generate_sequences(batch)
@@ -540,29 +558,6 @@ class DAGWorker(Worker):
                 logger.info(f"[SRPO_DEBUG][generate_embodied_mode] gen_output finish_step mean: {finish_step_val.float().mean().item():.4f}")
                 logger.info(f"[SRPO_DEBUG][generate_embodied_mode] gen_output finish_step first 8: {finish_step_val[:8].tolist()}")
         logger.info(f"[SRPO_DEBUG][generate_embodied_mode] ========================================")
-        
-        # Add unique IDs for tracking (prompt-level, then repeated to match rollout_n)
-        original_batch_size = batch.batch_size[0]
-        uid = np.array([str(uuid.uuid4()) for _ in range(original_batch_size)])
-        
-        # Repeat the original batch to match rollout output size
-        if rollout_n > 1:
-            # Manually repeat TensorDict contents (TensorDict has no repeat method)
-            repeated_data = {}
-            for key, value in batch.items():
-                if isinstance(value, torch.Tensor):
-                    repeated_data[key] = value.repeat_interleave(rollout_n, dim=0)
-                elif isinstance(value, np.ndarray):
-                    repeated_data[key] = np.repeat(value, rollout_n, axis=0)
-                elif isinstance(value, (list, tuple)):
-                    repeated_data[key] = np.repeat(np.array(value), rollout_n, axis=0)
-                else:
-                    # NonTensorData or other types - keep as is
-                    repeated_data[key] = value
-            batch = TensorDict(repeated_data, batch_size=original_batch_size * rollout_n)
-            batch["uid"] = np.repeat(uid, rollout_n, axis=0)
-        else:
-            batch["uid"] = uid
         
         # Merge generated data into batch
         batch.update(gen_output)

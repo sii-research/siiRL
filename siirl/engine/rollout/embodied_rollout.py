@@ -338,10 +338,10 @@ class EmbodiedHFRollout(BaseRollout):
                 logger.info(f"[SRPO_DEBUG][rollout] uid first 8: {list(uid_val[:8])}")
         logger.info(f"[SRPO_DEBUG][rollout] ========================================")
         
-        # Repeat task metadata to match n_samples (aligned with srpo)
-        task_id = prompts['task_id'].repeat_interleave(n_samples, dim=0)
-        trial_id = prompts['trial_id'].repeat_interleave(n_samples, dim=0)
-        task_suite_name = np.repeat(prompts['task_suite_name'], n_samples, axis=0)
+        # dataloader already did repeat, rollout does NOT repeat
+        task_id = prompts['task_id']
+        trial_id = prompts['trial_id']
+        task_suite_name = prompts['task_suite_name']
         
         assert np.all(task_suite_name == self.config.embodied.env.env_name), \
             "All task_suite_name in the batch must match the rollout config"

@@ -125,10 +125,10 @@ def preprocess_dataloader(data:Dict, n:int = 1):
             # Convert list to numpy array and repeat
             data[key] = np.repeat(np.array(value), n, axis=0)
             
-    # Create integer indices for GRPO grouping
-    # Each prompt gets a unique index (0, 1, 2, ..., batch_size-1)
-    # This will be repeated to [0,0,0,...,1,1,1,...,2,2,2,...] after repeat
-    uid = np.arange(batch_size, dtype=np.int64)
+    # Create UUID indices for GRPO grouping
+    # Each prompt gets a unique UUID, then repeated n times
+    # This ensures globally unique identifiers across all batches
+    uid = np.array([str(uuid.uuid4()) for _ in range(batch_size)])
     data['uid'] = np.repeat(uid, n, axis=0)
     # Now all fields have batch_size * n
     # Create TensorDict with the expanded batch size
