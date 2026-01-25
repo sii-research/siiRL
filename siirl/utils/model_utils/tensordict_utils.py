@@ -16,8 +16,7 @@ import logging
 from typing import Iterator
 
 import torch
-from tensordict import TensorDict
-from tensordict.tensorclass import NonTensorData, NonTensorStack
+from tensordict import TensorDict, NonTensorData, NonTensorStack
 
 
 def assign_non_tensor_dict(tensor_dict: TensorDict, non_tensor_dict: dict):

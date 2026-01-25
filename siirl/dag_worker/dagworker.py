@@ -24,8 +24,7 @@ from tqdm import tqdm
 from loguru import logger
 from typing import Any, Dict, List, Optional, Set, Tuple, Type, Callable
 from torch.distributed import ProcessGroup
-from tensordict import TensorDict
-from tensordict.tensorclass import NonTensorData
+from tensordict import TensorDict, NonTensorData
 import time
 from siirl.execution.metric_worker.metric_worker import MetricClient
 from siirl.models.loader import TokenizerModule, load_tokenizer

@@ -32,8 +32,7 @@ from peft import LoraConfig, TaskType, get_peft_model
 from safetensors.torch import save_file
 from torch.distributed import ProcessGroup, init_device_mesh
 from torch.distributed.device_mesh import DeviceMesh
-from tensordict import TensorDict
-from tensordict.tensorclass import NonTensorData
+from tensordict import TensorDict, NonTensorData
 import siirl.utils.model_utils.torch_functional as F
 from typing import Any, Dict, List, Optional, Union, Set
 from siirl.models.loader import load_tokenizer

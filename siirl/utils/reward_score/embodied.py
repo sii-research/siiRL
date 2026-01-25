@@ -14,8 +14,7 @@
 
 import re
 from typing import Any, Dict, List, Tuple
-from tensordict import TensorDict
-from tensordict.tensordict import NonTensorData
+from tensordict import TensorDict, NonTensorData
 import numpy as np
 import torch
 import torch.distributed as dist

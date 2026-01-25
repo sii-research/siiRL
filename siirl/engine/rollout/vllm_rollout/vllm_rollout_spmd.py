@@ -55,7 +55,7 @@ from omegaconf import DictConfig, OmegaConf
 from types import MethodType
 
 from loguru import logger
-from tensordict import TensorDict
+from tensordict import TensorDict, NonTensorData
 from vllm import LLM, SamplingParams
 from vllm.distributed import parallel_state as vllm_ps
 from vllm.lora.request import LoRARequest
@@ -68,7 +68,6 @@ from siirl.params import RolloutArguments
 from siirl.engine.rollout.base import BaseRollout
 from siirl.utils.extras.device import is_cuda_available, device_synchronize
 from siirl.utils.extras.device import get_device_id
-from tensordict.tensorclass import NonTensorData
 # TODO
 # 1. support pp in vllm
 # 2. passing tokenizer is not necessary? no encoding/decoding is happending here
