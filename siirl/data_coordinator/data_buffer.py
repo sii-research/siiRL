@@ -44,6 +44,12 @@ class DataCoordinator:
         loguru.logger.info("Global DataCoordinator initialized.")
         self._cache = []
         
+        # === Statistics tracking for dynamic sampling scenarios ===
+        self._stats_batches_received = 0      # Number of put_batch calls
+        self._stats_samples_received = 0      # Total samples received since last dispatch
+        self._stats_accumulation_start = None # Time when accumulation started
+        self._stats_last_progress_pct = 0     # Last logged progress percentage
+        
     async def put(self, sample_info: SampleInfo, sample_ref: Any, caller_node_id: Optional[str] = None):
         """
         Called by a RolloutWorker to register a new sample reference and its metadata.
@@ -78,11 +84,14 @@ class DataCoordinator:
         if sample_info.node_id is None:
             sample_info.node_id = caller_node_id
 
-        # 4. Register the metadata and reference to the global queue
+        # 3. Register the metadata and reference to the global queue + update statistics
         async with self.lock:
-            # More complex logic can be implemented here, such as inserting into a
-            # priority queue based on priority
             self._sample_queue.append((sample_info, sample_ref))
+            # Update statistics (single sample put)
+            self._stats_batches_received += 1
+            self._stats_samples_received += 1
+            if self._stats_accumulation_start is None:
+                self._stats_accumulation_start = time.time()
 
     async def put_batch(self, sample_infos: List[SampleInfo], sample_refs: List[ray.ObjectRef], caller_node_id: Optional[str] = None):
         """
@@ -115,6 +124,12 @@ class DataCoordinator:
         
         async with self.lock:
             self._sample_queue.extend(zip(sample_infos, sample_refs))
+            
+            # Update statistics
+            self._stats_batches_received += 1
+            self._stats_samples_received += len(sample_refs)
+            if self._stats_accumulation_start is None:
+                self._stats_accumulation_start = time.time()
 
     async def get_batch(
         self, 
@@ -142,13 +157,15 @@ class DataCoordinator:
         """
         async with self.lock:
             # No filter plugin, use efficient FIFO
-            if len(self._cache) > 0:
+            # Check cache first (for subsequent dp_ranks after first rank filled the cache)
+            if self._cache and len(self._cache) > 0:
                 res = self._cache[dp_rank]
                 return res
             if not filter_plugin:
-                if len(self._sample_queue) < batch_size * balance_partitions:
-                    # Use debug level - waiting for data is expected in dynamic sampling scenarios
-                    loguru.logger.debug(f"Waiting for more samples: {len(self._sample_queue)}/{batch_size * balance_partitions} available.")
+                global_batch_size = batch_size * balance_partitions
+                if len(self._sample_queue) < global_batch_size:
+                    # Log progress milestones (25%, 50%, 75%) at INFO level
+                    self._log_accumulation_progress(len(self._sample_queue), global_batch_size)
                     return []
         
                 batch_items = []
@@ -164,6 +181,9 @@ class DataCoordinator:
                 self._cache = batch_refs
                 get_refs = self._cache[:batch_size]
                 self._cache = self._cache[batch_size:] if len(self._cache) >= batch_size else None
+                
+                # Log dispatch statistics and reset
+                self._log_dispatch_stats(global_batch_size)
                 return get_refs
             # With filter plugin, use O(N) filtering and reconstruction
             else:
@@ -179,8 +199,8 @@ class DataCoordinator:
                 # 2. Check if there are enough samples
                 global_batch_size = batch_size * balance_partitions
                 if len(potential_items) < global_batch_size:
-                    # Use debug level - this is expected behavior in dynamic sampling scenarios (DAPO/embodied)
-                    loguru.logger.debug(f"Waiting for more samples: {len(potential_items)}/{global_batch_size} available after filtering.")
+                    # Log progress milestones (25%, 50%, 75%) at INFO level
+                    self._log_accumulation_progress(len(potential_items), global_batch_size)
                     return []
                 potential_items = potential_items[:global_batch_size]
                 # 4. Efficiently remove the selected items from the original queue
@@ -196,8 +216,55 @@ class DataCoordinator:
                     self._cache.append(batch_refs[rank * batch_size: (rank + 1) * batch_size])
                 res = self._cache[dp_rank]
                 
+                # Log dispatch statistics and reset
+                self._log_dispatch_stats(global_batch_size)
                 return res
 
+    def _log_accumulation_progress(self, current_samples: int, target_samples: int):
+        """Log progress milestones at INFO level when reaching 25%, 50%, 75%."""
+        if target_samples <= 0:
+            return
+            
+        current_pct = int(current_samples * 100 / target_samples)
+        
+        # Log at 25%, 50%, 75% milestones (only once per milestone)
+        # Log the highest crossed milestone that hasn't been logged yet
+        milestones = [25, 50, 75]
+        highest_crossed = None
+        for milestone in milestones:
+            if current_pct >= milestone and self._stats_last_progress_pct < milestone:
+                highest_crossed = milestone
+        
+        if highest_crossed is not None:
+            wait_time = time.time() - self._stats_accumulation_start if self._stats_accumulation_start else 0
+            loguru.logger.info(
+                f"[DataCoordinator] Accumulation {highest_crossed}%: {current_samples}/{target_samples} samples "
+                f"({self._stats_batches_received} batches, {wait_time:.1f}s)"
+            )
+            self._stats_last_progress_pct = highest_crossed
+    
+    def _log_dispatch_stats(self, dispatched_samples: int):
+        """Log statistics when dispatching a batch and reset counters."""
+        wait_time = time.time() - self._stats_accumulation_start if self._stats_accumulation_start else 0
+        
+        # Calculate average samples per batch (useful for understanding filter rate)
+        avg_samples_per_batch = (
+            self._stats_samples_received / self._stats_batches_received 
+            if self._stats_batches_received > 0 else 0
+        )
+        
+        loguru.logger.info(
+            f"[DataCoordinator] Dispatching {dispatched_samples} samples | "
+            f"Accumulated from {self._stats_batches_received} batches "
+            f"(avg {avg_samples_per_batch:.1f} samples/batch) | "
+            f"Wait time: {wait_time:.1f}s"
+        )
+        
+        # Reset statistics for next accumulation cycle
+        self._stats_batches_received = 0
+        self._stats_samples_received = 0
+        self._stats_accumulation_start = None
+        self._stats_last_progress_pct = 0
     
     def _apply_length_balancing(
         self, 
