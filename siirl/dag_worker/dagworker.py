@@ -277,7 +277,7 @@ class DAGWorker(Worker):
             # --- 1. Data Loading ---
             with timer(self.enable_perf, "get_data_from_dataloader", timing_raw):
                 is_embodied = self.config.actor_rollout_ref.model.model_type == "embodied"
-                repeat_n = 1 if is_embodied else self.config.actor_rollout_ref.rollout.n
+                repeat_n = self.config.actor_rollout_ref.rollout.n
                 batch = preprocess_dataloader(
                     self.dataloader.run(epoch=epoch, is_validation_step=False),
                     repeat_n
@@ -312,8 +312,9 @@ class DAGWorker(Worker):
                                     or embodied_sampling.filter_truncated
                                 )
                                 if allow_insufficient:
+                                    # Dynamic sampling scenario - waiting for data is expected behavior
                                     if cur_node.node_role == NodeRole.ACTOR:
-                                        logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
+                                        logger.debug(f"Rank {self._rank}: Waiting for sufficient data for node {cur_node.node_id}. Skipping this step.")
                                         return None 
                                 else:
                                     logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
@@ -1341,7 +1342,7 @@ class DAGWorker(Worker):
             
             adjusted_batch_size = int(self.config.data.train_batch_size * rollout_n / cur_dp_size)
             
-            logger.info(
+            logger.debug(
                 f"Rank {self._rank}: Requesting from DataCoordinator: "
                 f"key='{key}', cur_dp={cur_dp_size}, "
                 f"adjusted_batch_size={adjusted_batch_size} (train_bs={self.config.data.train_batch_size} * rollout_n={rollout_n} / cur_dp={cur_dp_size})"
@@ -1358,11 +1359,28 @@ class DAGWorker(Worker):
                 )
             )
 
+        # Check if dynamic sampling is enabled (DAPO/embodied)
+        embodied_sampling = self.config.algorithm.embodied_sampling
+        is_dynamic_sampling = (
+            self.config.algorithm.filter_groups.enable
+            or embodied_sampling.filter_accuracy
+            or embodied_sampling.filter_truncated
+        )
+        
         if not sample_refs:
-            logger.warning(f"Rank {self._rank}: ❌ DataCoordinator returned EMPTY list for key '{key}' (adjusted_batch_size={adjusted_batch_size})")
+            if is_dynamic_sampling:
+                # Dynamic sampling scenario - waiting for data accumulation is expected
+                logger.debug(f"Rank {self._rank}: Waiting for data accumulation for key '{key}' (need {adjusted_batch_size} samples)")
+            else:
+                # GRPO scenario - empty result is unexpected, warn user
+                logger.warning(f"Rank {self._rank}: DataCoordinator returned empty list for key '{key}' (adjusted_batch_size={adjusted_batch_size})")
             return None
 
-        logger.info(f"Rank {self._rank}: ✅ Retrieved {len(sample_refs)} sample references from DataCoordinator for key '{key}'")
+        # Log successful retrieval - use INFO for GRPO (less frequent), DEBUG for dynamic sampling (more frequent)
+        if is_dynamic_sampling:
+            logger.debug(f"Rank {self._rank}: Retrieved {len(sample_refs)} samples for key '{key}'")
+        else:
+            logger.info(f"Rank {self._rank}: Retrieved {len(sample_refs)} samples for key '{key}'")
 
         with timer(self.enable_perf, f"ray_get_samples_{key}", timing_raw):
             samples = ray.get(sample_refs)

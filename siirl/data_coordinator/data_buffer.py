@@ -147,7 +147,8 @@ class DataCoordinator:
                 return res
             if not filter_plugin:
                 if len(self._sample_queue) < batch_size * balance_partitions:
-                    loguru.logger.warning(f"Coordinator queue size ({len(self._sample_queue)}) is less than requested batch size ({batch_size}). Returning empty list.")
+                    # Use debug level - waiting for data is expected in dynamic sampling scenarios
+                    loguru.logger.debug(f"Waiting for more samples: {len(self._sample_queue)}/{batch_size * balance_partitions} available.")
                     return []
         
                 batch_items = []
@@ -178,7 +179,8 @@ class DataCoordinator:
                 # 2. Check if there are enough samples
                 global_batch_size = batch_size * balance_partitions
                 if len(potential_items) < global_batch_size:
-                    loguru.logger.warning(f"After filtering, {filter_plugin} coordinator has {len(potential_items)} samples, which is less than requested batch size ({global_batch_size}). Returning empty list.")
+                    # Use debug level - this is expected behavior in dynamic sampling scenarios (DAPO/embodied)
+                    loguru.logger.debug(f"Waiting for more samples: {len(potential_items)}/{global_batch_size} available after filtering.")
                     return []
                 potential_items = potential_items[:global_batch_size]
                 # 4. Efficiently remove the selected items from the original queue
@@ -391,7 +393,7 @@ class DataCoordinator:
             return None
 
     def reset_cache(self):
-        loguru.logger.warning("reset datacoordinator")
+        loguru.logger.info("Resetting DataCoordinator cache")
         self._sample_queue.clear()
         self._cache = []
 
