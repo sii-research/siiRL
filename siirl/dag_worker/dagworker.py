@@ -1350,12 +1350,14 @@ class DAGWorker(Worker):
             
             # Use filter_plugin to get only samples with matching key
             # Use balance_partitions to optimize sample distribution by length
+            # Use cache_key to enable multi-rank caching within the same node
             sample_refs = loop.run_until_complete(
                 self.data_coordinator.get_batch.remote(
                     adjusted_batch_size,
                     cur_dp_rank,
                     filter_plugin=key_filter,
-                    balance_partitions=cur_dp_size
+                    balance_partitions=cur_dp_size,
+                    cache_key=key
                 )
             )
 

@@ -33,7 +33,7 @@ class DataCoordinator:
     metadata (SampleInfo) and object references (ObjectRef). This allows it to implement
     complex global sampling strategies at a very low cost.
     """
-    def __init__(self, nnodes:int, ppo_mini_batch_size: int, world_size: int):
+    def __init__(self, nnodes: int, ppo_mini_batch_size: int, world_size: int):
         self.nnodes = nnodes
         self.ppo_mini_batch_size = ppo_mini_batch_size
         self.world_size = world_size
@@ -42,7 +42,10 @@ class DataCoordinator:
         self._put_counter = 0  # Used for round-robin buffer selection
         self.lock = asyncio.Lock()
         loguru.logger.info("Global DataCoordinator initialized.")
-        self._cache = []
+        
+        # Cache for multi-rank access: [[rank0_data], [rank1_data], ...]
+        self._cache: List[List[ray.ObjectRef]] = []
+        self._cache_key: Optional[str] = None  # Track which key the cache belongs to
         
         # === Statistics tracking for dynamic sampling scenarios ===
         self._stats_batches_received = 0      # Number of put_batch calls
@@ -136,89 +139,82 @@ class DataCoordinator:
         batch_size: int, 
         dp_rank: int, 
         filter_plugin: Optional[Callable[[SampleInfo], bool]] = None,
-        balance_partitions: Optional[int] = None
+        balance_partitions: Optional[int] = None,
+        cache_key: Optional[str] = None
     ) -> List[ray.ObjectRef]:
         """Called by a Trainer to get a batch of sample ObjectRefs.
         
-        Supports an optional filter plugin to implement custom sampling logic, and an
-        optional length balancing feature.
+        Supports caching for multi-rank access within the same node, filter plugins
+        for custom sampling logic, and length balancing across partitions.
         
         Args:
-            batch_size: The requested batch size.
-            filter_plugin: optional filters function for custom sampling logic.
-            balance_partitions: If specified, the returned samples will be optimized
-                              for even distribution among the given number of workers,
-                              balancing the sum of sequence lengths for each worker.
-                              Defaults to None (no length balancing).
+            batch_size: The requested batch size per partition.
+            dp_rank: The data parallel rank requesting data.
+            filter_plugin: Optional filter function for custom sampling logic.
+            balance_partitions: Number of partitions for length balancing (typically dp_size).
+            cache_key: Key to identify the cache (e.g., node name like 'compute_reward').
+                       Different keys invalidate the cache to prevent data mixing.
         
         Returns:
-            A list of sample ObjectRefs. If length balancing is enabled, the order
-            of samples will be optimized.
+            A list of sample ObjectRefs for the specified dp_rank.
         """
         async with self.lock:
-            # No filter plugin, use efficient FIFO
-            # Check cache first (for subsequent dp_ranks after first rank filled the cache)
-            if self._cache and len(self._cache) > 0:
-                res = self._cache[dp_rank]
-                return res
-            if not filter_plugin:
-                global_batch_size = batch_size * balance_partitions
+            global_batch_size = batch_size * balance_partitions
+            
+            # === Phase 1: Check cache validity ===
+            if self._cache:
+                if cache_key is not None and self._cache_key == cache_key:
+                    # Same key: return cached data (allows multiple reads by tp/pp ranks)
+                    if dp_rank < len(self._cache):
+                        return self._cache[dp_rank]
+                    return []
+                # Different key: invalidate old cache
+                self._cache = []
+                self._cache_key = None
+            
+            # === Phase 2: Fetch data from queue ===
+            if filter_plugin:
+                # With filter: O(N) scan
+                if isinstance(filter_plugin, list):
+                    batch_items = [item for item in self._sample_queue 
+                                   if all(f(item[0]) for f in filter_plugin)]
+                else:
+                    batch_items = [item for item in self._sample_queue 
+                                   if filter_plugin(item[0])]
+                
+                if len(batch_items) < global_batch_size:
+                    self._log_accumulation_progress(len(batch_items), global_batch_size)
+                    return []
+                
+                # Take only what we need and remove from queue
+                batch_items = batch_items[:global_batch_size]
+                refs_to_remove = {item[1] for item in batch_items}
+                self._sample_queue = deque(
+                    item for item in self._sample_queue if item[1] not in refs_to_remove
+                )
+            else:
+                # No filter: efficient FIFO
                 if len(self._sample_queue) < global_batch_size:
-                    # Log progress milestones (25%, 50%, 75%) at INFO level
                     self._log_accumulation_progress(len(self._sample_queue), global_batch_size)
                     return []
-        
-                batch_items = []
-                # Efficient O(batch_size) implementation using deque's O(1) popleft
-                while self._sample_queue:
-                    item = self._sample_queue.popleft()
-                    batch_items.append(item)
-                # Apply length balancing if requested
-                if balance_partitions and balance_partitions > 1:
-                    batch_refs = self._apply_length_balancing(batch_items, balance_partitions)
-                else:
-                    batch_refs = [item[1] for item in batch_items]
-                self._cache = batch_refs
-                get_refs = self._cache[:batch_size]
-                self._cache = self._cache[batch_size:] if len(self._cache) >= batch_size else None
                 
-                # Log dispatch statistics and reset
-                self._log_dispatch_stats(global_batch_size)
-                return get_refs
-            # With filter plugin, use O(N) filtering and reconstruction
+                batch_items = [self._sample_queue.popleft() for _ in range(global_batch_size)]
+            
+            # === Phase 3: Apply length balancing ===
+            if balance_partitions and balance_partitions > 1:
+                batch_refs = self._apply_length_balancing(batch_items, balance_partitions)
             else:
-                # 1. The filtering process does not consume elements from the queue
-                if isinstance(filter_plugin, list):
-                    potential_items = []
-                    all_items =  [item for item in self._sample_queue ]
-                    for item in self._sample_queue:
-                        if all(filter_func(item[0]) for filter_func in filter_plugin):
-                            potential_items.append(item)
-                else:
-                    potential_items = [item for item in self._sample_queue if filter_plugin(item[0])]
-                # 2. Check if there are enough samples
-                global_batch_size = batch_size * balance_partitions
-                if len(potential_items) < global_batch_size:
-                    # Log progress milestones (25%, 50%, 75%) at INFO level
-                    self._log_accumulation_progress(len(potential_items), global_batch_size)
-                    return []
-                potential_items = potential_items[:global_batch_size]
-                # 4. Efficiently remove the selected items from the original queue
-                # Use ObjectRef (guaranteed unique and hashable) to identify items for removal
-                refs_to_remove = {item[1] for item in potential_items}
-                self._sample_queue = deque(item for item in self._sample_queue if item[1] not in refs_to_remove)
-                # Apply length balancing if requested
-                if balance_partitions and balance_partitions > 1:
-                    batch_refs = self._apply_length_balancing(potential_items, balance_partitions)
-                else:
-                    batch_refs = [item[1] for item in potential_items]
-                for rank in range(balance_partitions):
-                    self._cache.append(batch_refs[rank * batch_size: (rank + 1) * batch_size])
-                res = self._cache[dp_rank]
-                
-                # Log dispatch statistics and reset
-                self._log_dispatch_stats(global_batch_size)
-                return res
+                batch_refs = [item[1] for item in batch_items]
+            
+            # === Phase 4: Build cache (unified nested list structure) ===
+            self._cache = [
+                batch_refs[rank * batch_size:(rank + 1) * batch_size]
+                for rank in range(balance_partitions)
+            ]
+            self._cache_key = cache_key
+            
+            self._log_dispatch_stats(global_batch_size)
+            return self._cache[dp_rank]
 
     def _log_accumulation_progress(self, current_samples: int, target_samples: int):
         """Log progress milestones at INFO level when reaching 25%, 50%, 75%."""
@@ -460,9 +456,11 @@ class DataCoordinator:
             return None
 
     def reset_cache(self):
+        """Reset the coordinator state for a new training step."""
         loguru.logger.info("Resetting DataCoordinator cache")
         self._sample_queue.clear()
         self._cache = []
+        self._cache_key = None
 
     def __repr__(self) -> str:
         return f"<DataCoordinator(total_samples={len(self._sample_queue)})>"
