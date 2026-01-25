@@ -55,7 +55,12 @@ from omegaconf import DictConfig, OmegaConf
 from types import MethodType
 
 from loguru import logger
-from tensordict import TensorDict, NonTensorData
+from tensordict import TensorDict
+# Handle different tensordict versions - NonTensorData location varies
+try:
+    from tensordict import NonTensorData
+except ImportError:
+    from tensordict.tensorclass import NonTensorData
 from vllm import LLM, SamplingParams
 from vllm.distributed import parallel_state as vllm_ps
 from vllm.lora.request import LoRARequest

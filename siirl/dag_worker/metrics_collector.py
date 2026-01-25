@@ -25,7 +25,12 @@ import torch
 import torch.distributed as dist
 from typing import Dict, Callable, Any
 from torch.distributed import ProcessGroup
-from tensordict import TensorDict, NonTensorData
+from tensordict import TensorDict
+# Handle different tensordict versions - NonTensorData location varies
+try:
+    from tensordict import NonTensorData
+except ImportError:
+    from tensordict.tensorclass import NonTensorData
 
 from siirl.execution.dag import TaskGraph
 from siirl.execution.dag.node import Node, NodeRole

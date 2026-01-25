@@ -21,7 +21,12 @@ from ray.actor import ActorHandle
 from collections import defaultdict
 from typing import Dict, List, Callable, Any, Optional, Tuple
 from loguru import logger
-from tensordict import TensorDict, NonTensorData
+from tensordict import TensorDict
+# Handle different tensordict versions - NonTensorData location varies
+try:
+    from tensordict import NonTensorData
+except ImportError:
+    from tensordict.tensorclass import NonTensorData
 from torch.distributed import ProcessGroup
 
 from siirl.data_coordinator import preprocess_dataloader

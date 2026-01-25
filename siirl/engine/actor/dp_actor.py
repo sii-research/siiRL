@@ -22,7 +22,12 @@ from typing import Tuple
 
 import torch
 import numpy as np
-from tensordict import TensorDict, NonTensorData
+from tensordict import TensorDict
+# Handle different tensordict versions - NonTensorData location varies
+try:
+    from tensordict import NonTensorData
+except ImportError:
+    from tensordict.tensorclass import NonTensorData
 from loguru import logger
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP

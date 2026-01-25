@@ -14,7 +14,12 @@
 
 import re
 from typing import Any, Dict, List, Tuple
-from tensordict import TensorDict, NonTensorData
+from tensordict import TensorDict
+# Handle different tensordict versions - NonTensorData location varies
+try:
+    from tensordict import NonTensorData
+except ImportError:
+    from tensordict.tensorclass import NonTensorData
 import numpy as np
 import torch
 import torch.distributed as dist

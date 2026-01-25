@@ -16,7 +16,12 @@ import logging
 from typing import Iterator
 
 import torch
-from tensordict import TensorDict, NonTensorData, NonTensorStack
+from tensordict import TensorDict
+# Handle different tensordict versions - NonTensorData location varies
+try:
+    from tensordict import NonTensorData, NonTensorStack
+except ImportError:
+    from tensordict.tensorclass import NonTensorData, NonTensorStack
 
 
 def assign_non_tensor_dict(tensor_dict: TensorDict, non_tensor_dict: dict):

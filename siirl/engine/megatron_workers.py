@@ -29,7 +29,12 @@ from codetiming import Timer
 from loguru import logger
 
 from omegaconf import DictConfig, OmegaConf
-from tensordict import TensorDict, NonTensorData
+from tensordict import TensorDict
+# Handle different tensordict versions - NonTensorData location varies
+try:
+    from tensordict import NonTensorData
+except ImportError:
+    from tensordict.tensorclass import NonTensorData
 try:
     from mindspeed.megatron_adaptor import repatch
 except ImportError:

@@ -5,7 +5,12 @@ import ray
 import uuid
 from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional, Union, Set
-from tensordict import TensorDict, NonTensorData
+from tensordict import TensorDict
+# Handle different tensordict versions - NonTensorData location varies
+try:
+    from tensordict import NonTensorData
+except ImportError:
+    from tensordict.tensorclass import NonTensorData
 from typing import get_args, get_origin
 
 

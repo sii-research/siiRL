@@ -25,7 +25,12 @@ import torch
 from cachetools import LRUCache
 from omegaconf import DictConfig
 from pydantic import BaseModel
-from tensordict import TensorDict, NonTensorData
+from tensordict import TensorDict
+# Handle different tensordict versions - NonTensorData location varies
+try:
+    from tensordict import NonTensorData
+except ImportError:
+    from tensordict.tensorclass import NonTensorData
 from transformers import AutoTokenizer
 
 from siirl.models.loader import load_tokenizer
