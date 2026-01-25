@@ -257,7 +257,7 @@ class DataLoaderNode(Node):
             sampler = SequentialSampler(data_source=self.train_dataset)
 
         # Re-create the dataloader with the new sampler
-        from siirl.dataloader.partitioned_dataset import collate_fn as default_collate_fn
+        from siirl.data_coordinator.dataloader.partitioned_dataset import collate_fn as default_collate_fn
 
         train_batch_size = self.global_config.data.train_batch_size // self.rollout_ddp_world_size
 
