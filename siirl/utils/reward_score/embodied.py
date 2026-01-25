@@ -14,6 +14,7 @@
 
 import re
 from typing import Any, Dict, List, Tuple
+from loguru import logger
 from tensordict import TensorDict
 # Handle different tensordict versions - NonTensorData location varies
 try:
@@ -67,12 +68,40 @@ def _compute_cluster_centers(embeddings: np.ndarray, eps: float = 0.5, min_sampl
     return np.array(cluster_centers)
 
 
+def _get_batch_size(batch_data: TensorDict) -> int:
+    """Best-effort batch size extraction from a TensorDict."""
+    try:
+        if hasattr(batch_data, "batch_size") and batch_data.batch_size is not None:
+            batch_size = batch_data.batch_size
+            if isinstance(batch_size, (tuple, list, torch.Size)):
+                return int(batch_size[0]) if len(batch_size) > 0 else 0
+            return int(batch_size)
+    except Exception:
+        pass
+    for key in ("responses", "input_ids", "attention_mask", "response_mask", "pixel_values"):
+        if key in batch_data:
+            try:
+                return int(batch_data[key].size(0))
+            except Exception:
+                continue
+    return 0
+
+
 def _extract_local_data(batch_data: TensorDict) -> Dict[str, Any]:
     """Extract local data from batch for reward computation."""
-    batch_size = batch_data["responses"].size(0)
+    batch_size = _get_batch_size(batch_data)
+    
+    # Ensure all required fields are present
+    required_fields = ["complete", "vjepa_embedding", "task_file_name", "finish_step"]
+    for field in required_fields:
+        if field not in batch_data:
+            raise KeyError(f"Critical data '{field}' missing from batch in reward computation.")
+
+    # Extract data
     completes = np.array(batch_data["complete"].tolist())
-    finish_steps = batch_data["finish_step"].cpu().numpy()
     embeddings = batch_data["vjepa_embedding"].cpu().numpy()
+    finish_steps = batch_data["finish_step"].cpu().numpy()
+    
     task_file_names = _tensor_to_str_list(batch_data["task_file_name"])
     task_names = np.array([_extract_task_name(name) for name in task_file_names])
     
@@ -280,7 +309,6 @@ def compute_embodied_reward(
     Returns:
         A list of dictionaries, each containing detailed score information.
     """
-    from loguru import logger
     
     # === Step 1: Extract parallelism info from batch ===
     def get_nontensor_value(key, default):

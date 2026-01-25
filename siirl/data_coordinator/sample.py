@@ -47,6 +47,9 @@ class Sample(BaseModel):
     # used for vla
     pixel_values: Optional[np.ndarray] = Field(default=None)
     finish_step: Optional[np.ndarray] = Field(default=None)
+    complete: Optional[np.ndarray] = Field(default=None)
+    task_file_name: Optional[np.ndarray] = Field(default=None)
+    vjepa_embedding: Optional[np.ndarray] = Field(default=None)
     
     # from  non_tensor_batch of Dataproto
     raw_prompt: str = Field(default="")
@@ -178,6 +181,9 @@ def Dict2Samples(data:TensorDict)-> List[SampleManager]:
         local_sample.extra_info = data['extra_info'][index] if 'extra_info' in data else None
         local_sample.pixel_values = data['pixel_values'][index].numpy() if 'pixel_values' in data else None
         local_sample.finish_step = data['finish_step'][index].numpy() if 'finish_step' in data else None
+        local_sample.complete = data['complete'][index].numpy() if 'complete' in data else None
+        local_sample.task_file_name = data['task_file_name'][index].numpy() if 'task_file_name' in data else None
+        local_sample.vjepa_embedding = data['vjepa_embedding'][index].numpy() if 'vjepa_embedding' in data else None
         if 'multi_modal_inputs' in data:
             local_sample.multi_modal_inputs = data["multi_modal_inputs"][index]
         local_sample.uid = data['uid'][index]
