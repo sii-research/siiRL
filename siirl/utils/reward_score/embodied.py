@@ -123,28 +123,30 @@ def _extract_local_data(batch_data: TensorDict) -> Dict[str, Any]:
 def _gather_all_data(
     local_data: Dict[str, Any],
     dp_size: int,
+    dp_rank: int,
     tp_size: int,
     is_representative: bool
 ) -> Tuple[Dict[str, Any], List[int]]:
     """
     One-shot gather of all data from all DP ranks.
-    
+
     All ranks in the world must participate in all_gather_object.
     Only representative ranks (tp_rank==0, last pp stage) send actual data.
-    Non-representative ranks send None.
-    
+
     Args:
         local_data: Local data dict
         dp_size: Number of DP ranks
+        dp_rank: Current DP rank
         tp_size: Number of TP ranks (used to calculate representative rank indices)
         is_representative: Whether this rank is a representative rank
-    
+
     Returns:
         Tuple of (global_data, batch_sizes_per_rank)
     """
-    # Prepare data - only representative ranks send actual data
+    # Prepare data - only representative ranks send actual data, include dp_rank for ordering
     if is_representative:
         send_data = {
+            "dp_rank": dp_rank,
             "batch_size": local_data["batch_size"],
             "embeddings": local_data["embeddings"].tolist(),
             "completes": local_data["completes"].tolist(),
@@ -153,24 +155,23 @@ def _gather_all_data(
         }
     else:
         send_data = None
-    
+
     # All ranks must participate in all_gather_object
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     all_data = [None] * world_size
     dist.all_gather_object(all_data, send_data)
-    
-    # Filter to get only data from representative ranks
-    # Representative ranks are: dp_rank * tp_size for each dp_rank (assuming tp_rank=0)
-    representative_ranks = [i * tp_size for i in range(dp_size)]
-    dp_data = [all_data[r] for r in representative_ranks if r < world_size and all_data[r] is not None]
-    
+
+    # Filter to get only data from representative ranks and sort by dp_rank
+    dp_data = [d for d in all_data if d is not None and isinstance(d, dict) and "dp_rank" in d]
+    dp_data = sorted(dp_data, key=lambda x: x["dp_rank"])
+
     # Extract batch_sizes and merge data
     batch_sizes = [d["batch_size"] for d in dp_data]
     global_embeddings = np.concatenate([np.array(d["embeddings"]) for d in dp_data], axis=0)
     global_completes = np.concatenate([np.array(d["completes"]) for d in dp_data], axis=0)
     global_task_names = np.concatenate([np.array(d["task_names"]) for d in dp_data], axis=0)
     global_valid_mask = np.concatenate([np.array(d["valid_mask"]) for d in dp_data], axis=0)
-    
+
     global_data = {
         "embeddings": global_embeddings,
         "completes": global_completes,
@@ -178,7 +179,7 @@ def _gather_all_data(
         "valid_mask": global_valid_mask,
         "batch_size": len(global_embeddings),
     }
-    
+
     return global_data, batch_sizes
 
 
@@ -205,60 +206,53 @@ def _compute_all_rewards(data: Dict[str, Any], logger) -> np.ndarray:
     
     # Failed + valid -> reward shaping
     fail_mask = ~completes & valid_mask
-    
+
     if not fail_mask.any():
-        logger.info(f"[REWARD COMPUTE] No failed valid samples, skipping reward shaping")
         return final_rewards
-    
+
     # Group by task and compute rewards
     unique_tasks = np.unique(task_names)
-    
+
     for task in unique_tasks:
         task_mask = task_names == task
         task_success_mask = task_mask & success_mask
         task_fail_mask = task_mask & fail_mask
-        
+
         success_count = task_success_mask.sum()
         fail_count = task_fail_mask.sum()
-        
+
         if success_count == 0 or fail_count == 0:
-            logger.info(f"[REWARD COMPUTE] Task '{task}': {success_count} success, {fail_count} failed - skipping")
             continue
-        
+
         # Get embeddings
         success_emb = embeddings[task_success_mask]
         fail_emb = embeddings[task_fail_mask]
         fail_indices = np.where(task_fail_mask)[0]
-        
+
         # Compute cluster centers from success embeddings
         cluster_centers = _compute_cluster_centers(success_emb)
-        logger.info(f"[REWARD COMPUTE] Task '{task}': {success_count} success -> {len(cluster_centers)} clusters")
-        
+
         # Compute distances from failed samples to nearest cluster center
         distance_matrix = cdist(fail_emb, cluster_centers, "euclidean")
         min_distances = distance_matrix.min(axis=1)
-        
+
         # Normalize distances
         min_dist, max_dist = min_distances.min(), min_distances.max()
         dist_range = max_dist - min_dist
-        
+
         if dist_range < 1e-6:
             normalized_dists = np.full_like(min_distances, 0.5)
         else:
             normalized_dists = (min_distances - min_dist) / dist_range
-        
+
         # Sigmoid mapping: closer to success -> higher reward (max 0.6)
         sigmoid_steepness = 10.0
         sigmoid_offset = 0.5
         sigmoid_inputs = sigmoid_steepness * (sigmoid_offset - normalized_dists)
         reward_values = 0.6 * special.expit(sigmoid_inputs)
-        
+
         final_rewards[fail_indices] = reward_values
-        
-        logger.info(f"[REWARD COMPUTE] Task '{task}': {fail_count} failed, "
-                   f"dist range [{min_dist:.4f}, {max_dist:.4f}], "
-                   f"rewards [{reward_values.min():.4f}, {reward_values.max():.4f}]")
-    
+
     return final_rewards
 
 
@@ -292,74 +286,77 @@ def _build_results(
 
 def compute_embodied_reward(
     batch_data: TensorDict,
+    compute_only_rank_0: bool = True,
     **kwargs: Any,
 ) -> List[Dict[str, Any]]:
     """
     Computes rewards based on VJEPA embeddings and task completion status.
-    
-    Distributed-aware: uses one-shot all_gather to collect data from all DP ranks,
-    then each rank computes the same global rewards and extracts its local slice.
-    
+
+    Distributed-aware: uses one-shot all_gather to collect data from all DP ranks.
+
+    Optimization: When compute_only_rank_0=True (default), only rank 0 computes rewards
+    and broadcasts to other ranks, eliminating redundant computation.
+
     Args:
         batch_data: TensorDict containing batch information with parallelism info:
             - dp_size, dp_rank: Data Parallel info
-            - tp_rank, tp_size: Tensor Parallel info  
+            - tp_rank, tp_size: Tensor Parallel info
             - pp_rank, pp_size: Pipeline Parallel info
+        compute_only_rank_0: If True, only rank 0 computes rewards (default: True)
 
     Returns:
         A list of dictionaries, each containing detailed score information.
     """
-    
+
     # === Step 1: Extract parallelism info from batch ===
     def get_nontensor_value(key, default):
         val = batch_data.get(key, None)
         if val is None:
             return default
         return val.data if isinstance(val, NonTensorData) else val
-    
+
     dp_size = get_nontensor_value("dp_size", 1)
     dp_rank = get_nontensor_value("dp_rank", 0)
     tp_rank = get_nontensor_value("tp_rank", 0)
     tp_size = get_nontensor_value("tp_size", 1)
     pp_rank = get_nontensor_value("pp_rank", 0)
     pp_size = get_nontensor_value("pp_size", 1)
-    
-    logger.info(f"[REWARD COMPUTE] Parallelism: dp={dp_rank}/{dp_size}, tp={tp_rank}/{tp_size}, pp={pp_rank}/{pp_size}")
-    
+
     # === Step 2: Extract local data ===
     local_data = _extract_local_data(batch_data)
     batch_size = local_data["batch_size"]
-    
-    logger.info(f"[REWARD COMPUTE] Local batch_size: {batch_size}, "
-               f"success: {local_data['completes'].sum()}, "
-               f"zero_emb: {local_data['zero_mask'].sum()}, "
-               f"valid: {local_data['valid_mask'].sum()}")
-    
+
     # === Step 3: Determine gather requirements ===
-    # Only tp_rank==0 and last pp stage have actual data (representative ranks)
     is_representative = (tp_rank == 0) and (pp_rank == pp_size - 1)
-    # All ranks must participate in gather if distributed, but only representative ranks have data
     need_distributed = dp_size > 1 and dist.is_initialized()
-    
+
     # === Step 4: Gather all data (one-shot) or use local ===
     if need_distributed:
-        logger.info(f"[REWARD COMPUTE] Rank (dp={dp_rank}, tp={tp_rank}, pp={pp_rank}): "
-                   f"Participating in gather, is_representative={is_representative}")
-        global_data, batch_sizes = _gather_all_data(local_data, dp_size, tp_size, is_representative)
-        logger.info(f"[REWARD COMPUTE] dp_rank {dp_rank}: Global batch_size: {global_data['batch_size']}, "
-                   f"batch_sizes_per_rank: {batch_sizes}")
+        global_data, batch_sizes = _gather_all_data(local_data, dp_size, dp_rank, tp_size, is_representative)
     else:
         global_data = local_data
         batch_sizes = [batch_size]
-    
-    # === Step 5: Compute rewards on global data ===
-    global_rewards = _compute_all_rewards(global_data, logger)
-    
+
+    # === Step 5: Compute rewards ===
+    if compute_only_rank_0 and need_distributed:
+        # Optimized path: only rank 0 computes, then broadcast
+        if dp_rank == 0:
+            global_rewards = _compute_all_rewards(global_data, logger)
+            rewards_tensor = torch.tensor(global_rewards, dtype=torch.float32).cuda()
+        else:
+            rewards_tensor = torch.zeros(global_data['batch_size'], dtype=torch.float32).cuda()
+
+        # Broadcast from rank 0 to all DP ranks
+        dist.broadcast(rewards_tensor, src=0)
+        global_rewards = rewards_tensor.cpu().numpy()
+    else:
+        # Original path: all ranks compute (for backward compatibility or single-process)
+        global_rewards = _compute_all_rewards(global_data, logger)
+
     # === Step 6: Build results for local samples ===
     if need_distributed:
         results = _build_results(global_rewards, local_data, dp_rank, batch_sizes)
     else:
-        # Single rank or non-representative: results directly from global_rewards
         results = []
         for i in range(batch_size):
             results.append({
@@ -369,16 +366,16 @@ def compute_embodied_reward(
                 "is_zero_embedding": bool(local_data["zero_mask"][i]),
                 "score": float(global_rewards[i]),
             })
-    
-    # === Step 7: Log final statistics ===
-    local_rewards = np.array([r["score"] for r in results])
-    num_success = (local_rewards == 1.0).sum()
-    num_partial = ((local_rewards > 0) & (local_rewards < 1.0)).sum()
-    num_failed = (local_rewards == 0).sum()
-    
-    logger.info(f"[REWARD COMPUTE] dp_rank {dp_rank}: Completed - "
-               f"Avg: {local_rewards.mean():.4f}, Min: {local_rewards.min():.4f}, Max: {local_rewards.max():.4f}, "
-               f"Success(1.0): {num_success}, Partial(0<r<1): {num_partial}, Failed(0): {num_failed}")
-    logger.info(f"[REWARD COMPUTE] dp_rank {dp_rank}: rewards first 16: {local_rewards[:16].tolist()}")
-    
+
+    # === Step 7: Log final statistics (only rank 0) ===
+    if dp_rank == 0:
+        local_rewards = np.array([r["score"] for r in results])
+        num_success = (local_rewards == 1.0).sum()
+        num_partial = ((local_rewards > 0) & (local_rewards < 1.0)).sum()
+        num_failed = (local_rewards == 0).sum()
+
+        logger.info(f"[REWARD COMPUTE] Completed - "
+                   f"Avg: {local_rewards.mean():.4f}, Min: {local_rewards.min():.4f}, Max: {local_rewards.max():.4f}, "
+                   f"Success(1.0): {num_success}, Partial(0<r<1): {num_partial}, Failed(0): {num_failed}")
+
     return results

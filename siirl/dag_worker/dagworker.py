@@ -541,55 +541,14 @@ class DAGWorker(Worker):
         # Extract metrics (may be wrapped in NonTensorData)
         raw_metrics = gen_output.get("metrics", {}) if hasattr(gen_output, "get") else {}
         metrics = raw_metrics.data if hasattr(raw_metrics, 'data') else (raw_metrics if isinstance(raw_metrics, dict) else {})
-        
-        # ========== SRPO_DEBUG: generate_embodied_mode - after rollout ==========
-        logger.info(f"[SRPO_DEBUG][generate_embodied_mode] ========================================")
-        logger.info(f"[SRPO_DEBUG][generate_embodied_mode] AFTER ROLLOUT:")
-        logger.info(f"[SRPO_DEBUG][generate_embodied_mode] gen_output keys: {list(gen_output.keys())}")
-        if 'responses' in gen_output:
-            logger.info(f"[SRPO_DEBUG][generate_embodied_mode] gen_output responses shape: {gen_output['responses'].shape}")
-            logger.info(f"[SRPO_DEBUG][generate_embodied_mode] gen_output responses dtype: {gen_output['responses'].dtype}")
-            logger.info(f"[SRPO_DEBUG][generate_embodied_mode] gen_output responses sum: {gen_output['responses'].float().sum().item():.6f}")
-            logger.info(f"[SRPO_DEBUG][generate_embodied_mode] gen_output responses[0,:3,:3]: {gen_output['responses'][0,:3,:3].tolist()}")
-        if 'complete' in gen_output:
-            complete_val = gen_output['complete']
-            if hasattr(complete_val, 'float'):
-                logger.info(f"[SRPO_DEBUG][generate_embodied_mode] gen_output complete mean: {complete_val.float().mean().item():.4f}")
-            else:
-                logger.info(f"[SRPO_DEBUG][generate_embodied_mode] gen_output complete: {complete_val}")
-        if 'finish_step' in gen_output:
-            finish_step_val = gen_output['finish_step']
-            if hasattr(finish_step_val, 'float'):
-                logger.info(f"[SRPO_DEBUG][generate_embodied_mode] gen_output finish_step mean: {finish_step_val.float().mean().item():.4f}")
-                logger.info(f"[SRPO_DEBUG][generate_embodied_mode] gen_output finish_step first 8: {finish_step_val[:8].tolist()}")
-        logger.info(f"[SRPO_DEBUG][generate_embodied_mode] ========================================")
-        
+
         # Merge generated data into batch
         batch.update(gen_output)
         
         # Compute response mask if not already present
         if "response_mask" not in batch:
             batch["response_mask"] = compute_response_mask(batch)
-        
-        # ========== SRPO_DEBUG: generate_embodied_mode - final output ==========
-        logger.info(f"[SRPO_DEBUG][generate_embodied_mode] FINAL OUTPUT:")
-        logger.info(f"[SRPO_DEBUG][generate_embodied_mode] batch_size: {batch.batch_size[0]}")
-        logger.info(f"[SRPO_DEBUG][generate_embodied_mode] batch keys: {list(batch.keys())}")
-        if 'uid' in batch:
-            uid_vals = batch['uid']
-            if isinstance(uid_vals, np.ndarray):
-                logger.info(f"[SRPO_DEBUG][generate_embodied_mode] uid first 8: {uid_vals[:8].tolist()}")
-                logger.info(f"[SRPO_DEBUG][generate_embodied_mode] uid unique count: {len(set(uid_vals.tolist()))}")
-        if 'task_id' in batch:
-            logger.info(f"[SRPO_DEBUG][generate_embodied_mode] task_id first 8: {batch['task_id'][:8].tolist()}")
-        if 'responses' in batch:
-            logger.info(f"[SRPO_DEBUG][generate_embodied_mode] responses shape: {batch['responses'].shape}")
-            logger.info(f"[SRPO_DEBUG][generate_embodied_mode] responses sum: {batch['responses'].float().sum().item():.6f}")
-        if 'response_mask' in batch:
-            logger.info(f"[SRPO_DEBUG][generate_embodied_mode] response_mask shape: {batch['response_mask'].shape}")
-            logger.info(f"[SRPO_DEBUG][generate_embodied_mode] response_mask sum: {batch['response_mask'].float().sum().item():.2f}")
-        logger.info(f"[SRPO_DEBUG][generate_embodied_mode] ========================================")
-        
+
         return NodeOutput(batch=batch, metrics=metrics)
     
     
@@ -631,33 +590,6 @@ class DAGWorker(Worker):
         if extra_infos:
             batch.update({k: np.array(v) for k, v in extra_infos.items()}, inplace=True)
 
-        # ========== SRPO_DEBUG: compute_reward ==========
-        logger.info(f"[SRPO_DEBUG][compute_reward] ========================================")
-        logger.info(f"[SRPO_DEBUG][compute_reward] batch_size: {batch.batch_size[0]}")
-        logger.info(f"[SRPO_DEBUG][compute_reward] token_level_scores shape: {reward_tensor.shape}")
-        logger.info(f"[SRPO_DEBUG][compute_reward] token_level_scores sum: {reward_tensor.sum().item():.6f}")
-        logger.info(f"[SRPO_DEBUG][compute_reward] token_level_scores mean: {reward_tensor.mean().item():.6f}")
-        logger.info(f"[SRPO_DEBUG][compute_reward] token_level_scores min: {reward_tensor.min().item():.6f}")
-        logger.info(f"[SRPO_DEBUG][compute_reward] token_level_scores max: {reward_tensor.max().item():.6f}")
-        # Per-sample reward sum
-        per_sample_reward = reward_tensor.sum(dim=-1)
-        logger.info(f"[SRPO_DEBUG][compute_reward] per_sample_reward (sum over tokens) first 8: {per_sample_reward[:8].tolist()}")
-        logger.info(f"[SRPO_DEBUG][compute_reward] per_sample_reward mean: {per_sample_reward.mean().item():.6f}")
-        logger.info(f"[SRPO_DEBUG][compute_reward] per_sample_reward std: {per_sample_reward.std().item():.6f}")
-        if extra_infos:
-            logger.info(f"[SRPO_DEBUG][compute_reward] extra_infos keys: {list(extra_infos.keys())}")
-            for k, v in extra_infos.items():
-                if isinstance(v, (list, np.ndarray)) and len(v) > 0:
-                    logger.info(f"[SRPO_DEBUG][compute_reward] extra_infos[{k}] first 8: {list(v[:8])}")
-        if 'acc' in batch:
-            acc_val = batch['acc']
-            if hasattr(acc_val, 'float'):
-                logger.info(f"[SRPO_DEBUG][compute_reward] acc mean: {acc_val.float().mean().item():.4f}")
-                logger.info(f"[SRPO_DEBUG][compute_reward] acc first 8: {acc_val[:8].tolist()}")
-            else:
-                logger.info(f"[SRPO_DEBUG][compute_reward] acc first 8: {list(acc_val[:8])}")
-        logger.info(f"[SRPO_DEBUG][compute_reward] ========================================")
-
         metrics = {}
         if config.algorithm.use_kl_in_reward:
             kl_ctrl_in_reward = core_algos.get_kl_controller(config.algorithm.kl_ctrl)
@@ -682,21 +614,6 @@ class DAGWorker(Worker):
         if "entropys" in processed_data:
             entropy = agg_loss(processed_data["entropys"], processed_data["response_mask"].to("cpu"), config.actor_rollout_ref.actor.loss_agg_mode)
             local_metrics["actor/entropy_loss"] = entropy.item()
-
-        # ========== SRPO_DEBUG: compute_old_log_prob ==========
-        from loguru import logger
-        logger.info(f"[SRPO_DEBUG][compute_old_log_prob] ========================================")
-        if "old_log_probs" in processed_data:
-            old_log_probs = processed_data["old_log_probs"]
-            logger.info(f"[SRPO_DEBUG][compute_old_log_prob] old_log_probs shape: {old_log_probs.shape}")
-            logger.info(f"[SRPO_DEBUG][compute_old_log_prob] old_log_probs mean: {old_log_probs.mean().item():.6f}")
-            logger.info(f"[SRPO_DEBUG][compute_old_log_prob] old_log_probs std: {old_log_probs.std().item():.6f}")
-            logger.info(f"[SRPO_DEBUG][compute_old_log_prob] old_log_probs min: {old_log_probs.min().item():.6f}")
-            logger.info(f"[SRPO_DEBUG][compute_old_log_prob] old_log_probs max: {old_log_probs.max().item():.6f}")
-            # Per-sample log prob sum
-            per_sample_lp = old_log_probs.sum(dim=-1)
-            logger.info(f"[SRPO_DEBUG][compute_old_log_prob] per_sample old_log_probs sum first 8: {per_sample_lp[:8].tolist()}")
-        logger.info(f"[SRPO_DEBUG][compute_old_log_prob] ========================================")
 
         processed_data.pop("metrics", None)
         processed_data.pop("entropys", None)

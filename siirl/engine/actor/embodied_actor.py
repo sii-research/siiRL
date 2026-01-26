@@ -385,30 +385,6 @@ class RobDataParallelPPOActor(BasePPOActor):
         self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
         temperature = data['temperature']  # temperature must be in the data.meta_info to avoid slient error
 
-        # ========== SRPO_DEBUG: update_policy - INPUT ==========
-        logger.info(f"[SRPO_DEBUG][update_policy] ========================================")
-        logger.info(f"[SRPO_DEBUG][update_policy] INPUT:")
-        logger.info(f"[SRPO_DEBUG][update_policy] data batch_size: {data.batch_size[0]}")
-        logger.info(f"[SRPO_DEBUG][update_policy] data keys: {list(data.keys())}")
-        logger.info(f"[SRPO_DEBUG][update_policy] temperature: {temperature}")
-        logger.info(f"[SRPO_DEBUG][update_policy] ppo_mini_batch_size: {self.config.ppo_mini_batch_size}")
-        logger.info(f"[SRPO_DEBUG][update_policy] ppo_micro_batch_size_per_gpu: {self.config.ppo_micro_batch_size_per_gpu}")
-        logger.info(f"[SRPO_DEBUG][update_policy] gradient_accumulation: {self.gradient_accumulation}")
-        if 'responses' in data:
-            logger.info(f"[SRPO_DEBUG][update_policy] responses shape: {data['responses'].shape}")
-        if 'old_log_probs' in data:
-            logger.info(f"[SRPO_DEBUG][update_policy] old_log_probs shape: {data['old_log_probs'].shape}")
-            logger.info(f"[SRPO_DEBUG][update_policy] old_log_probs mean: {data['old_log_probs'].mean().item():.6f}")
-            logger.info(f"[SRPO_DEBUG][update_policy] old_log_probs first 8 sum: {data['old_log_probs'][:8].sum(dim=-1).tolist()}")
-        if 'advantages' in data:
-            logger.info(f"[SRPO_DEBUG][update_policy] advantages shape: {data['advantages'].shape}")
-            logger.info(f"[SRPO_DEBUG][update_policy] advantages mean: {data['advantages'].mean().item():.6f}")
-            logger.info(f"[SRPO_DEBUG][update_policy] advantages std: {data['advantages'].std().item():.6f}")
-            logger.info(f"[SRPO_DEBUG][update_policy] advantages first 8 sum: {data['advantages'][:8].sum(dim=-1).tolist()}")
-        if 'finish_step' in data:
-            logger.info(f"[SRPO_DEBUG][update_policy] finish_step first 8: {data['finish_step'][:8].tolist()}")
-        logger.info(f"[SRPO_DEBUG][update_policy] ========================================")
-
         select_keys = ['responses', 'input_ids', 'attention_mask', 'pixel_values', 'old_log_probs', 'advantages',"finish_step"]
         batch = data.select(*select_keys)
 
@@ -522,16 +498,7 @@ class RobDataParallelPPOActor(BasePPOActor):
         torch.cuda.synchronize()
         torch.distributed.barrier()
         torch.cuda.empty_cache()
-        
-        # ========== SRPO_DEBUG: update_policy - OUTPUT ==========
-        logger.info(f"[SRPO_DEBUG][update_policy] OUTPUT METRICS:")
-        for k, v in metrics.items():
-            if isinstance(v, list):
-                logger.info(f"[SRPO_DEBUG][update_policy] {k}: {v[-1] if len(v) > 0 else 'empty'}")
-            else:
-                logger.info(f"[SRPO_DEBUG][update_policy] {k}: {v}")
-        logger.info(f"[SRPO_DEBUG][update_policy] ========================================")
-        
+
         return metrics
 
     

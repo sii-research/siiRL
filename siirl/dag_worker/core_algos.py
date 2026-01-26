@@ -314,23 +314,8 @@ def compute_grpo_outcome_advantage(
             shape is (bs, response_length)
     """
     from loguru import logger
-    
+
     scores = token_level_rewards.sum(dim=-1)
-    
-    # ========== SRPO_DEBUG: compute_grpo_outcome_advantage - INPUT ==========
-    logger.info(f"[SRPO_DEBUG][GRPO] ========================================")
-    logger.info(f"[SRPO_DEBUG][GRPO] INPUT:")
-    logger.info(f"[SRPO_DEBUG][GRPO] token_level_rewards shape: {token_level_rewards.shape}")
-    logger.info(f"[SRPO_DEBUG][GRPO] response_mask shape: {response_mask.shape}")
-    logger.info(f"[SRPO_DEBUG][GRPO] index type: {type(index)}, dtype: {index.dtype if hasattr(index, 'dtype') else 'N/A'}")
-    logger.info(f"[SRPO_DEBUG][GRPO] index first 16: {index[:16].tolist() if hasattr(index, 'tolist') else list(index[:16])}")
-    logger.info(f"[SRPO_DEBUG][GRPO] index unique values: {sorted(set(index.tolist() if hasattr(index, 'tolist') else list(index)))[:20]}")
-    logger.info(f"[SRPO_DEBUG][GRPO] index unique count: {len(set(index.tolist() if hasattr(index, 'tolist') else list(index)))}")
-    logger.info(f"[SRPO_DEBUG][GRPO] norm_adv_by_std_in_grpo: {norm_adv_by_std_in_grpo}")
-    logger.info(f"[SRPO_DEBUG][GRPO] scores (sum of rewards) - shape: {scores.shape}")
-    logger.info(f"[SRPO_DEBUG][GRPO] scores first 16: {scores[:16].tolist()}")
-    logger.info(f"[SRPO_DEBUG][GRPO] scores mean: {scores.mean().item():.6f}, std: {scores.std().item():.6f}")
-    logger.info(f"[SRPO_DEBUG][GRPO] scores min: {scores.min().item():.6f}, max: {scores.max().item():.6f}")
 
     id2score = defaultdict(list)
     id2mean = {}
@@ -344,18 +329,7 @@ def compute_grpo_outcome_advantage(
             else:
                 idx_key = index[i]
             id2score[idx_key].append(scores[i])
-        
-        # ========== SRPO_DEBUG: compute_grpo_outcome_advantage - GROUPING ==========
-        logger.info(f"[SRPO_DEBUG][GRPO] GROUPING:")
-        logger.info(f"[SRPO_DEBUG][GRPO] Number of unique groups: {len(id2score)}")
-        group_sizes = [len(v) for v in id2score.values()]
-        logger.info(f"[SRPO_DEBUG][GRPO] Group sizes - mean: {np.mean(group_sizes):.2f}, min: {min(group_sizes)}, max: {max(group_sizes)}")
-        logger.info(f"[SRPO_DEBUG][GRPO] Sample group IDs (first 10): {list(id2score.keys())[:10]}")
-        # Log scores per group for first few groups
-        for gid in list(id2score.keys())[:3]:
-            group_scores = [s.item() for s in id2score[gid]]
-            logger.info(f"[SRPO_DEBUG][GRPO] Group {gid} scores: {group_scores}")
-        
+
         for idx in id2score:
             if len(id2score[idx]) == 1:
                 id2mean[idx] = torch.tensor(0.0)
@@ -366,16 +340,7 @@ def compute_grpo_outcome_advantage(
                 id2std[idx] = torch.std(scores_tensor)
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
-        
-        # ========== SRPO_DEBUG: compute_grpo_outcome_advantage - GROUP STATS ==========
-        all_means = [id2mean[idx].item() for idx in id2mean]
-        all_stds = [id2std[idx].item() for idx in id2std]
-        logger.info(f"[SRPO_DEBUG][GRPO] GROUP STATS:")
-        logger.info(f"[SRPO_DEBUG][GRPO] Group means - mean: {np.mean(all_means):.6f}, std: {np.std(all_means):.6f}")
-        logger.info(f"[SRPO_DEBUG][GRPO] Group means first 10: {all_means[:10]}")
-        logger.info(f"[SRPO_DEBUG][GRPO] Group stds - mean: {np.mean(all_stds):.6f}, min: {min(all_stds):.6f}, max: {max(all_stds):.6f}")
-        logger.info(f"[SRPO_DEBUG][GRPO] Group stds first 10: {all_stds[:10]}")
-        
+
         for i in range(bsz):
             if isinstance(index[i], torch.Tensor):
                 idx_key = index[i].item()
@@ -386,17 +351,6 @@ def compute_grpo_outcome_advantage(
             else:
                 scores[i] = scores[i] - id2mean[idx_key]
         scores = scores.unsqueeze(-1) * response_mask
-
-    # ========== SRPO_DEBUG: compute_grpo_outcome_advantage - OUTPUT ==========
-    logger.info(f"[SRPO_DEBUG][GRPO] OUTPUT:")
-    logger.info(f"[SRPO_DEBUG][GRPO] Final advantages shape: {scores.shape}")
-    logger.info(f"[SRPO_DEBUG][GRPO] Final advantages mean: {scores.mean().item():.6f}, std: {scores.std().item():.6f}")
-    logger.info(f"[SRPO_DEBUG][GRPO] Final advantages min: {scores.min().item():.6f}, max: {scores.max().item():.6f}")
-    logger.info(f"[SRPO_DEBUG][GRPO] Final advantages sum: {scores.sum().item():.6f}")
-    # Per-sample advantage sum
-    per_sample_adv = scores.sum(dim=-1)
-    logger.info(f"[SRPO_DEBUG][GRPO] per_sample_advantage first 16: {per_sample_adv[:16].tolist()}")
-    logger.info(f"[SRPO_DEBUG][GRPO] ========================================")
 
     return scores, scores
 
@@ -843,25 +797,6 @@ def compute_policy_loss_vanilla(
         pg_losses = pg_losses * rollout_is_weights
 
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
-
-    # ========== SRPO_DEBUG: compute_policy_loss_vanilla ==========
-    logger.info(f"[SRPO_DEBUG][policy_loss] ========================================")
-    logger.info(f"[SRPO_DEBUG][policy_loss] INPUT:")
-    logger.info(f"[SRPO_DEBUG][policy_loss] old_log_prob shape: {old_log_prob.shape}, mean: {old_log_prob.mean().item():.6f}")
-    logger.info(f"[SRPO_DEBUG][policy_loss] log_prob shape: {log_prob.shape}, mean: {log_prob.mean().item():.6f}")
-    logger.info(f"[SRPO_DEBUG][policy_loss] advantages shape: {advantages.shape}, mean: {advantages.mean().item():.6f}")
-    logger.info(f"[SRPO_DEBUG][policy_loss] response_mask shape: {response_mask.shape}, sum: {response_mask.sum().item():.2f}")
-    logger.info(f"[SRPO_DEBUG][policy_loss] clip_ratio: {clip_ratio}, clip_ratio_low: {clip_ratio_low}, clip_ratio_high: {clip_ratio_high}")
-    logger.info(f"[SRPO_DEBUG][policy_loss] INTERMEDIATE:")
-    logger.info(f"[SRPO_DEBUG][policy_loss] ratio mean: {ratio.mean().item():.6f}, min: {ratio.min().item():.6f}, max: {ratio.max().item():.6f}")
-    logger.info(f"[SRPO_DEBUG][policy_loss] pg_losses1 mean: {pg_losses1.mean().item():.6f}")
-    logger.info(f"[SRPO_DEBUG][policy_loss] pg_losses2 mean: {pg_losses2.mean().item():.6f}")
-    logger.info(f"[SRPO_DEBUG][policy_loss] OUTPUT:")
-    logger.info(f"[SRPO_DEBUG][policy_loss] pg_loss: {pg_loss.item():.6f}")
-    logger.info(f"[SRPO_DEBUG][policy_loss] pg_clipfrac: {pg_clipfrac.item():.6f}")
-    logger.info(f"[SRPO_DEBUG][policy_loss] ppo_kl: {ppo_kl.item():.6f}")
-    logger.info(f"[SRPO_DEBUG][policy_loss] pg_clipfrac_lower: {pg_clipfrac_lower.item():.6f}")
-    logger.info(f"[SRPO_DEBUG][policy_loss] ========================================")
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 

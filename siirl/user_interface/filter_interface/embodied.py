@@ -230,24 +230,7 @@ def embodied_local_rank_sampling(
         A NodeOutput object containing the processed (and potentially filtered) batch.
     """
     from loguru import logger
-    
-    # ========== SRPO_DEBUG: embodied_local_rank_sampling INPUT ==========
-    logger.info(f"[SRPO_DEBUG][filter] ========================================")
-    logger.info(f"[SRPO_DEBUG][filter] INPUT:")
-    logger.info(f"[SRPO_DEBUG][filter] batch_size: {batch.batch_size[0]}")
-    logger.info(f"[SRPO_DEBUG][filter] batch keys: {list(batch.keys())}")
-    if 'complete' in batch:
-        complete_val = batch['complete']
-        if hasattr(complete_val, 'float'):
-            logger.info(f"[SRPO_DEBUG][filter] complete mean: {complete_val.float().mean().item():.4f}")
-            logger.info(f"[SRPO_DEBUG][filter] complete values: {complete_val.tolist()}")
-    if 'uid' in batch:
-        uid_val = batch['uid']
-        if hasattr(uid_val, 'tolist'):
-            logger.info(f"[SRPO_DEBUG][filter] uid first 16: {uid_val[:16].tolist()}")
-        else:
-            logger.info(f"[SRPO_DEBUG][filter] uid first 16: {list(uid_val[:16])}")
-    
+
     # Step 1: Verify the entire batch to get scores and enrich it with an 'acc' tensor.
     _, reward_metrics, format_metrics, reward_format_metrics = verify(batch)
 
@@ -286,25 +269,5 @@ def embodied_local_rank_sampling(
             if isinstance(tensor, torch.Tensor) and tensor.device.type != 'cpu':
                 processed_batch[key] = tensor.cpu()
                 logger.debug(f"Moved {key} from {tensor.device} to CPU for data rebalance")
-
-    # ========== SRPO_DEBUG: embodied_local_rank_sampling OUTPUT ==========
-    logger.info(f"[SRPO_DEBUG][filter] OUTPUT:")
-    if processed_batch is not None:
-        logger.info(f"[SRPO_DEBUG][filter] processed_batch_size: {processed_batch.batch_size[0]}")
-        if 'acc' in processed_batch:
-            acc_val = processed_batch['acc']
-            if hasattr(acc_val, 'float'):
-                logger.info(f"[SRPO_DEBUG][filter] acc mean: {acc_val.float().mean().item():.4f}")
-                logger.info(f"[SRPO_DEBUG][filter] acc values: {acc_val.tolist()}")
-        if 'uid' in processed_batch:
-            uid_val = processed_batch['uid']
-            if hasattr(uid_val, 'tolist'):
-                logger.info(f"[SRPO_DEBUG][filter] uid first 16: {uid_val[:16].tolist()}")
-            else:
-                logger.info(f"[SRPO_DEBUG][filter] uid first 16: {list(uid_val[:16])}")
-    else:
-        logger.info(f"[SRPO_DEBUG][filter] processed_batch is None!")
-    logger.info(f"[SRPO_DEBUG][filter] sample_metrics: {sample_metrics}")
-    logger.info(f"[SRPO_DEBUG][filter] ========================================")
 
     return NodeOutput(batch=processed_batch, metrics=sample_metrics)

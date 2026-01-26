@@ -321,23 +321,7 @@ class EmbodiedHFRollout(BaseRollout):
             val = prompts['n_samples']
             n_samples = val.item() if hasattr(val, 'item') else int(val)
         global_steps = prompts['global_steps'] if 'global_steps' in prompts.keys() else 0
-        
-        # ========== SRPO_DEBUG: _generate_chunk_rollout - INPUT ==========
-        logger.info(f"[SRPO_DEBUG][rollout] ========================================")
-        logger.info(f"[SRPO_DEBUG][rollout] INPUT:")
-        logger.info(f"[SRPO_DEBUG][rollout] prompts keys: {list(prompts.keys())}")
-        logger.info(f"[SRPO_DEBUG][rollout] prompts batch_size: {prompts.batch_size[0]}")
-        logger.info(f"[SRPO_DEBUG][rollout] is_valid: {is_valid}, n_samples: {n_samples}")
-        logger.info(f"[SRPO_DEBUG][rollout] task_id (before repeat) first 4: {prompts['task_id'][:4].tolist()}")
-        logger.info(f"[SRPO_DEBUG][rollout] trial_id (before repeat) first 4: {prompts['trial_id'][:4].tolist()}")
-        if 'uid' in prompts:
-            uid_val = prompts['uid']
-            if hasattr(uid_val, 'tolist'):
-                logger.info(f"[SRPO_DEBUG][rollout] uid first 8: {uid_val[:8].tolist()}")
-            else:
-                logger.info(f"[SRPO_DEBUG][rollout] uid first 8: {list(uid_val[:8])}")
-        logger.info(f"[SRPO_DEBUG][rollout] ========================================")
-        
+
         # dataloader already did repeat, rollout does NOT repeat
         task_id = prompts['task_id']
         trial_id = prompts['trial_id']
@@ -508,22 +492,7 @@ class EmbodiedHFRollout(BaseRollout):
         output_batch = TensorDict(
             batch,
             batch_size=chunk_size)
-        
-        # ========== SRPO_DEBUG: _generate_chunk_rollout - OUTPUT ==========
-        logger.info(f"[SRPO_DEBUG][rollout] OUTPUT:")
-        logger.info(f"[SRPO_DEBUG][rollout] output_batch_size: {chunk_size}")
-        logger.info(f"[SRPO_DEBUG][rollout] output keys: {list(output_batch.keys())}")
-        logger.info(f"[SRPO_DEBUG][rollout] responses shape: {output_batch['responses'].shape}")
-        logger.info(f"[SRPO_DEBUG][rollout] responses sum: {output_batch['responses'].float().sum().item():.6f}")
-        logger.info(f"[SRPO_DEBUG][rollout] responses[0,:3,:3]: {output_batch['responses'][0,:3,:3].tolist()}")
-        logger.info(f"[SRPO_DEBUG][rollout] complete mean: {output_batch['complete'].float().mean().item():.4f}")
-        logger.info(f"[SRPO_DEBUG][rollout] complete values: {output_batch['complete'].tolist()}")
-        logger.info(f"[SRPO_DEBUG][rollout] finish_step mean: {output_batch['finish_step'].float().mean().item():.4f}")
-        logger.info(f"[SRPO_DEBUG][rollout] finish_step values: {output_batch['finish_step'].tolist()}")
-        logger.info(f"[SRPO_DEBUG][rollout] vjepa_embedding shape: {output_batch['vjepa_embedding'].shape}")
-        logger.info(f"[SRPO_DEBUG][rollout] vjepa_embedding mean: {output_batch['vjepa_embedding'].mean().item():.6f}")
-        logger.info(f"[SRPO_DEBUG][rollout] ========================================")
-        
+
         return output_batch
 
     @torch.no_grad()
