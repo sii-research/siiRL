@@ -116,7 +116,6 @@ class SampleManager(BaseModel):
 def preprocess_dataloader(data:Dict, n:int = 1):
     from loguru import logger
     # Manually repeat all numpy arrays and torch tensors
-    # This ensures consistent handling of all fields
     batch_size = None
     for key, value in data.items():
         if isinstance(value, np.ndarray):
@@ -134,7 +133,6 @@ def preprocess_dataloader(data:Dict, n:int = 1):
             
     # Create UUID indices for GRPO grouping
     # Each prompt gets a unique UUID, then repeated n times
-    # This ensures globally unique identifiers across all batches
     uid = np.array([str(uuid.uuid4()) for _ in range(batch_size)])
     data['uid'] = np.repeat(uid, n, axis=0)
     # Now all fields have batch_size * n

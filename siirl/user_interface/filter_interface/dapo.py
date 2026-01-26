@@ -83,7 +83,6 @@ def dynamic_sampling(config: SiiRLArguments, batch: TensorDict, **kwargs: Any) -
     }
 
     # Find the indices of all trajectories that belong to the kept groups.
-    # This ensures that all trajectories for a kept UID are preserved together.
     if not kept_prompt_uids:
         kept_traj_indices = []
     else:

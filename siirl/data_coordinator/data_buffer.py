@@ -242,21 +242,24 @@ class DataCoordinator:
     def _log_dispatch_stats(self, dispatched_samples: int):
         """Log statistics when dispatching a batch and reset counters."""
         wait_time = time.time() - self._stats_accumulation_start if self._stats_accumulation_start else 0
-        
-        # Calculate average samples per batch (useful for understanding filter rate)
+
         avg_samples_per_batch = (
-            self._stats_samples_received / self._stats_batches_received 
+            self._stats_samples_received / self._stats_batches_received
             if self._stats_batches_received > 0 else 0
         )
-        
+
+        total_received = self._stats_samples_received
+        remaining_in_queue = total_received - dispatched_samples
+
         loguru.logger.info(
-            f"[DataCoordinator] Dispatching {dispatched_samples} samples | "
-            f"Accumulated from {self._stats_batches_received} batches "
-            f"(avg {avg_samples_per_batch:.1f} samples/batch) | "
-            f"Wait time: {wait_time:.1f}s"
+            f"[DataCoordinator DISPATCH] "
+            f"Accumulated: {total_received} samples from {self._stats_batches_received} batches | "
+            f"Dispatching: {dispatched_samples} samples | "
+            f"Remaining in queue: {remaining_in_queue} | "
+            f"Avg per batch: {avg_samples_per_batch:.1f} | "
+            f"Wait: {wait_time:.1f}s"
         )
-        
-        # Reset statistics for next accumulation cycle
+
         self._stats_batches_received = 0
         self._stats_samples_received = 0
         self._stats_accumulation_start = None

@@ -1203,16 +1203,14 @@ class DAGWorker(Worker):
                     except RuntimeError:
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
-                    
-                    # Get the current worker's node ID to pass to the DataCoordinator
-                    # This is necessary because when the DataCoordinator receives a remote call,
-                    # ray.get_runtime_context().get_node_id() returns the DataCoordinator's node_id,
-                    # not the caller's node_id
+
                     caller_node_id = ray.get_runtime_context().get_node_id()
-                    
+
                     put_future = self.data_coordinator.put_batch.remote(sample_infos, sample_refs, caller_node_id)
                     loop.run_until_complete(put_future)
-                    logger.info(f"Rank {self._rank}: ✅ Successfully PUT {len(samples)} samples to DataCoordinator for key '{key}' (source_dp={source_dp_size}, dest_dp={dest_dp_size})")
+
+                    if self._rank == 0:
+                        logger.info(f"Rank 0: PUT {len(samples)} samples to DataCoordinator for '{key}'")
 
         except Exception as e:
             logger.error(f"Rank {self._rank}: Unexpected error in put_data_to_buffers for key '{key}': {e}", exc_info=True)
@@ -1285,27 +1283,21 @@ class DAGWorker(Worker):
             or embodied_sampling.filter_accuracy
             or embodied_sampling.filter_truncated
         )
-        
+
         if not sample_refs:
             if is_dynamic_sampling:
-                # Dynamic sampling scenario - waiting for data accumulation is expected
                 logger.debug(f"Rank {self._rank}: Waiting for data accumulation for key '{key}' (need {adjusted_batch_size} samples)")
             else:
-                # GRPO scenario - empty result is unexpected, warn user
                 logger.warning(f"Rank {self._rank}: DataCoordinator returned empty list for key '{key}' (adjusted_batch_size={adjusted_batch_size})")
             return None
 
-        # Log successful retrieval - use INFO for GRPO (less frequent), DEBUG for dynamic sampling (more frequent)
-        if is_dynamic_sampling:
-            logger.debug(f"Rank {self._rank}: Retrieved {len(sample_refs)} samples for key '{key}'")
-        else:
-            logger.info(f"Rank {self._rank}: Retrieved {len(sample_refs)} samples for key '{key}'")
+        if self._rank == 0:
+            logger.info(f"Rank 0: GET {len(sample_refs)} samples from DataCoordinator for '{key}'")
 
         with timer(self.enable_perf, f"ray_get_samples_{key}", timing_raw):
             samples = ray.get(sample_refs)
 
         with timer(self.enable_perf, f"collate_samples_{key}", timing_raw):
-            # Collate the list of Sample objects back into a single TensorDict
             tensordict = Samples2Dict(samples)
 
         return tensordict
