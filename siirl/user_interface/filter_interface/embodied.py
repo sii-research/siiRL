@@ -209,7 +209,6 @@ def embodied_local_rank_sampling(
     Returns:
         A NodeOutput object containing the processed (and potentially filtered) batch.
     """
-    from loguru import logger
     import os
 
     original_batch_size = batch.batch_size[0] if hasattr(batch, 'batch_size') else len(batch)

@@ -310,7 +310,6 @@ class EmbodiedHFRollout(BaseRollout):
         return batchdata
 
     def _generate_chunk_rollout(self, prompts):
-        from loguru import logger
         generate_tic = time.time()
         self.model.eval()
         
@@ -444,7 +443,7 @@ class EmbodiedHFRollout(BaseRollout):
             
             batch["complete"] = torch.tensor(batch["complete"], dtype=torch.bool, device=batch['responses'].device)
             batch["finish_step"] = torch.tensor(batch["finish_step"], dtype=torch.int64, device=batch['responses'].device)
-            # 构建 batch
+            # Build batch
             names = batch["task_file_name"]
             max_len = 50 # max(len(n) for n in names)
             padded = [n.ljust(max_len, '\0') for n in names]

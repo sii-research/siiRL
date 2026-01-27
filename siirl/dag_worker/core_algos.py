@@ -313,8 +313,6 @@ def compute_grpo_outcome_advantage(
         Returns: `(torch.Tensor)`
             shape is (bs, response_length)
     """
-    from loguru import logger
-
     scores = token_level_rewards.sum(dim=-1)
 
     id2score = defaultdict(list)
@@ -583,8 +581,8 @@ def compute_policy_loss_cpgd(
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
-    config: Optional[ActorArguments] = None,  # 使用你的配置类
-    rollout_is_weights: torch.Tensor | None = None,  # 保持签名一致，但此函数不用
+    config: Optional[ActorArguments] = None,  # Use your config class
+    rollout_is_weights: torch.Tensor | None = None,  # Keep signature consistent, but unused in this function
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the CPGD policy objective by directly clipping log_prob.
@@ -763,8 +761,6 @@ def compute_policy_loss_vanilla(
         + f" but get the value: {clip_ratio_c}."
     )
 
-    from loguru import logger
-    
     negative_approx_kl = log_prob - old_log_prob
     # Clamp negative_approx_kl for stability
     negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
