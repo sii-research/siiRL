@@ -28,7 +28,6 @@ from siirl.execution.dag import TaskGraph
 from siirl.execution.dag.builtin_pipelines import grpo_pipeline, ppo_pipeline, dapo_pipeline, embodied_srpo_pipeline
 from siirl.data_coordinator.data_buffer import init_data_coordinator
 from siirl.execution.metric_worker.metric_worker import MetricWorker
-from siirl.data_coordinator.dataloader.embodied_preprocess import prepare_libero_train_valid_datasets
 
 
 # --- Constants ---
@@ -56,6 +55,9 @@ def _maybe_prepare_embodied_manifest(siirl_args: SiiRLArguments) -> None:
     )
     if not is_embodied_model:
         return
+
+    # Lazy import to avoid requiring libero for non-embodied workflows
+    from siirl.data_coordinator.dataloader.embodied_preprocess import prepare_libero_train_valid_datasets
 
     embodied = siirl_args.actor_rollout_ref.embodied
     if embodied is None:
