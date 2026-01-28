@@ -21,7 +21,12 @@ from ray.actor import ActorHandle
 from collections import defaultdict
 from typing import Dict, List, Callable, Any, Optional, Tuple
 from loguru import logger
-from tensordict import TensorDict, NonTensorData
+from tensordict import TensorDict
+# Handle different tensordict versions - NonTensorData location varies
+try:
+    from tensordict import NonTensorData
+except ImportError:
+    from tensordict.tensorclass import NonTensorData
 from torch.distributed import ProcessGroup
 
 from siirl.data_coordinator import preprocess_dataloader
@@ -485,8 +490,8 @@ class Validator:
         # Set meta_info for embodied validation
     
         batch["eos_token_id"] = NonTensorData(self.validate_tokenizer.eos_token_id)
-        batch["pad_token_id"] = NonTensorData(self.validate_tokenizer.eos_token_id)
-        batch["recompute_log_prob"] = NonTensorData(self.validate_tokenizer.eos_token_id)
+        batch["pad_token_id"] = NonTensorData(self.validate_tokenizer.pad_token_id)
+        batch["recompute_log_prob"] = NonTensorData(False)
         batch["validate"] = NonTensorData(True)
         batch["do_sample"] = NonTensorData(False)
         batch["global_steps"] = NonTensorData(global_step)

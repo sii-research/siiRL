@@ -256,7 +256,7 @@ def embodied_srpo_pipeline() -> TaskGraph:
         node_type=NodeType.MODEL_INFERENCE,
         node_role=NodeRole.ROLLOUT
     ).add_node(
-        "dynaminc_sampling",
+        "embodied_sampling",
         func="siirl.user_interface.filter_interface.embodied.embodied_local_rank_sampling",
         deps=["rollout_actor"], 
         node_type=NodeType.COMPUTE,
@@ -264,7 +264,7 @@ def embodied_srpo_pipeline() -> TaskGraph:
     ).add_node(
         "compute_reward",
         func="siirl.dag_worker.dagworker:DAGWorker.compute_reward",
-        deps=["dynaminc_sampling"],
+        deps=["embodied_sampling"],
         node_type=NodeType.COMPUTE,
         node_role=NodeRole.REWARD
     ).add_node(
@@ -296,4 +296,4 @@ def embodied_srpo_pipeline() -> TaskGraph:
 
     return pipeline.build()
 
-__all__ = ["grpo_pipeline", "ppo_pipeline", "dapo_pipeline"]
+__all__ = ["grpo_pipeline", "ppo_pipeline", "dapo_pipeline", "embodied_srpo_pipeline"]

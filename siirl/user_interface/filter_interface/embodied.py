@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from collections import Counter
 from typing import Any, Dict, List, Tuple
 
@@ -87,77 +88,56 @@ def _filter_batch(batch: TensorDict, n_samples: int, config: SiiRLArguments) -> 
     """
     device = batch["responses"].device
     num_prompts = len(batch) // n_samples
+    rank = int(os.environ.get("RANK", "0"))
 
-    # Access embodied sampling config (similar to DAPO's filter_groups)
     embodied_sampling = config.algorithm.embodied_sampling
     filter_accuracy = embodied_sampling.filter_accuracy
-    
-    # --- 1. Accuracy Filtering ---
+
     if filter_accuracy:
-        # Reshape flat accuracy tensor into (num_prompts, n_samples)
         acc_matrix = batch["acc"].reshape(num_prompts, n_samples)
-        # Calculate mean accuracy for each prompt
         prompt_mean_acc = acc_matrix.mean(dim=-1)
 
-        # Log accuracy distribution when performance monitoring is enabled
         if config.dag.enable_perf:
             counts = Counter(prompt_mean_acc.tolist())
-            num_prompts_debug = len(prompt_mean_acc)
-
-            log_lines = [f"Accuracy Distribution ({num_prompts_debug} prompts):"]
+            log_lines = [f"Accuracy Distribution ({len(prompt_mean_acc)} prompts):"]
             for score, count in sorted(counts.items()):
                 log_lines.append(f"  - Score {score:.2f}: {count} prompts")
-
             logger.info("\n".join(log_lines))
 
-        # Create a boolean mask for prompts within the desired accuracy bounds
         accuracy_lower_bound = embodied_sampling.accuracy_lower_bound
         accuracy_upper_bound = embodied_sampling.accuracy_upper_bound
         acc_mask = (prompt_mean_acc >= accuracy_lower_bound) & (prompt_mean_acc <= accuracy_upper_bound)
     else:
-        # If disabled, create a mask that keeps all prompts
         acc_mask = torch.ones(num_prompts, dtype=torch.bool, device=device)
 
-    # --- 2. Truncation Filtering ---
     filter_truncated = embodied_sampling.filter_truncated
     if filter_truncated:
-        # For Embodied AI: check finish_step instead of response length
         if "finish_step" in batch:
             finish_steps = batch["finish_step"].reshape(num_prompts, n_samples)
-            # Reuse env.max_steps directly (no need to duplicate in embodied_sampling)
             max_steps = config.actor_rollout_ref.embodied.env.max_steps
-            
-            # A prompt is considered truncated if *any* of its samples reached max steps
             has_truncated = (finish_steps >= max_steps).any(dim=-1)
-            
-            # Log truncation statistics for monitoring
-            truncated_count = int(has_truncated.sum().item())
-            non_truncated_count = len(has_truncated) - truncated_count
-            logger.info(
-                f"Truncation Distribution ({len(has_truncated)} prompts):\n"
-                f"  - Truncated    : {truncated_count}\n"
-                f"  - Non-truncated: {non_truncated_count}"
-            )
-            
-            # Create a mask to keep only the non-truncated prompts
+
+            if rank == 0:
+                truncated = int(has_truncated.sum().item())
+                kept = len(has_truncated) - truncated
+                logger.info(f"Truncation: {truncated} truncated, {kept} kept (out of {len(has_truncated)} prompts)")
+
             trunc_mask = ~has_truncated
         else:
             logger.warning("No 'finish_step' field found in batch. Skipping truncation filtering.")
             trunc_mask = torch.ones(num_prompts, dtype=torch.bool, device=device)
     else:
-        # If disabled, create a mask that keeps all prompts
         trunc_mask = torch.ones(num_prompts, dtype=torch.bool, device=device)
 
-    # --- 3. Combine Masks and Apply Filter ---
-    # A prompt is kept only if it passes both accuracy and truncation checks
     combined_mask = acc_mask & trunc_mask
 
-    # Expand the prompt-level mask to the sample-level to match the batch dimension
-    final_mask = combined_mask.repeat_interleave(n_samples)
+    if rank == 0:
+        kept = combined_mask.sum().item()
+        filtered = num_prompts - kept
+        logger.info(f"Filter: {num_prompts} prompts → {kept} kept, {filtered} filtered")
 
-    # Use select_idxs instead of slice for boolean mask filtering
+    final_mask = combined_mask.repeat_interleave(n_samples)
     filtered_batch = select_idxs(batch, final_mask)
-    logger.info(f"Filtered batch size: {len(filtered_batch)} (from original: {len(batch)})")
 
     return filtered_batch
 
@@ -185,16 +165,16 @@ def _compute_embodied_verification_metrics(
         
         # Prepare batch dict for metrics computation
         batch_dict = {
-            'responses': batch.batch.get('responses'),
-            'complete': batch.batch.get('complete'),
-            'finish_step': batch.batch.get('finish_step'),
+            'responses': batch.get('responses'),
+            'complete': batch.get('complete'),
+            'finish_step': batch.get('finish_step'),
         }
         
         # Add optional fields
-        if 'pixel_values' in batch.batch:
-            batch_dict['pixel_values'] = batch.batch['pixel_values']
-        if 'acc' in batch.batch:
-            batch_dict['acc'] = batch.batch['acc']
+        if 'pixel_values' in batch:
+            batch_dict['pixel_values'] = batch['pixel_values']
+        if 'acc' in batch:
+            batch_dict['acc'] = batch['acc']
         
         # Compute rollout metrics
         rollout_metrics = compute_rollout_metrics(batch_dict, config)
@@ -229,43 +209,44 @@ def embodied_local_rank_sampling(
     Returns:
         A NodeOutput object containing the processed (and potentially filtered) batch.
     """
-    # Step 1: Verify the entire batch to get scores and enrich it with an 'acc' tensor.
+    import os
+
+    original_batch_size = batch.batch_size[0] if hasattr(batch, 'batch_size') else len(batch)
+    rank = int(os.environ.get("RANK", "0"))
+
     _, reward_metrics, format_metrics, reward_format_metrics = verify(batch)
 
-    # Step 2: Build metrics dictionary with only useful metrics
     sample_metrics = {}
-    
-    # Step 3: Compute useful Embodied AI-specific verification metrics (if enabled)
-    enable_embodied_metrics = True  # Default
+
+    enable_embodied_metrics = True
     if hasattr(config, 'actor_rollout_ref') and hasattr(config.actor_rollout_ref, 'embodied'):
         if config.actor_rollout_ref.embodied is not None:
             if hasattr(config.actor_rollout_ref.embodied, 'enable_vla_metrics'):
                 enable_embodied_metrics = config.actor_rollout_ref.embodied.enable_vla_metrics
-    
+
     if enable_embodied_metrics:
-        embodied_verification_metrics = _compute_embodied_verification_metrics(
-            batch=batch,
-            config=config,
-        )
+        embodied_verification_metrics = _compute_embodied_verification_metrics(batch, config)
         sample_metrics.update(embodied_verification_metrics)
 
-    # Step 4: Conditionally filter the batch.
-    # Use algorithm.embodied_sampling config (aligned with DAPO's filter_groups approach)
     embodied_sampling = config.algorithm.embodied_sampling
     if embodied_sampling.filter_accuracy or embodied_sampling.filter_truncated:
         n_samples = config.actor_rollout_ref.rollout.n
         processed_batch = _filter_batch(batch, n_samples, config)
-    else:
-        # If filtering is disabled, the processed batch is the original batch.
-        processed_batch = batch
 
-    # Step 5: Ensure all tensors are on CPU before data rebalance
-    # This fixes device mismatch issues where some tensors (task_id, trial_id) are on CUDA
-    # while others (responses, etc.) are on CPU
+        if rank == 0:
+            filtered_size = processed_batch.batch_size[0] if hasattr(processed_batch, 'batch_size') else len(processed_batch)
+            filtered_count = original_batch_size - filtered_size
+            success_rate = reward_metrics.get('all', 0.0)
+            logger.info(f"[SAMPLING] {original_batch_size} samples → filtered {filtered_count} → {filtered_size} remaining | Success: {success_rate:.1%}")
+    else:
+        processed_batch = batch
+        if rank == 0:
+            success_rate = reward_metrics.get('all', 0.0)
+            logger.info(f"[SAMPLING] {original_batch_size} samples | Success: {success_rate:.1%} (no filter)")
+
     if processed_batch is not None:
         for key, tensor in processed_batch.items():
             if isinstance(tensor, torch.Tensor) and tensor.device.type != 'cpu':
                 processed_batch[key] = tensor.cpu()
-                logger.debug(f"Moved {key} from {tensor.device} to CPU for data rebalance")
 
     return NodeOutput(batch=processed_batch, metrics=sample_metrics)

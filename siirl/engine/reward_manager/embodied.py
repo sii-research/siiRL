@@ -46,14 +46,14 @@ class EmbodiedRewardManager:
             tokenizer: The tokenizer, if needed for any text processing.
             num_examine: The number of reward examples to log for debugging.
             compute_score: The function to call for calculating reward scores.
-                           Defaults to the optimized `compute_embodied_reward`.
+                           Defaults to the compute_embodied_reward.
             reward_fn_key: The key to identify the data source.
             **reward_kwargs: A dictionary for additional parameters like
                              `action_token_len` and `reward_coef`.
         """
         self.tokenizer = tokenizer
         self.num_examine = num_examine
-        
+
         # Import default compute_score if not provided
         if compute_score is None:
             try:
@@ -67,7 +67,7 @@ class EmbodiedRewardManager:
                 self.compute_score = None
         else:
             self.compute_score = compute_score
-            
+
         self.reward_fn_key = reward_fn_key
         self.rank = int(os.environ.get("RANK", "0"))
         self.print_count = 0
@@ -146,7 +146,6 @@ class EmbodiedRewardManager:
 
         reward_tensor_dict["all"] = final_reward_tensor
         reward_metrics["reward_all"] = final_reward_tensor.sum(dim=-1).mean().item()
-        
 
         # Return format based on return_dict flag
         if return_dict:

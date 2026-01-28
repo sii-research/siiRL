@@ -66,9 +66,17 @@ def dynamic_sampling(config: SiiRLArguments, batch: TensorDict, **kwargs: Any) -
     uids = batch["uid"]
     metric_values = batch[metric_name]
 
+    def _to_uid_key(uid):
+        """Convert uid to a hashable key (handles tensor, np.str_, and regular values)."""
+        if hasattr(uid, 'item'):
+            return uid.item()  # tensor -> Python scalar
+        elif hasattr(uid, 'tolist'):
+            return uid.tolist()  # numpy array/scalar -> Python value
+        else:
+            return str(uid) if not isinstance(uid, (int, str)) else uid
+
     for i in range(len(uids)):
-        # Convert tensor uid to Python int for use as dict key
-        uid_key = int(uids[i]) if hasattr(uids[i], 'item') else uids[i]
+        uid_key = _to_uid_key(uids[i])
         prompt_uid_to_metric_vals[uid_key].append(metric_values[i])
 
     # Calculate the standard deviation of the metric for each group of trajectories.
@@ -83,13 +91,12 @@ def dynamic_sampling(config: SiiRLArguments, batch: TensorDict, **kwargs: Any) -
     }
 
     # Find the indices of all trajectories that belong to the kept groups.
-    # This ensures that all trajectories for a kept UID are preserved together.
     if not kept_prompt_uids:
         kept_traj_indices = []
     else:
         kept_traj_indices = [
             idx for idx in range(len(uids))
-            if (int(uids[idx]) if hasattr(uids[idx], 'item') else uids[idx]) in kept_prompt_uids
+            if _to_uid_key(uids[idx]) in kept_prompt_uids
         ]
 
     # Filter the original batch by slicing it with the collected indices.

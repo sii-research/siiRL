@@ -6,7 +6,11 @@ import uuid
 from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional, Union, Set
 from tensordict import TensorDict
-from tensordict.tensorclass import NonTensorData
+# Handle different tensordict versions - NonTensorData location varies
+try:
+    from tensordict import NonTensorData
+except ImportError:
+    from tensordict.tensorclass import NonTensorData
 from typing import get_args, get_origin
 
 
@@ -43,6 +47,9 @@ class Sample(BaseModel):
     # used for vla
     pixel_values: Optional[np.ndarray] = Field(default=None)
     finish_step: Optional[np.ndarray] = Field(default=None)
+    complete: Optional[np.ndarray] = Field(default=None)
+    task_file_name: Optional[np.ndarray] = Field(default=None)
+    vjepa_embedding: Optional[np.ndarray] = Field(default=None)
     
     # from  non_tensor_batch of Dataproto
     raw_prompt: str = Field(default="")
@@ -107,8 +114,8 @@ class SampleManager(BaseModel):
 
 
 def preprocess_dataloader(data:Dict, n:int = 1):
+    from loguru import logger
     # Manually repeat all numpy arrays and torch tensors
-    # This ensures consistent handling of all fields
     batch_size = None
     for key, value in data.items():
         if isinstance(value, np.ndarray):
@@ -124,15 +131,14 @@ def preprocess_dataloader(data:Dict, n:int = 1):
             # Convert list to numpy array and repeat
             data[key] = np.repeat(np.array(value), n, axis=0)
             
-    # Create integer indices for GRPO grouping
-    # Each prompt gets a unique index (0, 1, 2, ..., batch_size-1)
-    # This will be repeated to [0,0,0,...,1,1,1,...,2,2,2,...] after repeat
-    uid = np.arange(batch_size, dtype=np.int64)
+    # Create UUID indices for GRPO grouping
+    # Each prompt gets a unique UUID, then repeated n times
+    uid = np.array([str(uuid.uuid4()) for _ in range(batch_size)])
     data['uid'] = np.repeat(uid, n, axis=0)
     # Now all fields have batch_size * n
     # Create TensorDict with the expanded batch size
     tensor_dict = TensorDict(data, batch_size=batch_size * n)
-    
+
     return tensor_dict
 
 def Dict2Samples(data:TensorDict)-> List[SampleManager]:
@@ -159,6 +165,9 @@ def Dict2Samples(data:TensorDict)-> List[SampleManager]:
         local_sample.extra_info = data['extra_info'][index] if 'extra_info' in data else None
         local_sample.pixel_values = data['pixel_values'][index].numpy() if 'pixel_values' in data else None
         local_sample.finish_step = data['finish_step'][index].numpy() if 'finish_step' in data else None
+        local_sample.complete = data['complete'][index].numpy() if 'complete' in data else None
+        local_sample.task_file_name = data['task_file_name'][index].numpy() if 'task_file_name' in data else None
+        local_sample.vjepa_embedding = data['vjepa_embedding'][index].numpy() if 'vjepa_embedding' in data else None
         if 'multi_modal_inputs' in data:
             local_sample.multi_modal_inputs = data["multi_modal_inputs"][index]
         local_sample.uid = data['uid'][index]

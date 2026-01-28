@@ -145,7 +145,6 @@ TRAINING_CMD=(
     actor_rollout_ref.actor.ppo_mini_batch_size=\$PPO_MINI_BATCH_SIZE
     actor_rollout_ref.actor.ppo_epochs=\$PPO_EPOCHS
     actor_rollout_ref.actor.grad_clip=\$GRAD_CLIP
-    q
     actor_rollout_ref.actor.clip_ratio_high=\$CLIP_RATIO_HIGH
     actor_rollout_ref.actor.clip_ratio_low=\$CLIP_RATIO_LOW
     actor_rollout_ref.actor.entropy_coeff=\$ENTROPY_COEFF

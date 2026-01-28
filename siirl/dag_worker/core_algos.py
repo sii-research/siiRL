@@ -322,9 +322,12 @@ def compute_grpo_outcome_advantage(
     with torch.no_grad():
         bsz = scores.shape[0]
         for i in range(bsz):
-            # Convert tensor index to Python int for use as dict key
-            idx_key = int(index[i].item()) if isinstance(index[i], torch.Tensor) else int(index[i])
+            if isinstance(index[i], torch.Tensor):
+                idx_key = index[i].item()
+            else:
+                idx_key = index[i]
             id2score[idx_key].append(scores[i])
+
         for idx in id2score:
             if len(id2score[idx]) == 1:
                 id2mean[idx] = torch.tensor(0.0)
@@ -335,15 +338,17 @@ def compute_grpo_outcome_advantage(
                 id2std[idx] = torch.std(scores_tensor)
             else:
                 raise ValueError(f"no score in prompt index: {idx}")
+
         for i in range(bsz):
-            # Convert tensor index to Python int for dict lookup
-            idx_key = int(index[i].item()) if isinstance(index[i], torch.Tensor) else int(index[i])
+            if isinstance(index[i], torch.Tensor):
+                idx_key = index[i].item()
+            else:
+                idx_key = index[i]
             if norm_adv_by_std_in_grpo:
                 scores[i] = (scores[i] - id2mean[idx_key]) / (id2std[idx_key] + epsilon)
             else:
                 scores[i] = scores[i] - id2mean[idx_key]
         scores = scores.unsqueeze(-1) * response_mask
-
 
     return scores, scores
 
@@ -576,8 +581,8 @@ def compute_policy_loss_cpgd(
     advantages: torch.Tensor,
     response_mask: torch.Tensor,
     loss_agg_mode: str = "token-mean",
-    config: Optional[ActorArguments] = None,  # 使用你的配置类
-    rollout_is_weights: torch.Tensor | None = None,  # 保持签名一致，但此函数不用
+    config: Optional[ActorArguments] = None,  # Use your config class
+    rollout_is_weights: torch.Tensor | None = None,  # Keep signature consistent, but unused in this function
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the CPGD policy objective by directly clipping log_prob.

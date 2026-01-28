@@ -107,6 +107,6 @@ def async_server_class(
     if rollout_backend_module is None or rollout_backend_class is None:
         raise ValueError("rollout_backend_module and rollout_backend_class must be both provided for customization")
 
-    from siirl.utils.import_utils import load_extern_type
+    from siirl.utils.extras.import_utils import load_extern_type
 
     return load_extern_type(rollout_backend_module, rollout_backend_class)

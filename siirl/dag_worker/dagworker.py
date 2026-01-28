@@ -25,7 +25,11 @@ from loguru import logger
 from typing import Any, Dict, List, Optional, Set, Tuple, Type, Callable
 from torch.distributed import ProcessGroup
 from tensordict import TensorDict
-from tensordict.tensorclass import NonTensorData
+# Handle different tensordict versions - NonTensorData location varies
+try:
+    from tensordict import NonTensorData
+except ImportError:
+    from tensordict.tensorclass import NonTensorData
 import time
 from siirl.execution.metric_worker.metric_worker import MetricClient
 from siirl.models.loader import TokenizerModule, load_tokenizer
@@ -272,7 +276,12 @@ class DAGWorker(Worker):
         with timer(self.enable_perf, "step", timing_raw):
             # --- 1. Data Loading ---
             with timer(self.enable_perf, "get_data_from_dataloader", timing_raw):
-                batch = preprocess_dataloader(self.dataloader.run(epoch=epoch, is_validation_step=False), self.config.actor_rollout_ref.rollout.n)
+                is_embodied = self.config.actor_rollout_ref.model.model_type == "embodied"
+                repeat_n = self.config.actor_rollout_ref.rollout.n
+                batch = preprocess_dataloader(
+                    self.dataloader.run(epoch=epoch, is_validation_step=False),
+                    repeat_n
+                )
             node_queue = self.taskgraph.get_entry_nodes()
             if not node_queue:
                 logger.error("Taskgraph has no entry nodes. Cannot start execution.")
@@ -296,9 +305,16 @@ class DAGWorker(Worker):
                         with timer(self.enable_perf, "get_data_from_buffer", timing_raw):
                             batch = self.get_data_from_buffers(key=cur_node.node_id, cur_dp_size=cur_dp_size, cur_dp_rank=cur_dp_rank, timing_raw=timing_raw)
                             if batch is None:
-                                if self.config.algorithm.filter_groups.enable:
+                                embodied_sampling = self.config.algorithm.embodied_sampling
+                                allow_insufficient = (
+                                    self.config.algorithm.filter_groups.enable
+                                    or embodied_sampling.filter_accuracy
+                                    or embodied_sampling.filter_truncated
+                                )
+                                if allow_insufficient:
+                                    # Dynamic sampling scenario - waiting for data is expected behavior
                                     if cur_node.node_role == NodeRole.ACTOR:
-                                        logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
+                                        logger.debug(f"Rank {self._rank}: Waiting for sufficient data for node {cur_node.node_id}. Skipping this step.")
                                         return None 
                                 else:
                                     logger.error(f"Rank {self._rank}: Failed to get data for node {cur_node.node_id}. Skipping step.")
@@ -319,6 +335,13 @@ class DAGWorker(Worker):
                             node_kwargs["cur_tp_rank"] = cur_tp_rank
                             if cur_node.node_role == NodeRole.REWARD:
                                 node_kwargs["tp_size"] = cur_tp_size
+                                # Add parallelism info to batch for distributed reward computation
+                                batch["dp_size"] = NonTensorData(cur_dp_size)
+                                batch["dp_rank"] = NonTensorData(cur_dp_rank)
+                                batch["tp_rank"] = NonTensorData(cur_tp_rank)
+                                batch["tp_size"] = NonTensorData(cur_tp_size)
+                                batch["pp_rank"] = NonTensorData(cur_pp_rank)
+                                batch["pp_size"] = NonTensorData(cur_pp_size)
                             elif cur_node.node_role == NodeRole.ADVANTAGE:
                                 node_kwargs["cur_node"] = cur_node
 
@@ -341,11 +364,17 @@ class DAGWorker(Worker):
                     
                     # Check if node returned empty batch (e.g., DAPO insufficient samples)
                     # This triggers re-rollout to collect more data
-                    if  node_output.batch is None or (node_output.batch is not None and len(node_output.batch) == 0):
+                    if node_output.batch is None or (node_output.batch is not None and len(node_output.batch) == 0):
                         logger.warning(
                             f"Rank {self._rank}: Node '{cur_node.node_id}' returned empty batch. "
                         )
-                        if not self.config.algorithm.filter_groups.enable:
+                        embodied_sampling = self.config.algorithm.embodied_sampling
+                        allow_insufficient = (
+                            self.config.algorithm.filter_groups.enable
+                            or embodied_sampling.filter_accuracy
+                            or embodied_sampling.filter_truncated
+                        )
+                        if not allow_insufficient:
                             logger.warning(
                                 f"Rank {self._rank}: Node '{cur_node.node_id}' returned empty batch. "
                                 f"Aborting current step to trigger re-rollout. {node_output.batch is not None and len(node_output.batch) != 0}"
@@ -363,7 +392,7 @@ class DAGWorker(Worker):
 
                     # --- 5. Process Output & Get next node ---
                     with timer(self.enable_perf, "graph_output_handling", timing_raw):
-                        if node_output.metrics and cur_tp_rank == 0 and cur_pp_rank == 0:
+                        if node_output.metrics is not None and len(node_output.metrics) > 0 and cur_tp_rank == 0 and cur_pp_rank == 0:
                             self.metric_worker.submit_metric(node_output.metrics, cur_dp_size)
                         if next_nodes := self.taskgraph.get_downstream_nodes(cur_node.node_id):
                             if node_output.batch is not None and len(node_output.batch) != 0:
@@ -374,12 +403,30 @@ class DAGWorker(Worker):
                                 is_current_last_pp_tp_rank0 = (cur_pp_rank == cur_pp_size - 1 and cur_tp_rank == 0)
                                 if whether_put_data(self._rank, is_current_last_pp_tp_rank0, next_dp_size, cur_dp_size, cur_node, next_node):
                                     with timer(self.enable_perf, "put_data_to_buffer", timing_raw):
-                                        # if self._multi_agent and next_node.node_role == NodeRole.ADVANTAGE:
-                                        #     self.multi_agent_put_log(key=next_node.node_id, data=node_output.batch, next_dp_size = next_dp_size, agent_group = next_node.agent_group, timing_raw = timing_raw)
-                                        # else:
-                                        # have filter, must use databuffer to rebalance
-                                        enforce_buffer = (self.config.algorithm.filter_groups.enable) and (cur_node.node_type == NodeType.COMPUTE) and (next_node.node_type == NodeType.MODEL_TRAIN) 
-                                        self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch,  source_dp_size=cur_dp_size, dest_dp_size=next_dp_size, enforce_buffer = enforce_buffer, timing_raw=timing_raw)
+                                        # Determine if we need to force data through DataCoordinator
+                                        # This is needed when filter causes data imbalance and requires rebalancing
+                                        embodied_sampling = self.config.algorithm.embodied_sampling
+                                        
+                                        # Check if any filtering is enabled (causes data imbalance)
+                                        has_filtering = (
+                                            self.config.algorithm.filter_groups.enable
+                                            or embodied_sampling.filter_accuracy
+                                            or embodied_sampling.filter_truncated
+                                        )
+                                        
+                                        # Check if current node is embodied filter node
+                                        is_embodied_filter_node = (cur_node.node_id == "embodied_sampling")
+                                        
+                                        # Check if this is a COMPUTE -> consumer transition that needs rebalancing
+                                        is_compute_output = (cur_node.node_type == NodeType.COMPUTE)
+                                        needs_rebalance = (
+                                            next_node.node_type == NodeType.MODEL_TRAIN
+                                            or (is_embodied_filter_node and next_node.node_role == NodeRole.REWARD)
+                                        )
+                                        
+                                        enforce_buffer = has_filtering and is_compute_output and needs_rebalance
+                                        
+                                        self.put_data_to_buffers(key=next_node.node_id, data=node_output.batch, source_dp_size=cur_dp_size, dest_dp_size=next_dp_size, enforce_buffer=enforce_buffer, timing_raw=timing_raw)
                         # elif self._multi_agent:
                         #     # last_node add prefix for metrics
                         #     node_output.batch = add_prefix_to_dataproto(node_output.batch, cur_node)                        
@@ -476,6 +523,7 @@ class DAGWorker(Worker):
         from loguru import logger
         
         rollout_worker = agent_group[NodeRole.ROLLOUT]
+        rollout_n = self.config.actor_rollout_ref.rollout.n
         
         # Set meta_info for embodied training
         batch["eos_token_id"] = NonTensorData(self.validate_tokenizer.eos_token_id if self.validate_tokenizer else None)
@@ -486,17 +534,21 @@ class DAGWorker(Worker):
             f"{batch.batch_size[0]}, "
             f"eos_token_id={batch['eos_token_id']}, "
             f"pad_token_id={batch['pad_token_id']}, "
-            f"n_samples={batch['n_samples']}, "
+            f"n_samples={batch['n_samples']} (dataloader already repeated {rollout_n}x), "
         )
         # Generate embodied episodes
         gen_output = rollout_worker.generate_sequences(batch)
-        metrics = gen_output["metrics"]
+        # Extract metrics (may be wrapped in NonTensorData)
+        raw_metrics = gen_output.get("metrics", {}) if hasattr(gen_output, "get") else {}
+        metrics = raw_metrics.data if hasattr(raw_metrics, 'data') else (raw_metrics if isinstance(raw_metrics, dict) else {})
+
+        # Merge generated data into batch
         batch.update(gen_output)
-        # Add unique IDs for tracking
+        
         # Compute response mask if not already present
         if "response_mask" not in batch:
             batch["response_mask"] = compute_response_mask(batch)
-        
+
         return NodeOutput(batch=batch, metrics=metrics)
     
     
@@ -522,6 +574,7 @@ class DAGWorker(Worker):
     @DistProfiler.annotate(role="compute_reward")
     def compute_reward(self, config, batch: TensorDict, **kwargs) -> NodeOutput:
         """Calculates rewards for a batch of generated sequences."""
+        from loguru import logger
         
         if not self.check_mode() and kwargs["cur_tp_rank"] != 0:
             return NodeOutput(batch=batch, metrics={})
@@ -1124,7 +1177,9 @@ class DAGWorker(Worker):
                         # Convert uid to string (handle tensor uid from postprocess_sampling)
                         uid_val = getattr(sample, 'uid', uuid.uuid4().int)
                         if isinstance(uid_val, torch.Tensor):
-                            uid_str = str(int(uid_val.item()))
+                            uid_str = str(uid_val.item())  # Works for both int and string tensors
+                        elif hasattr(uid_val, 'tolist'):
+                            uid_str = str(uid_val.tolist())  # Handle numpy types
                         else:
                             uid_str = str(uid_val)
                         
@@ -1150,16 +1205,14 @@ class DAGWorker(Worker):
                     except RuntimeError:
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
-                    
-                    # Get the current worker's node ID to pass to the DataCoordinator
-                    # This is necessary because when the DataCoordinator receives a remote call,
-                    # ray.get_runtime_context().get_node_id() returns the DataCoordinator's node_id,
-                    # not the caller's node_id
+
                     caller_node_id = ray.get_runtime_context().get_node_id()
-                    
+
                     put_future = self.data_coordinator.put_batch.remote(sample_infos, sample_refs, caller_node_id)
                     loop.run_until_complete(put_future)
-                    logger.info(f"Rank {self._rank}: ✅ Successfully PUT {len(samples)} samples to DataCoordinator for key '{key}' (source_dp={source_dp_size}, dest_dp={dest_dp_size})")
+
+                    if self._rank == 0:
+                        logger.info(f"Rank 0: PUT {len(samples)} samples to DataCoordinator for '{key}'")
 
         except Exception as e:
             logger.error(f"Rank {self._rank}: Unexpected error in put_data_to_buffers for key '{key}': {e}", exc_info=True)
@@ -1206,7 +1259,7 @@ class DAGWorker(Worker):
             
             adjusted_batch_size = int(self.config.data.train_batch_size * rollout_n / cur_dp_size)
             
-            logger.info(
+            logger.debug(
                 f"Rank {self._rank}: Requesting from DataCoordinator: "
                 f"key='{key}', cur_dp={cur_dp_size}, "
                 f"adjusted_batch_size={adjusted_batch_size} (train_bs={self.config.data.train_batch_size} * rollout_n={rollout_n} / cur_dp={cur_dp_size})"
@@ -1214,26 +1267,39 @@ class DAGWorker(Worker):
             
             # Use filter_plugin to get only samples with matching key
             # Use balance_partitions to optimize sample distribution by length
+            # Use cache_key to enable multi-rank caching within the same node
             sample_refs = loop.run_until_complete(
                 self.data_coordinator.get_batch.remote(
                     adjusted_batch_size,
                     cur_dp_rank,
                     filter_plugin=key_filter,
-                    balance_partitions=cur_dp_size
+                    balance_partitions=cur_dp_size,
+                    cache_key=key
                 )
             )
 
+        # Check if dynamic sampling is enabled (DAPO/embodied)
+        embodied_sampling = self.config.algorithm.embodied_sampling
+        is_dynamic_sampling = (
+            self.config.algorithm.filter_groups.enable
+            or embodied_sampling.filter_accuracy
+            or embodied_sampling.filter_truncated
+        )
+
         if not sample_refs:
-            logger.warning(f"Rank {self._rank}: ❌ DataCoordinator returned EMPTY list for key '{key}' (adjusted_batch_size={adjusted_batch_size})")
+            if is_dynamic_sampling:
+                logger.debug(f"Rank {self._rank}: Waiting for data accumulation for key '{key}' (need {adjusted_batch_size} samples)")
+            else:
+                logger.warning(f"Rank {self._rank}: DataCoordinator returned empty list for key '{key}' (adjusted_batch_size={adjusted_batch_size})")
             return None
 
-        logger.info(f"Rank {self._rank}: ✅ Retrieved {len(sample_refs)} sample references from DataCoordinator for key '{key}'")
+        if self._rank == 0:
+            logger.info(f"Rank 0: GET {len(sample_refs)} samples from DataCoordinator for '{key}'")
 
         with timer(self.enable_perf, f"ray_get_samples_{key}", timing_raw):
             samples = ray.get(sample_refs)
 
         with timer(self.enable_perf, f"collate_samples_{key}", timing_raw):
-            # Collate the list of Sample objects back into a single TensorDict
             tensordict = Samples2Dict(samples)
 
         return tensordict

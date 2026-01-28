@@ -216,7 +216,7 @@ class EmbodiedHFRollout(BaseRollout):
         total_batch_size = prompts.batch_size[0]
         n_samples = prompts['n_samples'] if 'n_samples' in prompts else 1
         assert self.num_workers >= n_samples, f"rollout num_workers({self.num_workers}) must be >= n_samples({n_samples})"
-        batch_size_per_chunk = self.num_workers // n_samples
+        batch_size_per_chunk = self.num_workers
         num_chunks = (total_batch_size + batch_size_per_chunk - 1) // batch_size_per_chunk
         logger.info(f"RobHFRollout.generate_sequences called with total batch size {total_batch_size}, "
                     f"n_samples {n_samples}, num_workers {self.num_workers}, batch_size_per_chunk {batch_size_per_chunk}, "
@@ -312,17 +312,24 @@ class EmbodiedHFRollout(BaseRollout):
     def _generate_chunk_rollout(self, prompts):
         generate_tic = time.time()
         self.model.eval()
-        # n_samples = prompts.get('n_samples', 1)
+        
+        # Validation mode has no n_samples; training mode has n_samples for repeat
+        is_valid = 'n_samples' not in prompts.keys()
+        n_samples = 1
+        if not is_valid:
+            val = prompts['n_samples']
+            n_samples = val.item() if hasattr(val, 'item') else int(val)
+        global_steps = prompts['global_steps'] if 'global_steps' in prompts.keys() else 0
+
+        # dataloader already did repeat, rollout does NOT repeat
         task_id = prompts['task_id']
         trial_id = prompts['trial_id']
         task_suite_name = prompts['task_suite_name']
+        
         assert np.all(task_suite_name == self.config.embodied.env.env_name), \
             "All task_suite_name in the batch must match the rollout config"
         max_steps = self.config.embodied.env.max_steps
         chunk_size = task_id.size(0)
-
-        is_valid = "n_samples" in prompts
-        global_steps = prompts.get('global_steps', 0) if is_valid else 0
 
         timing_dict = {}
 
@@ -436,7 +443,7 @@ class EmbodiedHFRollout(BaseRollout):
             
             batch["complete"] = torch.tensor(batch["complete"], dtype=torch.bool, device=batch['responses'].device)
             batch["finish_step"] = torch.tensor(batch["finish_step"], dtype=torch.int64, device=batch['responses'].device)
-            # 构建 batch
+            # Build batch
             names = batch["task_file_name"]
             max_len = 50 # max(len(n) for n in names)
             padded = [n.ljust(max_len, '\0') for n in names]
@@ -484,6 +491,7 @@ class EmbodiedHFRollout(BaseRollout):
         output_batch = TensorDict(
             batch,
             batch_size=chunk_size)
+
         return output_batch
 
     @torch.no_grad()

@@ -33,7 +33,11 @@ from safetensors.torch import save_file
 from torch.distributed import ProcessGroup, init_device_mesh
 from torch.distributed.device_mesh import DeviceMesh
 from tensordict import TensorDict
-from tensordict.tensorclass import NonTensorData
+# Handle different tensordict versions - NonTensorData location varies
+try:
+    from tensordict import NonTensorData
+except ImportError:
+    from tensordict.tensorclass import NonTensorData
 import siirl.utils.model_utils.torch_functional as F
 from typing import Any, Dict, List, Optional, Union, Set
 from siirl.models.loader import load_tokenizer

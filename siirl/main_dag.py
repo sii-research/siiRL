@@ -14,6 +14,7 @@
 
 import os
 import time
+from pathlib import Path
 import ray
 
 from siirl.execution.scheduler.enums import AdvantageEstimator, AlgorithmType, WorkflowType
@@ -39,6 +40,46 @@ RAY_RUNTIME_ENV_VARS = {
 # The main runner is an orchestrator, not a heavy workload.
 # Assigning it a full CPU is often wasteful. A fractional CPU is more efficient.
 MAIN_RUNNER_CPU_RESERVATION = 5
+
+
+def _maybe_prepare_embodied_manifest(siirl_args: SiiRLArguments) -> None:
+    """
+    Generate LIBERO manifests for embodied runs (srpo-compatible behavior).
+    """
+    from loguru import logger
+
+    is_embodied_model = (
+        hasattr(siirl_args.actor_rollout_ref, "model")
+        and hasattr(siirl_args.actor_rollout_ref.model, "model_type")
+        and siirl_args.actor_rollout_ref.model.model_type == "embodied"
+    )
+    if not is_embodied_model:
+        return
+
+    # Lazy import to avoid requiring libero for non-embodied workflows
+    from siirl.data_coordinator.dataloader.embodied_preprocess import prepare_libero_train_valid_datasets
+
+    embodied = siirl_args.actor_rollout_ref.embodied
+    if embodied is None:
+        return
+    env = embodied.env
+
+    if not siirl_args.data.train_files:
+        raise ValueError(
+            "For embodied training, `data.train_files` must be specified. "
+            "It is used as the output path for the generated task manifest."
+        )
+
+    output_dir = os.path.dirname(os.path.expanduser(siirl_args.data.train_files[0]))
+    logger.info("Embodied AI run detected. Generating task manifest...")
+    train_file, valid_file = prepare_libero_train_valid_datasets(
+        task_suite_name=env.env_name,
+        num_trials_per_task=env.num_trials_per_task,
+        dataset_dir=output_dir,
+    )
+    siirl_args.data.train_files = [str(train_file)]
+    siirl_args.data.val_files = [str(valid_file)]
+    logger.success(f"Task manifests generated and configured at: {output_dir}")
 
 
 def load_pipeline(siirl_args: SiiRLArguments) -> TaskGraph:
@@ -246,6 +287,8 @@ def main() -> None:
     # Parse the complete configuration into a structured object
     siirl_args = parse_config()
     log_dict_formatted(siirl_args.to_dict(), "SiiRLArguments")
+
+    _maybe_prepare_embodied_manifest(siirl_args)
 
     # Launch the main orchestration actor and wait for it to complete.
     logger.info("Starting MainRunner actor to orchestrate the job.")

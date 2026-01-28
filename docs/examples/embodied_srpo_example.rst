@@ -8,18 +8,6 @@ This guide explains how to perform Embodied AI training using the SRPO algorithm
 
 This example demonstrates how to perform RL training on an `OpenVLA-oft-7B` model using the SRPO algorithm on the `libero_long` benchmark.
 
-.. important::
-
-   **Branch Requirement (Temporary)**: To run Embodied SRPO training, you must currently use the ``feature/srpo-embodied`` branch of the siiRL repository. This branch contains all the necessary code for embodied AI training with SRPO.
-
-   .. note::
-      This is a temporary requirement. The embodied SRPO feature will be merged into the main branch in a future release.
-
-   .. code:: bash
-
-      cd /path/to/siiRL
-      git checkout feature/srpo-embodied
-
 Step 1: Prepare the Environment
 -------------------------------
 

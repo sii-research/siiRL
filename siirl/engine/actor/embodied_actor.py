@@ -497,6 +497,7 @@ class RobDataParallelPPOActor(BasePPOActor):
         torch.cuda.synchronize()
         torch.distributed.barrier()
         torch.cuda.empty_cache()
+
         return metrics
 
     
@@ -504,10 +505,8 @@ class RobDataParallelPPOActor(BasePPOActor):
         
         if bacth_data['train_mode'] ==True:
             self.actor_module.train()
-            print("train mode")
         else:
             self.actor_module.eval()
-            print("eval mode")
 
         assert self.config.ppo_mini_batch_size % self.config.ppo_micro_batch_size_per_gpu == 0
         self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
@@ -519,7 +518,6 @@ class RobDataParallelPPOActor(BasePPOActor):
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         dataloader = batch.split(self.config.ppo_mini_batch_size)
-        print("dataloader_length:", len(dataloader))
         
         metrics = {}
         for batch_idx, data in enumerate(dataloader):

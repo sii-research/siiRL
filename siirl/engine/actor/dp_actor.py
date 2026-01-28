@@ -22,7 +22,12 @@ from typing import Tuple
 
 import torch
 import numpy as np
-from tensordict import TensorDict, NonTensorData
+from tensordict import TensorDict
+# Handle different tensordict versions - NonTensorData location varies
+try:
+    from tensordict import NonTensorData
+except ImportError:
+    from tensordict.tensorclass import NonTensorData
 from loguru import logger
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -446,8 +451,6 @@ class DataParallelPPOActor(BasePPOActor):
 
                     # NOTE: Both mismatch diagnostic metrics (PPL, KL, etc.) and IS weight metrics
                     # are computed centrally in ray_trainer.py for consistency and efficiency.
-                    # This ensures metrics are computed uniformly across all batches at the trainer level
-                    # and avoids redundant computation across workers and micro-batches.
 
                     # gpg -> core_algos.compute_policy_loss_gpg
                     # clip_cov -> core_algos.compute_policy_loss_clip_cov
