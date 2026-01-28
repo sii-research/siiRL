@@ -1177,7 +1177,9 @@ class DAGWorker(Worker):
                         # Convert uid to string (handle tensor uid from postprocess_sampling)
                         uid_val = getattr(sample, 'uid', uuid.uuid4().int)
                         if isinstance(uid_val, torch.Tensor):
-                            uid_str = str(int(uid_val.item()))
+                            uid_str = str(uid_val.item())  # Works for both int and string tensors
+                        elif hasattr(uid_val, 'tolist'):
+                            uid_str = str(uid_val.tolist())  # Handle numpy types
                         else:
                             uid_str = str(uid_val)
                         
