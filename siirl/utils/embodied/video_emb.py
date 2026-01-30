@@ -17,9 +17,9 @@ import torch
 
 from loguru import logger
 
-import src.datasets.utils.video.transforms as video_transforms
-import src.datasets.utils.video.volume_transforms as volume_transforms
-from src.models.vision_transformer import vit_giant_xformers_rope
+import siirl.third_party.vjepa2.datasets.utils.video.transforms as video_transforms
+import siirl.third_party.vjepa2.datasets.utils.video.volume_transforms as volume_transforms
+from siirl.third_party.vjepa2.models.vision_transformer import vit_giant_xformers_rope
 
 # Constants for video normalization
 IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)

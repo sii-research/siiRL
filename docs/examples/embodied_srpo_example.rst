@@ -20,8 +20,7 @@ Ensure you have the necessary environment variables set. This includes the path 
 .. code:: bash
 
    export SIIRL_DIR="/path/to/siiRL"
-   export VJEPA2_DIR="$HOME/code/vjepa2"  # V-JEPA 2 code repository (https://github.com/facebookresearch/vjepa2)
-   export PYTHONPATH="$SIIRL_DIR:/path/to/LIBERO:$VJEPA2_DIR:$PYTHONPATH"
+   export PYTHONPATH="$SIIRL_DIR:/path/to/LIBERO:$PYTHONPATH"
 
 Step 2: Prepare the Models
 --------------------------
@@ -39,19 +38,14 @@ You need the following models:
 
 2.  **Visual Encoder**: A visual encoder model V-JEPA is **required** for processing visual observations.
 
-    - First, clone the V-JEPA 2 code repository from GitHub (`facebookresearch/vjepa2 <https://github.com/facebookresearch/vjepa2>`_):
+    .. note::
+       The V-JEPA 2 code is now bundled with siiRL (in ``siirl/third_party/vjepa2/``), so you no longer need to clone the repository manually.
+
+    Download the V-JEPA 2 model weights from Hugging Face: `Sylvest/vjepa2-vit-g <https://huggingface.co/Sylvest/vjepa2-vit-g>`_
     
-      .. code:: bash
+    .. code:: bash
 
-         git clone https://github.com/facebookresearch/vjepa2.git $HOME/code/vjepa2
-
-      Make sure to add the V-JEPA 2 directory to your ``PYTHONPATH`` as shown in Step 1.
-
-    - Then, download the V-JEPA 2 model weights from Hugging Face: `Sylvest/vjepa2-vit-g <https://huggingface.co/Sylvest/vjepa2-vit-g>`_
-    
-      .. code:: bash
-
-         huggingface-cli download Sylvest/vjepa2-vit-g --local-dir $HOME/models/vjepa2
+       huggingface-cli download Sylvest/vjepa2-vit-g --local-dir $HOME/models/vjepa2
 
 Set the paths to these resources in your environment or script:
 
@@ -107,7 +101,6 @@ Below is an example script `run_embodied_srpo.sh` to run SRPO training on `liber
 To train on a specific task, modify the following paths in the script to match your actual environment:
 
 -   ``SIIRL_DIR``: Path to the siiRL repository
--   ``VJEPA2_DIR``: Path to the V-JEPA2 repository (for ``PYTHONPATH``)
 -   ``HOME_PATH``: Your home directory or base path for models and data
 -   ``MODEL_PATH``: Path to the corresponding SFT model for the task
 -   ``VJEPA_MODEL_PATH``: Path to the V-JEPA 2 model weights file
@@ -126,7 +119,7 @@ To train on a specific task, modify the following paths in the script to match y
 
     # --- Environment Setup (Critical for siiRL) ---
     export SIIRL_DIR="${SIIRL_DIR:-your_siirl_path}"
-    export PYTHONPATH="$SIIRL_DIR:/root/LIBERO/:${VJEPA2_DIR:-your_vjepa2_path}:$PYTHONPATH"
+    export PYTHONPATH="$SIIRL_DIR:/root/LIBERO/:$PYTHONPATH"
 
     # --- Experiment and Model Definition ---
     export DATASET=libero_long

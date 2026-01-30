@@ -8,7 +8,7 @@ set -e
 
 # --- Environment Setup (Critical for siiRL) ---
 export SIIRL_DIR="${SIIRL_DIR:your_siirl_path}"
-export PYTHONPATH="$SIIRL_DIR:/root/LIBERO/:your_vjepa2_path:$PYTHONPATH"
+export PYTHONPATH="$SIIRL_DIR:/root/LIBERO/:$PYTHONPATH"
 
 # --- Experiment and Model Definition ---
 export DATASET=libero_object
